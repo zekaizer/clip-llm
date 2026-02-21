@@ -1,6 +1,7 @@
 use std::sync::mpsc;
 use std::thread;
 
+use tokio::sync::mpsc as tokio_mpsc;
 use tracing::{debug, error, info};
 
 use crate::api::client::LlmClient;
@@ -18,8 +19,11 @@ pub enum WorkerResponse {
 
 /// Spawn a worker thread with a tokio runtime for async LLM calls.
 /// Returns the thread handle.
+///
+/// Uses `tokio::sync::mpsc` for the command channel so that `.recv().await`
+/// does not block the single-threaded tokio runtime.
 pub fn spawn_worker(
-    cmd_rx: mpsc::Receiver<WorkerCommand>,
+    mut cmd_rx: tokio_mpsc::UnboundedReceiver<WorkerCommand>,
     resp_tx: mpsc::SyncSender<WorkerResponse>,
     llm: LlmClient,
 ) -> thread::JoinHandle<()> {
@@ -32,9 +36,9 @@ pub fn spawn_worker(
         rt.block_on(async move {
             let mut cancel_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
 
-            loop {
-                match cmd_rx.recv() {
-                    Ok(WorkerCommand::Translate { text }) => {
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    WorkerCommand::Translate { text } => {
                         // Cancel any in-flight request.
                         if let Some(tx) = cancel_tx.take() {
                             let _ = tx.send(());
@@ -85,18 +89,16 @@ pub fn spawn_worker(
                             let _ = resp_tx.send(response);
                         });
                     }
-                    Ok(WorkerCommand::Cancel) => {
+                    WorkerCommand::Cancel => {
                         if let Some(tx) = cancel_tx.take() {
                             let _ = tx.send(());
                             info!("worker: cancelled by user");
                         }
                     }
-                    Err(_) => {
-                        info!("worker: command channel closed, exiting");
-                        break;
-                    }
                 }
             }
+
+            info!("worker: command channel closed, exiting");
         });
     })
 }

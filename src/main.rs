@@ -51,7 +51,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     info!("registered hotkey: Ctrl+Shift+C (single-tap: clipboard, double-tap: copy selection)");
 
     // Set up channels between main thread and worker.
-    let (cmd_tx, cmd_rx) = mpsc::sync_channel::<WorkerCommand>(4);
+    // Command channel uses tokio::sync::mpsc so worker can .recv().await
+    // without blocking the single-threaded tokio runtime.
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerCommand>();
     let (resp_tx, resp_rx) = mpsc::sync_channel::<WorkerResponse>(4);
 
     let llm = LlmClient::new()?;

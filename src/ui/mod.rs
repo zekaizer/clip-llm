@@ -3,6 +3,8 @@ mod overlay;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use tokio::sync::mpsc as tokio_mpsc;
+
 use eframe::egui;
 use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
 use tracing::{error, info};
@@ -28,7 +30,7 @@ pub enum OverlayState {
 
 pub struct OverlayApp {
     state: OverlayState,
-    cmd_tx: mpsc::SyncSender<WorkerCommand>,
+    cmd_tx: tokio_mpsc::UnboundedSender<WorkerCommand>,
     resp_rx: mpsc::Receiver<WorkerResponse>,
     clipboard: ClipboardManager,
     platform: NativePlatform,
@@ -38,7 +40,7 @@ pub struct OverlayApp {
 
 impl OverlayApp {
     pub fn new(
-        cmd_tx: mpsc::SyncSender<WorkerCommand>,
+        cmd_tx: tokio_mpsc::UnboundedSender<WorkerCommand>,
         resp_rx: mpsc::Receiver<WorkerResponse>,
         clipboard: ClipboardManager,
     ) -> Self {
