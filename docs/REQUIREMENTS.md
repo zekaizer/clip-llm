@@ -134,6 +134,22 @@ Replace blocking HTTP with async. Add SSE streaming support.
    - Configurable request timeout (default: 30s)
    - Cancel in-flight request on next hotkey press
 
+4. **Process mode switching**
+   - `ProcessMode` enum: `Translate` (default), `Correct`
+   - Extensible: add new modes by extending the enum + `ALL` array
+   - Each mode has its own system prompt via `ProcessMode::system_prompt()`
+
+5. **Mode tab bar in overlay**
+   - Top of overlay shows tab bar with all modes from `ProcessMode::ALL`
+   - Selected tab: white text + highlighted background; unselected: gray + transparent
+   - Dynamically renders from `ALL` — no UI code change needed to add modes
+
+6. **Mode switching behavior**
+   - During Processing: cancel current request, re-send with new mode
+   - On Result/Error: re-process original input text with new mode
+   - Mode persists between invocations (next hotkey trigger uses last selected mode)
+   - Original input text retained for re-processing on mode switch
+
 ---
 
 ## Phase 3 — Status Feedback + System Tray
