@@ -103,6 +103,10 @@ mod tests {
         fn check_accessibility(&self) -> Result<(), PlatformError> {
             Ok(())
         }
+
+        fn mouse_position(&self) -> Option<(f64, f64)> {
+            None
+        }
     }
 
     #[test]

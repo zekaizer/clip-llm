@@ -5,9 +5,15 @@ use regex::Regex;
 static THINK_BLOCK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?s)<think>.*?</think>").unwrap());
 
-/// Strip `<think>...</think>` blocks from LLM response and trim whitespace.
+/// Strip `<think>...</think>` blocks from LLM response.
+/// Only trims leading newlines (from think-block removal) and trailing whitespace,
+/// preserving leading indentation on the first content line.
 pub fn strip_think_blocks(text: &str) -> String {
-    THINK_BLOCK_RE.replace_all(text, "").trim().to_string()
+    THINK_BLOCK_RE
+        .replace_all(text, "")
+        .trim_end()
+        .trim_start_matches(|c: char| c == '\n' || c == '\r')
+        .to_string()
 }
 
 #[cfg(test)]
@@ -50,8 +56,14 @@ mod tests {
     }
 
     #[test]
-    fn trims_surrounding_whitespace() {
+    fn trims_trailing_whitespace_only() {
         let input = "  <think>x</think>  result  ";
-        assert_eq!(strip_think_blocks(input), "result");
+        assert_eq!(strip_think_blocks(input), "    result");
+    }
+
+    #[test]
+    fn preserves_leading_indentation() {
+        let input = "<think>x</think>\n    indented\n        more";
+        assert_eq!(strip_think_blocks(input), "    indented\n        more");
     }
 }
