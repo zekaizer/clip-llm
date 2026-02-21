@@ -4,6 +4,8 @@
 //! (OverlayApp) must execute.  This separation makes the state transition
 //! logic fully unit-testable.
 
+use std::collections::HashMap;
+
 use crate::ProcessMode;
 
 // ---------------------------------------------------------------------------
@@ -94,6 +96,8 @@ pub struct StateMachine {
     user_repositioned: bool,
     /// True once the window has received focus after show_window.
     has_been_focused: bool,
+    /// Per-mode result cache, valid only for the current original_text.
+    mode_cache: HashMap<ProcessMode, String>,
 }
 
 impl StateMachine {
@@ -106,6 +110,7 @@ impl StateMachine {
             current_request_id: 0,
             user_repositioned: false,
             has_been_focused: false,
+            mode_cache: HashMap::new(),
         }
     }
 
@@ -183,6 +188,7 @@ impl StateMachine {
     fn on_text_ready(&mut self, text: String) -> Vec<UiEffect> {
         let old_state = self.state.clone();
         self.original_text = Some(text.clone());
+        self.mode_cache.clear();
         self.next_request_id += 1;
         self.current_request_id = self.next_request_id;
         self.state = OverlayState::Processing;
@@ -211,6 +217,7 @@ impl StateMachine {
         if !matches!(self.state, OverlayState::Processing) {
             return vec![];
         }
+        self.mode_cache.insert(self.mode, text.clone());
         self.state = OverlayState::Result(text.clone());
         vec![
             UiEffect::WriteClipboard(text),
@@ -236,6 +243,7 @@ impl StateMachine {
         }
         self.state = OverlayState::Hidden;
         self.original_text = None;
+        self.mode_cache.clear();
         self.has_been_focused = false;
         vec![UiEffect::HideWindow]
     }
@@ -246,6 +254,7 @@ impl StateMachine {
         }
         self.state = OverlayState::Hidden;
         self.original_text = None;
+        self.mode_cache.clear();
         self.has_been_focused = false;
         vec![UiEffect::SendCancel, UiEffect::HideWindow]
     }
@@ -258,34 +267,53 @@ impl StateMachine {
 
         match &self.state {
             OverlayState::Processing => {
-                // Cancel current, re-send with new mode.
-                self.next_request_id += 1;
-                self.current_request_id = self.next_request_id;
-                let mut effects = vec![UiEffect::SendCancel];
-                if let Some(text) = self.original_text.clone() {
-                    effects.push(UiEffect::SendProcess {
-                        text,
-                        mode: self.mode,
-                        request_id: self.current_request_id,
-                    });
+                if let Some(cached) = self.mode_cache.get(&new_mode).cloned() {
+                    // Cache hit: cancel in-flight, return cached result.
+                    self.state = OverlayState::Result(cached.clone());
+                    vec![
+                        UiEffect::SendCancel,
+                        UiEffect::WriteClipboard(cached),
+                        UiEffect::ResetAreas,
+                    ]
+                } else {
+                    // Cache miss: cancel current, re-send with new mode.
+                    self.next_request_id += 1;
+                    self.current_request_id = self.next_request_id;
+                    let mut effects = vec![UiEffect::SendCancel];
+                    if let Some(text) = self.original_text.clone() {
+                        effects.push(UiEffect::SendProcess {
+                            text,
+                            mode: self.mode,
+                            request_id: self.current_request_id,
+                        });
+                    }
+                    effects
                 }
-                effects
             }
             OverlayState::Result(_) | OverlayState::Error(_) => {
-                // Re-process with new mode.
-                self.next_request_id += 1;
-                self.current_request_id = self.next_request_id;
-                self.state = OverlayState::Processing;
-                let mut effects = Vec::new();
-                if let Some(text) = self.original_text.clone() {
-                    effects.push(UiEffect::SendProcess {
-                        text,
-                        mode: self.mode,
-                        request_id: self.current_request_id,
-                    });
+                if let Some(cached) = self.mode_cache.get(&new_mode).cloned() {
+                    // Cache hit: return cached result directly.
+                    self.state = OverlayState::Result(cached.clone());
+                    vec![
+                        UiEffect::WriteClipboard(cached),
+                        UiEffect::ResetAreas,
+                    ]
+                } else {
+                    // Cache miss: re-process with new mode.
+                    self.next_request_id += 1;
+                    self.current_request_id = self.next_request_id;
+                    self.state = OverlayState::Processing;
+                    let mut effects = Vec::new();
+                    if let Some(text) = self.original_text.clone() {
+                        effects.push(UiEffect::SendProcess {
+                            text,
+                            mode: self.mode,
+                            request_id: self.current_request_id,
+                        });
+                    }
+                    effects.push(UiEffect::ResetAreas);
+                    effects
                 }
-                effects.push(UiEffect::ResetAreas);
-                effects
             }
             OverlayState::Hidden => vec![],
         }
@@ -297,6 +325,7 @@ impl StateMachine {
         }
         self.state = OverlayState::Hidden;
         self.original_text = None;
+        self.mode_cache.clear();
         self.has_been_focused = false;
         vec![UiEffect::HideWindow]
     }
@@ -746,5 +775,120 @@ mod tests {
             UiEffect::SendProcess { mode: ProcessMode::Summarize, .. }
         )));
         assert!(effects.contains(&UiEffect::ResetAreas));
+    }
+
+    // === Mode cache ===
+
+    #[test]
+    fn switch_back_to_cached_mode_from_result() {
+        let mut sm = new_sm();
+        // Translate → Result
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerResult {
+            text: "translated".into(),
+            request_id: rid,
+        });
+        // Switch to Correct → Result
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Correct));
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerResult {
+            text: "corrected".into(),
+            request_id: rid,
+        });
+        assert_eq!(*sm.state(), OverlayState::Result("corrected".into()));
+
+        // Switch back to Translate: cache hit
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Translate));
+        assert_eq!(*sm.state(), OverlayState::Result("translated".into()));
+        assert!(effects.contains(&UiEffect::WriteClipboard("translated".into())));
+        assert!(effects.contains(&UiEffect::ResetAreas));
+        // No SendProcess — served from cache.
+        assert!(!effects.iter().any(|e| matches!(e, UiEffect::SendProcess { .. })));
+    }
+
+    #[test]
+    fn switch_to_cached_mode_from_processing() {
+        let mut sm = new_sm();
+        // Translate → Result
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerResult {
+            text: "translated".into(),
+            request_id: rid,
+        });
+        // Switch to Correct → Processing (in-flight)
+        sm.handle(UiEvent::UserSwitchMode(ProcessMode::Correct));
+        assert_eq!(*sm.state(), OverlayState::Processing);
+
+        // Switch back to Translate while Correct is still processing: cache hit
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Translate));
+        assert_eq!(*sm.state(), OverlayState::Result("translated".into()));
+        assert!(effects.contains(&UiEffect::SendCancel));
+        assert!(effects.contains(&UiEffect::WriteClipboard("translated".into())));
+        assert!(!effects.iter().any(|e| matches!(e, UiEffect::SendProcess { .. })));
+    }
+
+    #[test]
+    fn switch_to_cached_mode_from_error() {
+        let mut sm = new_sm();
+        // Translate → Result
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerResult {
+            text: "ok".into(),
+            request_id: rid,
+        });
+        // Switch to Correct → Error
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Correct));
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerError {
+            message: "fail".into(),
+            request_id: rid,
+        });
+        assert_eq!(*sm.state(), OverlayState::Error("fail".into()));
+
+        // Switch back to Translate: cache hit
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Translate));
+        assert_eq!(*sm.state(), OverlayState::Result("ok".into()));
+        assert!(effects.contains(&UiEffect::WriteClipboard("ok".into())));
+        assert!(!effects.iter().any(|e| matches!(e, UiEffect::SendProcess { .. })));
+    }
+
+    #[test]
+    fn new_text_ready_clears_cache() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerResult {
+            text: "translated".into(),
+            request_id: rid,
+        });
+        // Cache now has Translate → "translated"
+
+        // New text arrives → cache cleared, re-processes
+        let effects = sm.handle(UiEvent::TextReady("world".into()));
+        assert_eq!(*sm.state(), OverlayState::Processing);
+        assert!(effects.iter().any(|e| matches!(e, UiEffect::SendProcess { .. })));
+    }
+
+    #[test]
+    fn close_clears_cache() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerResult {
+            text: "translated".into(),
+            request_id: rid,
+        });
+
+        // Close overlay → cache cleared
+        sm.handle(UiEvent::UserClose);
+        assert_eq!(*sm.state(), OverlayState::Hidden);
+
+        // Re-enter with same text: should go to Processing (not cached)
+        let effects = sm.handle(UiEvent::TextReady("hello".into()));
+        assert_eq!(*sm.state(), OverlayState::Processing);
+        assert!(effects.iter().any(|e| matches!(e, UiEffect::SendProcess { .. })));
     }
 }

@@ -20,7 +20,7 @@ pub const SECONDARY_LANG: &str = "English";
 
 /// Available processing modes for the LLM pipeline.
 /// Add new variants here and to `ALL` to extend the tab bar automatically.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ProcessMode {
     #[default]
     Translate,
