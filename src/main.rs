@@ -49,16 +49,18 @@ fn configure_fonts(ctx: &egui::Context) {
                 "system_cjk".to_owned(),
                 egui::FontData::from_owned(data).into(),
             );
+            // Insert before NotoEmoji so the CJK font's broad Unicode
+            // coverage is tried before emoji glyphs block the fallback.
             fonts
                 .families
                 .get_mut(&egui::FontFamily::Proportional)
                 .unwrap()
-                .push("system_cjk".to_owned());
+                .insert(1, "system_cjk".to_owned());
             fonts
                 .families
                 .get_mut(&egui::FontFamily::Monospace)
                 .unwrap()
-                .push("system_cjk".to_owned());
+                .insert(1, "system_cjk".to_owned());
             info!("loaded CJK font from {path}");
             break;
         }
