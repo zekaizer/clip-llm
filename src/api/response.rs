@@ -12,7 +12,7 @@ pub fn strip_think_blocks(text: &str) -> String {
     THINK_BLOCK_RE
         .replace_all(text, "")
         .trim_end()
-        .trim_start_matches(|c: char| c == '\n' || c == '\r')
+        .trim_start_matches(['\n', '\r'])
         .to_string()
 }
 

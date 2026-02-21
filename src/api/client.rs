@@ -6,19 +6,12 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
-use crate::ApiError;
+use crate::{ApiError, ProcessMode};
 
 // Defaults — overridable via environment variables.
 const DEFAULT_API_ENDPOINT: &str = "http://localhost:8000/v1";
 const CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
 const DEFAULT_MODEL_NAME: &str = "MiniMaxAI/MiniMax-M2.5";
-const SYSTEM_PROMPT: &str = "\
-You are a Korean↔English translator for software engineering text. \
-Auto-detect the input language: if Korean, translate to English; if English, translate to Korean. \
-Rules: \
-- If the input contains code: preserve all whitespace, indentation, and structure exactly. Never dedent or normalize. Do not translate code, variable names, or identifiers — only translate comments and string literals. \
-- If the input is plain text: translate naturally while keeping the general structure. \
-- Output the translation only — no preamble, labels, explanations, or markdown formatting.";
 const TEMPERATURE: f64 = 0.1;
 const MAX_TOKENS: u32 = 1024;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
@@ -118,14 +111,14 @@ impl LlmClient {
 
     /// Send user text to the vLLM server and return the raw response content.
     /// Think-block stripping is handled separately by `response::strip_think_blocks`.
-    pub async fn complete(&self, user_text: &str) -> Result<String, ApiError> {
+    pub async fn complete(&self, user_text: &str, mode: ProcessMode) -> Result<String, ApiError> {
         let inner = &self.0;
         let body = ChatRequest {
             model: &inner.model,
             messages: vec![
                 Message {
                     role: "system",
-                    content: SYSTEM_PROMPT,
+                    content: mode.system_prompt(),
                 },
                 Message {
                     role: "user",

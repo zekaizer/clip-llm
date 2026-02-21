@@ -13,6 +13,7 @@ use crate::clipboard::ClipboardManager;
 use crate::hotkey::{HotkeyDetector, TapAction};
 use crate::platform::{NativePlatform, Platform};
 use crate::worker::{WorkerCommand, WorkerResponse};
+use crate::ProcessMode;
 
 /// Polling interval when overlay is hidden (for hotkey detection).
 const IDLE_POLL_MS: u64 = 100;
@@ -27,6 +28,9 @@ pub enum OverlayState {
 
 pub struct OverlayApp {
     state: OverlayState,
+    mode: ProcessMode,
+    /// Original input text, retained for re-processing on mode switch.
+    original_text: Option<String>,
     cmd_tx: tokio_mpsc::UnboundedSender<WorkerCommand>,
     resp_rx: mpsc::Receiver<WorkerResponse>,
     clipboard: ClipboardManager,
@@ -49,6 +53,8 @@ impl OverlayApp {
     ) -> Self {
         Self {
             state: OverlayState::Hidden,
+            mode: ProcessMode::default(),
+            original_text: None,
             cmd_tx,
             resp_rx,
             clipboard,
@@ -82,14 +88,14 @@ impl OverlayApp {
 
     fn trigger_single_tap(&mut self, ctx: &egui::Context) {
         match self.clipboard.read_clipboard() {
-            Ok(text) => self.start_translation(text, ctx),
+            Ok(text) => self.start_processing(text, ctx),
             Err(e) => self.show_error(e.to_string(), ctx),
         }
     }
 
     fn trigger_double_tap(&mut self, ctx: &egui::Context) {
         match self.clipboard.copy_and_read(&self.platform) {
-            Ok(text) => self.start_translation(text, ctx),
+            Ok(text) => self.start_processing(text, ctx),
             Err(e) => self.show_error(e.to_string(), ctx),
         }
     }
@@ -101,12 +107,47 @@ impl OverlayApp {
             .map(|(x, y)| egui::pos2(x as f32, y as f32));
     }
 
-    fn start_translation(&mut self, text: String, ctx: &egui::Context) {
-        info!("starting translation ({} chars)", text.len());
-        let _ = self.cmd_tx.send(WorkerCommand::Translate { text });
+    fn start_processing(&mut self, text: String, ctx: &egui::Context) {
+        info!("starting {} ({} chars)", self.mode.label(), text.len());
+        self.original_text = Some(text.clone());
+        let _ = self.cmd_tx.send(WorkerCommand::Process {
+            text,
+            mode: self.mode,
+        });
         self.state = OverlayState::Processing;
         self.capture_mouse_position();
         self.show_window(ctx);
+    }
+
+    fn switch_mode(&mut self, new_mode: ProcessMode) {
+        if self.mode == new_mode {
+            return;
+        }
+        self.mode = new_mode;
+
+        match &self.state {
+            OverlayState::Processing => {
+                // Cancel current request and re-send with new mode.
+                let _ = self.cmd_tx.send(WorkerCommand::Cancel);
+                if let Some(text) = self.original_text.clone() {
+                    let _ = self.cmd_tx.send(WorkerCommand::Process {
+                        text,
+                        mode: self.mode,
+                    });
+                }
+            }
+            OverlayState::Result(_) | OverlayState::Error(_) => {
+                // Re-process original text with new mode.
+                if let Some(text) = self.original_text.clone() {
+                    let _ = self.cmd_tx.send(WorkerCommand::Process {
+                        text,
+                        mode: self.mode,
+                    });
+                    self.state = OverlayState::Processing;
+                }
+            }
+            OverlayState::Hidden => {}
+        }
     }
 
     fn show_error(&mut self, message: String, ctx: &egui::Context) {
@@ -164,7 +205,7 @@ impl OverlayApp {
                     if let Err(e) = self.clipboard.write_text(&result) {
                         self.state = OverlayState::Error(e.to_string());
                     } else {
-                        info!("translation complete ({} chars), copied to clipboard", result.len());
+                        info!("{} complete ({} chars), copied to clipboard", self.mode.label(), result.len());
                         self.state = OverlayState::Result(result);
                     }
                 }
@@ -204,7 +245,7 @@ impl eframe::App for OverlayApp {
         self.poll_responses(ctx);
         self.poll_hotkeys(ctx);
 
-        let output = overlay::render(&self.state, ctx);
+        let output = overlay::render(&self.state, self.mode, ctx);
 
         // Resize viewport to fit content and re-center on spawn position.
         if let Some(desired) = output.desired_size {
@@ -226,6 +267,9 @@ impl eframe::App for OverlayApp {
             overlay::OverlayAction::StartDrag => {
                 self.user_repositioned = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+            overlay::OverlayAction::SwitchMode(new_mode) => {
+                self.switch_mode(new_mode);
             }
         }
 

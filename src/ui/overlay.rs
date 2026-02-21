@@ -1,6 +1,7 @@
 use eframe::egui;
 
 use super::OverlayState;
+use crate::ProcessMode;
 
 const OVERLAY_WIDTH: f32 = 480.0;
 const MAX_RESULT_HEIGHT: f32 = 400.0;
@@ -11,6 +12,7 @@ pub enum OverlayAction {
     Close,
     Cancel,
     StartDrag,
+    SwitchMode(ProcessMode),
 }
 
 pub struct OverlayOutput {
@@ -20,7 +22,7 @@ pub struct OverlayOutput {
 }
 
 /// Render the overlay panel. Returns action and desired viewport size.
-pub fn render(state: &OverlayState, ctx: &egui::Context) -> OverlayOutput {
+pub fn render(state: &OverlayState, mode: ProcessMode, ctx: &egui::Context) -> OverlayOutput {
     if matches!(state, OverlayState::Hidden) {
         return OverlayOutput {
             action: OverlayAction::None,
@@ -49,12 +51,15 @@ pub fn render(state: &OverlayState, ctx: &egui::Context) -> OverlayOutput {
             frame.show(ui, |ui| {
                 ui.set_width(OVERLAY_WIDTH);
 
+                render_tab_bar(ui, mode, &mut action);
+                ui.add_space(8.0);
+
                 match state {
                     OverlayState::Processing => {
                         ui.horizontal(|ui| {
                             ui.spinner();
                             ui.label(
-                                egui::RichText::new("Translating...")
+                                egui::RichText::new(mode.processing_label())
                                     .color(egui::Color32::WHITE)
                                     .size(18.0),
                             );
@@ -112,4 +117,31 @@ pub fn render(state: &OverlayState, ctx: &egui::Context) -> OverlayOutput {
         action,
         desired_size: Some(desired),
     }
+}
+
+fn render_tab_bar(ui: &mut egui::Ui, current: ProcessMode, action: &mut OverlayAction) {
+    ui.horizontal(|ui| {
+        for &mode in ProcessMode::ALL {
+            let is_selected = mode == current;
+            let text = egui::RichText::new(mode.label())
+                .size(14.0)
+                .color(if is_selected {
+                    egui::Color32::WHITE
+                } else {
+                    egui::Color32::from_gray(100)
+                });
+
+            let button = egui::Button::new(text)
+                .fill(if is_selected {
+                    egui::Color32::from_rgba_unmultiplied(60, 60, 60, 200)
+                } else {
+                    egui::Color32::TRANSPARENT
+                })
+                .corner_radius(6.0);
+
+            if ui.add(button).clicked() && !is_selected {
+                *action = OverlayAction::SwitchMode(mode);
+            }
+        }
+    });
 }
