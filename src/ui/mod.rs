@@ -302,6 +302,10 @@ impl eframe::App for OverlayApp {
                 crate::diagnostics::ScenarioAction::HideOverlay => {
                     self.hide_window(ctx);
                 }
+                crate::diagnostics::ScenarioAction::Quit => {
+                    info!("diag: all scenarios finished, exiting");
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
             }
         }
 

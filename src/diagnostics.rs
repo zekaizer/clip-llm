@@ -65,7 +65,10 @@ pub struct DiagCollector {
 
 impl DiagCollector {
     pub fn new() -> Self {
-        let dump_dir = PathBuf::from("/tmp/clip-llm-diag");
+        // Output under target/diagnostics/ — gitignored and project-local.
+        let dump_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("diagnostics");
         if let Err(e) = std::fs::create_dir_all(&dump_dir) {
             warn!("diag: failed to create dump dir: {e}");
         } else {
@@ -278,7 +281,9 @@ enum RunnerPhase {
     WaitingToHide,
     /// Mode switch requested, waiting for new result.
     WaitingForSwitchResult,
-    /// All scenarios done.
+    /// All scenarios done, waiting before quit.
+    Finishing,
+    /// Quit signal sent.
     Done,
 }
 
@@ -292,6 +297,7 @@ pub struct DiagScenarioRunner {
 const STARTUP_DELAY: u32 = 120; // 2 seconds
 const BETWEEN_DELAY: u32 = 90; // 1.5 seconds
 const RESULT_DISPLAY: u32 = 60; // 1 second to view result before hiding
+const QUIT_DELAY: u32 = 60; // 1 second after last scenario before quitting
 
 impl DiagScenarioRunner {
     pub fn new() -> Self {
@@ -364,8 +370,9 @@ impl DiagScenarioRunner {
                         mode: scenario.mode,
                     };
                 } else {
-                    self.phase = RunnerPhase::Done;
-                    info!("diag: all scenarios complete");
+                    self.phase = RunnerPhase::Finishing;
+                    self.delay_remaining = QUIT_DELAY;
+                    info!("diag: all scenarios complete, finishing");
                 }
             }
 
@@ -404,6 +411,16 @@ impl DiagScenarioRunner {
                 return ScenarioAction::HideOverlay;
             }
 
+            RunnerPhase::Finishing => {
+                if self.delay_remaining > 0 {
+                    self.delay_remaining -= 1;
+                    return ScenarioAction::None;
+                }
+                self.phase = RunnerPhase::Done;
+                info!("diag: quitting");
+                return ScenarioAction::Quit;
+            }
+
             RunnerPhase::Done => {}
         }
 
@@ -417,6 +434,8 @@ pub enum ScenarioAction {
     ShowOverlay { mode: ProcessMode },
     SwitchMode(ProcessMode),
     HideOverlay,
+    /// All scenarios complete — app should exit.
+    Quit,
 }
 
 // ---------------------------------------------------------------------------
