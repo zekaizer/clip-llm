@@ -127,6 +127,7 @@ impl LlmClient {
 
         info!("sending request to {}", self.endpoint);
         debug!("model={}, temperature={}, max_tokens={}", self.model, TEMPERATURE, MAX_TOKENS);
+        debug!("request body: {}", serde_json::to_string(&body).unwrap_or_default());
 
         let mut req = self.client.post(&self.endpoint).json(&body);
         if let Some(key) = &self.api_key {
@@ -150,6 +151,7 @@ impl LlmClient {
         }
 
         info!("received response ({} chars)", content.len());
+        debug!("response content: {content}");
         Ok(content)
     }
 }

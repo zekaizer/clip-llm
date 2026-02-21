@@ -28,6 +28,7 @@ impl ClipboardManager {
             return Err(ClipboardError::NoTextInClipboard);
         }
         info!("read clipboard ({} chars)", text.len());
+        debug!("clipboard text: {text}");
         Ok(text)
     }
 
@@ -67,6 +68,7 @@ impl ClipboardManager {
             .set_text(text)
             .map_err(|e| ClipboardError::WriteFailed(e.to_string()))?;
         info!("wrote {} chars to clipboard", text.len());
+        debug!("written text: {text}");
         Ok(())
     }
 }

@@ -103,9 +103,12 @@ fn process_llm(
     input: &str,
 ) -> Result<(), AppError> {
     info!("input: {} chars", input.len());
+    debug!("input text: {input}");
 
     let raw_response = llm.complete(input)?;
+    debug!("raw response: {raw_response}");
     let response = strip_think_blocks(&raw_response);
+    debug!("stripped response: {response}");
 
     if response.is_empty() {
         warn!("response empty after stripping think blocks");
