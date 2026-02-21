@@ -170,6 +170,9 @@ impl OverlayApp {
                         request_id,
                     }
                 }
+                WorkerResponse::StreamDelta { text, request_id } => {
+                    UiEvent::StreamDelta { text, request_id }
+                }
             };
             let effects = self.sm.handle(event);
             self.execute_effects(effects, ctx);

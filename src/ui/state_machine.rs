@@ -58,6 +58,8 @@ pub enum UiEvent {
     UserStartDrag,
     /// Window lost focus (after having been focused at least once).
     FocusLost,
+    /// Streaming token from the worker (incremental response).
+    StreamDelta { text: String, request_id: u64 },
     /// Clipboard write failed (feedback from effect execution).
     ClipboardWriteError(String),
 }
@@ -98,6 +100,8 @@ pub struct StateMachine {
     has_been_focused: bool,
     /// Per-mode result cache, valid only for the current original_text.
     mode_cache: HashMap<ProcessMode, String>,
+    /// Accumulated visible streaming text (displayed during Processing).
+    streaming_text: String,
 }
 
 impl StateMachine {
@@ -111,6 +115,7 @@ impl StateMachine {
             user_repositioned: false,
             has_been_focused: false,
             mode_cache: HashMap::new(),
+            streaming_text: String::new(),
         }
     }
 
@@ -122,6 +127,10 @@ impl StateMachine {
 
     pub fn mode(&self) -> ProcessMode {
         self.mode
+    }
+
+    pub fn streaming_text(&self) -> &str {
+        &self.streaming_text
     }
 
     pub fn user_repositioned(&self) -> bool {
@@ -175,6 +184,9 @@ impl StateMachine {
                 self.user_repositioned = true;
                 vec![]
             }
+            UiEvent::StreamDelta { text, request_id } => {
+                self.on_stream_delta(text, request_id)
+            }
             UiEvent::FocusLost => self.on_focus_lost(),
             UiEvent::ClipboardWriteError(msg) => self.on_clipboard_write_error(msg),
         };
@@ -189,6 +201,7 @@ impl StateMachine {
         let old_state = self.state.clone();
         self.original_text = Some(text.clone());
         self.mode_cache.clear();
+        self.streaming_text.clear();
         self.next_request_id += 1;
         self.current_request_id = self.next_request_id;
         self.state = OverlayState::Processing;
@@ -210,6 +223,17 @@ impl StateMachine {
         effects
     }
 
+    fn on_stream_delta(&mut self, text: String, request_id: u64) -> Vec<UiEffect> {
+        if request_id != self.current_request_id {
+            return vec![];
+        }
+        if !matches!(self.state, OverlayState::Processing) {
+            return vec![];
+        }
+        self.streaming_text.push_str(&text);
+        vec![]
+    }
+
     fn on_worker_result(&mut self, text: String, request_id: u64) -> Vec<UiEffect> {
         if request_id != self.current_request_id {
             return vec![];
@@ -217,6 +241,7 @@ impl StateMachine {
         if !matches!(self.state, OverlayState::Processing) {
             return vec![];
         }
+        self.streaming_text.clear();
         self.mode_cache.insert(self.mode, text.clone());
         self.state = OverlayState::Result(text.clone());
         vec![
@@ -244,6 +269,7 @@ impl StateMachine {
         self.state = OverlayState::Hidden;
         self.original_text = None;
         self.mode_cache.clear();
+        self.streaming_text.clear();
         self.has_been_focused = false;
         vec![UiEffect::HideWindow]
     }
@@ -255,6 +281,7 @@ impl StateMachine {
         self.state = OverlayState::Hidden;
         self.original_text = None;
         self.mode_cache.clear();
+        self.streaming_text.clear();
         self.has_been_focused = false;
         vec![UiEffect::SendCancel, UiEffect::HideWindow]
     }
@@ -269,6 +296,7 @@ impl StateMachine {
             OverlayState::Processing => {
                 if let Some(cached) = self.mode_cache.get(&new_mode).cloned() {
                     // Cache hit: cancel in-flight, return cached result.
+                    self.streaming_text.clear();
                     self.state = OverlayState::Result(cached.clone());
                     vec![
                         UiEffect::SendCancel,
@@ -277,6 +305,7 @@ impl StateMachine {
                     ]
                 } else {
                     // Cache miss: cancel current, re-send with new mode.
+                    self.streaming_text.clear();
                     self.next_request_id += 1;
                     self.current_request_id = self.next_request_id;
                     let mut effects = vec![UiEffect::SendCancel];
@@ -326,6 +355,7 @@ impl StateMachine {
         self.state = OverlayState::Hidden;
         self.original_text = None;
         self.mode_cache.clear();
+        self.streaming_text.clear();
         self.has_been_focused = false;
         vec![UiEffect::HideWindow]
     }
