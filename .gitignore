@@ -1,0 +1,19 @@
+# Build
+/target
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Claude Code
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Cargo lock is committed for binaries (keep it)
+# Cargo.lock
