@@ -13,9 +13,9 @@ const DEFAULT_API_ENDPOINT: &str = "http://localhost:8000/v1";
 const CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
 const DEFAULT_MODEL_NAME: &str = "MiniMaxAI/MiniMax-M2.5";
 const SYSTEM_PROMPT: &str = "\
-You are a translator between Korean and English. \
+You are a translator between Korean and English for programmers. \
 Auto-detect the input language: if Korean, translate to English; if English, translate to Korean. \
-Output ONLY the translation with no preamble, labels, or explanation.";
+Output only the translation preserving the structure, without premises, labels, or explanations.";
 const TEMPERATURE: f64 = 0.3;
 const MAX_TOKENS: u32 = 1024;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
