@@ -1,4 +1,5 @@
 mod overlay;
+pub mod state_machine;
 
 use std::sync::mpsc;
 use std::time::Duration;
