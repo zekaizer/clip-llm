@@ -324,7 +324,7 @@ impl eframe::App for OverlayApp {
             #[cfg(feature = "diagnostics")]
             {
                 let to = self.state.variant_name();
-                self.diag.on_state_transition(self.prev_state_name, to, ctx);
+                self.diag.on_state_transition(self.prev_state_name, to);
                 self.prev_state_name = to;
             }
 
@@ -377,6 +377,7 @@ impl eframe::App for OverlayApp {
                 spawn_position: self.spawn_position.map(|p| [p.x, p.y]),
                 user_repositioned: self.user_repositioned,
             });
+            self.diag.tick_screenshot(ctx);
             self.diag.flush_pending_if_stale();
         }
 
