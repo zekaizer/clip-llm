@@ -1,6 +1,7 @@
 use std::thread;
 use std::time::Duration;
 
+use core_foundation::runloop::CFRunLoop;
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode,
 };
@@ -16,8 +17,12 @@ const KEY_C: CGKeyCode = 0x08;
 /// Delay between key-down and key-up events (ms).
 const KEY_EVENT_DELAY_MS: u64 = 50;
 
+/// Interval for CFRunLoop pumping (ms).
+const EVENT_LOOP_INTERVAL: Duration = Duration::from_millis(50);
+
 extern "C" {
     fn AXIsProcessTrusted() -> bool;
+    static kCFRunLoopDefaultMode: core_foundation::string::CFStringRef;
 }
 
 pub struct MacOsPlatform;
@@ -55,5 +60,17 @@ impl Platform for MacOsPlatform {
         } else {
             Err(PlatformError::AccessibilityDenied)
         }
+    }
+}
+
+/// Pump CFRunLoop to deliver Carbon hotkey events, then call `tick`.
+pub(super) fn run_event_loop_impl(tick: &mut dyn FnMut()) -> ! {
+    loop {
+        CFRunLoop::run_in_mode(
+            unsafe { kCFRunLoopDefaultMode },
+            EVENT_LOOP_INTERVAL,
+            false,
+        );
+        tick();
     }
 }

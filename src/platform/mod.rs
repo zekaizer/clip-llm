@@ -16,3 +16,15 @@ pub use macos::MacOsPlatform as NativePlatform;
 mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::WindowsPlatform as NativePlatform;
+
+/// Run the platform event loop. Calls `tick` on each iteration.
+/// This function never returns under normal operation.
+#[cfg(target_os = "macos")]
+pub fn run_event_loop(mut tick: impl FnMut()) -> ! {
+    macos::run_event_loop_impl(&mut tick)
+}
+
+#[cfg(target_os = "windows")]
+pub fn run_event_loop(mut tick: impl FnMut()) -> ! {
+    windows::run_event_loop_impl(&mut tick)
+}
