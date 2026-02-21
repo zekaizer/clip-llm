@@ -9,13 +9,17 @@ use crate::api::response::strip_think_blocks;
 use crate::ProcessMode;
 
 pub enum WorkerCommand {
-    Process { text: String, mode: ProcessMode },
+    Process {
+        text: String,
+        mode: ProcessMode,
+        request_id: u64,
+    },
     Cancel,
 }
 
 pub enum WorkerResponse {
-    Complete { result: String },
-    Error { message: String },
+    Complete { result: String, request_id: u64 },
+    Error { message: String, request_id: u64 },
 }
 
 /// Spawn a worker thread with a tokio runtime for async LLM calls.
@@ -39,7 +43,7 @@ pub fn spawn_worker(
 
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
-                    WorkerCommand::Process { text, mode } => {
+                    WorkerCommand::Process { text, mode, request_id } => {
                         // Cancel any in-flight request.
                         if let Some(tx) = cancel_tx.take() {
                             let _ = tx.send(());
@@ -52,11 +56,11 @@ pub fn spawn_worker(
                             let resp = match crate::diagnostics::mock_response(&text) {
                                 Ok(mock) => {
                                     info!("worker: mock {} ({} chars)", mode.label(), mock.len());
-                                    WorkerResponse::Complete { result: mock }
+                                    WorkerResponse::Complete { result: mock, request_id }
                                 }
                                 Err(msg) => {
                                     info!("worker: mock error: {msg}");
-                                    WorkerResponse::Error { message: msg }
+                                    WorkerResponse::Error { message: msg, request_id }
                                 }
                             };
                             let _ = resp_tx.send(resp);
@@ -87,6 +91,7 @@ pub fn spawn_worker(
                                         WorkerResponse::Error {
                                             message: "empty response after stripping think blocks"
                                                 .into(),
+                                            request_id,
                                         }
                                     } else {
                                         info!(
@@ -94,13 +99,14 @@ pub fn spawn_worker(
                                             mode.label(),
                                             stripped.len()
                                         );
-                                        WorkerResponse::Complete { result: stripped }
+                                        WorkerResponse::Complete { result: stripped, request_id }
                                     }
                                 }
                                 Err(e) => {
                                     error!("worker: LLM error: {e}");
                                     WorkerResponse::Error {
                                         message: e.to_string(),
+                                        request_id,
                                     }
                                 }
                             };

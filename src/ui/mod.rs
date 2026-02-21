@@ -8,7 +8,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 
 use eframe::egui;
 use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::clipboard::ClipboardManager;
 use crate::hotkey::{HotkeyDetector, TapAction};
@@ -55,6 +55,10 @@ pub struct OverlayApp {
     spawn_position: Option<egui::Pos2>,
     /// True after the user drags the overlay; suppresses automatic repositioning.
     user_repositioned: bool,
+    /// Monotonically increasing request counter for stale response filtering.
+    request_id_counter: u64,
+    /// The request_id of the currently active request.
+    current_request_id: u64,
     /// Tracks state variant changes to reset egui Area sizing on transitions.
     prev_state_disc: std::mem::Discriminant<OverlayState>,
     #[cfg(feature = "diagnostics")]
@@ -83,6 +87,8 @@ impl OverlayApp {
             has_been_focused: false,
             spawn_position: None,
             user_repositioned: false,
+            request_id_counter: 0,
+            current_request_id: 0,
             prev_state_disc: std::mem::discriminant(&OverlayState::Hidden),
             #[cfg(feature = "diagnostics")]
             diag: crate::diagnostics::DiagCollector::new(),
@@ -134,12 +140,20 @@ impl OverlayApp {
             .map(|(x, y)| egui::pos2(x as f32, y as f32));
     }
 
+    fn next_request_id(&mut self) -> u64 {
+        self.request_id_counter += 1;
+        self.request_id_counter
+    }
+
     fn start_processing(&mut self, text: String, ctx: &egui::Context) {
         info!("starting {} ({} chars)", self.mode.label(), text.len());
         self.original_text = Some(text.clone());
+        let rid = self.next_request_id();
+        self.current_request_id = rid;
         let _ = self.cmd_tx.send(WorkerCommand::Process {
             text,
             mode: self.mode,
+            request_id: rid,
         });
         self.state = OverlayState::Processing;
         self.capture_mouse_position();
@@ -158,18 +172,24 @@ impl OverlayApp {
                 // Cancel current request and re-send with new mode.
                 let _ = self.cmd_tx.send(WorkerCommand::Cancel);
                 if let Some(text) = self.original_text.clone() {
+                    let rid = self.next_request_id();
+                    self.current_request_id = rid;
                     let _ = self.cmd_tx.send(WorkerCommand::Process {
                         text,
                         mode: self.mode,
+                        request_id: rid,
                     });
                 }
             }
             OverlayState::Result(_) | OverlayState::Error(_) => {
                 // Re-process original text with new mode.
                 if let Some(text) = self.original_text.clone() {
+                    let rid = self.next_request_id();
+                    self.current_request_id = rid;
                     let _ = self.cmd_tx.send(WorkerCommand::Process {
                         text,
                         mode: self.mode,
+                        request_id: rid,
                     });
                     self.state = OverlayState::Processing;
                 }
@@ -231,7 +251,11 @@ impl OverlayApp {
     fn poll_responses(&mut self, ctx: &egui::Context) {
         while let Ok(response) = self.resp_rx.try_recv() {
             match response {
-                WorkerResponse::Complete { result } => {
+                WorkerResponse::Complete { result, request_id } => {
+                    if request_id != self.current_request_id {
+                        debug!("ignoring stale response (id={request_id}, current={})", self.current_request_id);
+                        continue;
+                    }
                     if let Err(e) = self.clipboard.write_text(&result) {
                         self.state = OverlayState::Error(e.to_string());
                     } else {
@@ -239,7 +263,11 @@ impl OverlayApp {
                         self.state = OverlayState::Result(result);
                     }
                 }
-                WorkerResponse::Error { message } => {
+                WorkerResponse::Error { message, request_id } => {
+                    if request_id != self.current_request_id {
+                        debug!("ignoring stale error (id={request_id}, current={})", self.current_request_id);
+                        continue;
+                    }
                     error!("worker error: {message}");
                     self.state = OverlayState::Error(message);
                 }

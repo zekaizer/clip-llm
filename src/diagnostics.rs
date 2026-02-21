@@ -411,6 +411,7 @@ impl DiagScenarioRunner {
                     let _ = cmd_tx.send(WorkerCommand::Process {
                         text: scenario.input.to_string(),
                         mode: scenario.mode,
+                        request_id: 0, // Diagnostics: adapter assigns real ID in Step 4
                     });
                     self.phase = RunnerPhase::WaitingForResult;
                     return ScenarioAction::ShowOverlay {
