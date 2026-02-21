@@ -34,11 +34,11 @@ pub fn render(state: &OverlayState, mode: ProcessMode, ctx: &egui::Context) -> O
 
     let mut action = OverlayAction::None;
 
-    let margin = egui::Margin::symmetric(20, 16);
     let frame = egui::Frame::new()
         .fill(egui::Color32::from_rgba_unmultiplied(30, 30, 30, 230))
+        .stroke(egui::Stroke::NONE)
         .corner_radius(12)
-        .inner_margin(margin)
+        .inner_margin(egui::Margin::symmetric(16, 14))
         .shadow(egui::Shadow {
             offset: [0, 4],
             blur: 16,
@@ -58,9 +58,8 @@ pub fn render(state: &OverlayState, mode: ProcessMode, ctx: &egui::Context) -> O
     //
     // Fix (a): constrain(false) — lets the initial sizing pass use a large
     //          default size instead of the viewport.
-    // Fix (b): set_min_height inside the Frame for Result state — inflates
-    //          min_size so the *next* frame's max_rect is tall enough for the
-    //          ScrollArea to reach MAX_RESULT_HEIGHT.
+    // Fix (b): OverlayApp::update() calls reset_areas() on state transitions,
+    //          clearing the stale stored size so the Area re-measures fresh.
 
     // Offset the frame so shadow renders evenly on all sides.
     let area_resp = egui::Area::new("overlay".into())
@@ -71,13 +70,12 @@ pub fn render(state: &OverlayState, mode: ProcessMode, ctx: &egui::Context) -> O
             frame.show(ui, |ui| {
                 ui.set_width(OVERLAY_WIDTH);
 
-                // Fix (b): see "egui Area sizing fix" comment above.
-                if matches!(state, OverlayState::Result(_)) {
-                    ui.set_min_height(MAX_RESULT_HEIGHT + 40.0);
-                }
-
                 render_tab_bar(ui, mode, &mut action);
-                ui.add_space(8.0);
+
+                // Separator between tab bar and content.
+                ui.add_space(4.0);
+                ui.add(egui::Separator::default().spacing(4.0));
+                ui.add_space(4.0);
 
                 match state {
                     OverlayState::Processing => {
@@ -86,13 +84,13 @@ pub fn render(state: &OverlayState, mode: ProcessMode, ctx: &egui::Context) -> O
                             ui.label(
                                 egui::RichText::new(mode.processing_label())
                                     .color(egui::Color32::WHITE)
-                                    .size(18.0),
+                                    .size(15.0),
                             );
                         });
                         ui.add_space(4.0);
                         let cancel_btn = egui::Button::new(
                             egui::RichText::new("Cancel")
-                                .size(13.0)
+                                .size(12.0)
                                 .color(egui::Color32::from_rgb(255, 140, 140)),
                         )
                         .fill(egui::Color32::from_rgba_unmultiplied(80, 30, 30, 180))
@@ -109,10 +107,13 @@ pub fn render(state: &OverlayState, mode: ProcessMode, ctx: &egui::Context) -> O
                                 egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
                             )
                             .show(ui, |ui| {
-                                ui.label(
-                                    egui::RichText::new(text)
-                                        .color(egui::Color32::WHITE)
-                                        .size(18.0),
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(text)
+                                            .color(egui::Color32::WHITE)
+                                            .size(15.0),
+                                    )
+                                    .wrap_mode(egui::TextWrapMode::Wrap),
                                 );
                             });
                     }
@@ -120,7 +121,7 @@ pub fn render(state: &OverlayState, mode: ProcessMode, ctx: &egui::Context) -> O
                         ui.label(
                             egui::RichText::new(format!("Error: {msg}"))
                                 .color(egui::Color32::from_rgb(255, 100, 100))
-                                .size(16.0),
+                                .size(14.0),
                         );
                     }
                     OverlayState::Hidden => unreachable!(),
@@ -153,7 +154,7 @@ fn render_tab_bar(ui: &mut egui::Ui, current: ProcessMode, action: &mut OverlayA
         for &mode in ProcessMode::ALL {
             let is_selected = mode == current;
             let text = egui::RichText::new(mode.label())
-                .size(14.0)
+                .size(13.0)
                 .color(if is_selected {
                     egui::Color32::WHITE
                 } else {

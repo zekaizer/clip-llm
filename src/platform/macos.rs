@@ -52,12 +52,16 @@ unsafe fn get_app_window() -> *mut c_void {
     objc_msgSend(windows, sel_registerName(c"firstObject".as_ptr()))
 }
 
-/// Set NSWindowCollectionBehavior on the app window so that
-/// the overlay moves to the active Space and can appear over fullscreen apps.
+/// Configure the NSWindow for overlay use:
+/// - Moves to active Space and can appear over fullscreen apps.
+/// - Disables native macOS window shadow (we draw our own via egui Frame).
 /// Returns true if successfully configured.
 pub fn configure_window_for_spaces() -> bool {
     type MsgSendUlong = unsafe extern "C" fn(*mut c_void, *mut c_void, c_ulong);
     let msg_send_ulong: MsgSendUlong = unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+
+    type MsgSendBool = unsafe extern "C" fn(*mut c_void, *mut c_void, bool);
+    let msg_send_bool: MsgSendBool = unsafe { std::mem::transmute(objc_msgSend as *const ()) };
 
     unsafe {
         let window = get_app_window();
@@ -70,7 +74,13 @@ pub fn configure_window_for_spaces() -> bool {
         let sel_set = sel_registerName(c"setCollectionBehavior:".as_ptr());
         msg_send_ulong(window, sel_set, behavior);
 
-        debug!("configured NSWindow collection behavior for Spaces");
+        // Disable native macOS window shadow. winit defaults hasShadow=YES even
+        // for transparent windows, which creates a visible gray outline around
+        // the overlay. The egui Frame renders its own shadow inside the window.
+        let sel_shadow = sel_registerName(c"setHasShadow:".as_ptr());
+        msg_send_bool(window, sel_shadow, false);
+
+        debug!("configured NSWindow for Spaces + disabled native shadow");
         true
     }
 }

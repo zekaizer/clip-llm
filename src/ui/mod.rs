@@ -43,6 +43,8 @@ pub struct OverlayApp {
     spawn_position: Option<egui::Pos2>,
     /// True after the user drags the overlay; suppresses automatic repositioning.
     user_repositioned: bool,
+    /// Tracks state variant changes to reset egui Area sizing on transitions.
+    prev_state_disc: std::mem::Discriminant<OverlayState>,
 }
 
 impl OverlayApp {
@@ -63,6 +65,7 @@ impl OverlayApp {
             has_been_focused: false,
             spawn_position: None,
             user_repositioned: false,
+            prev_state_disc: std::mem::discriminant(&OverlayState::Hidden),
         }
     }
 
@@ -242,6 +245,9 @@ impl eframe::App for OverlayApp {
         ctx.set_visuals(egui::Visuals {
             window_fill: egui::Color32::TRANSPARENT,
             panel_fill: egui::Color32::TRANSPARENT,
+            window_stroke: egui::Stroke::NONE,
+            window_shadow: egui::Shadow::NONE,
+            window_corner_radius: egui::CornerRadius::same(12),
             ..egui::Visuals::dark()
         });
 
@@ -253,6 +259,16 @@ impl eframe::App for OverlayApp {
 
         self.poll_responses(ctx);
         self.poll_hotkeys(ctx);
+
+        // Reset egui Area stored sizing when state variant changes.
+        // egui::Area persists the previous frame's content size as the next frame's
+        // max_rect. Without this reset, transitioning from a short state (Processing)
+        // to a tall one (Result) would starve the ScrollArea of vertical space.
+        let disc = std::mem::discriminant(&self.state);
+        if disc != self.prev_state_disc {
+            ctx.memory_mut(|m| m.reset_areas());
+            self.prev_state_disc = disc;
+        }
 
         let output = overlay::render(&self.state, self.mode, ctx);
 
