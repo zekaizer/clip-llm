@@ -113,13 +113,9 @@ impl OverlayApp {
         self.show_window(ctx);
     }
 
-    fn show_window(&mut self, ctx: &egui::Context) {
+    /// Reposition the window so it is centered on `spawn_position`, clamped to screen.
+    fn reposition_window(&self, ctx: &egui::Context, win_size: egui::Vec2) {
         if let Some(cursor) = self.spawn_position {
-            // Center the window on the cursor position.
-            let win_size = ctx
-                .input(|i| i.viewport().inner_rect)
-                .map(|r| r.size())
-                .unwrap_or(egui::vec2(480.0, 120.0));
             let mut x = cursor.x - win_size.x / 2.0;
             let mut y = cursor.y - win_size.y / 2.0;
 
@@ -131,6 +127,14 @@ impl OverlayApp {
 
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
         }
+    }
+
+    fn show_window(&mut self, ctx: &egui::Context) {
+        let win_size = ctx
+            .input(|i| i.viewport().inner_rect)
+            .map(|r| r.size())
+            .unwrap_or(egui::vec2(480.0, 120.0));
+        self.reposition_window(ctx, win_size);
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         self.has_been_focused = false;
@@ -190,9 +194,12 @@ impl eframe::App for OverlayApp {
 
         let output = overlay::render(&self.state, ctx);
 
-        // Resize viewport to fit content.
+        // Resize viewport to fit content and re-center on spawn position.
         if let Some(desired) = output.desired_size {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(desired));
+            if !matches!(self.state, OverlayState::Hidden) {
+                self.reposition_window(ctx, desired);
+            }
         }
 
         match output.action {
