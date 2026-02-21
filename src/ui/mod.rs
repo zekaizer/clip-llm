@@ -298,7 +298,7 @@ impl eframe::App for OverlayApp {
         });
 
         // 5. Render overlay.
-        let output = overlay::render(self.sm.state(), self.sm.mode(), ctx);
+        let output = overlay::render(self.sm.state(), self.sm.mode(), self.sm.streaming_text(), ctx);
 
         // 6. Resize viewport to fit rendered content.
         if let Some(desired) = output.desired_size {

@@ -27,7 +27,12 @@ pub struct OverlayOutput {
 }
 
 /// Render the overlay panel. Returns action and desired viewport size.
-pub fn render(state: &OverlayState, mode: ProcessMode, ctx: &egui::Context) -> OverlayOutput {
+pub fn render(
+    state: &OverlayState,
+    mode: ProcessMode,
+    streaming_text: &str,
+    ctx: &egui::Context,
+) -> OverlayOutput {
     if matches!(state, OverlayState::Hidden) {
         return OverlayOutput {
             action: OverlayAction::None,
@@ -91,6 +96,26 @@ pub fn render(state: &OverlayState, mode: ProcessMode, ctx: &egui::Context) -> O
                                     .size(15.0),
                             );
                         });
+                        if !streaming_text.is_empty() {
+                            ui.add_space(4.0);
+                            egui::ScrollArea::vertical()
+                                .max_height(MAX_RESULT_HEIGHT)
+                                .auto_shrink([false, true])
+                                .stick_to_bottom(true)
+                                .scroll_bar_visibility(
+                                    egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
+                                )
+                                .show(ui, |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(streaming_text)
+                                                .color(egui::Color32::WHITE)
+                                                .size(15.0),
+                                        )
+                                        .wrap_mode(egui::TextWrapMode::Wrap),
+                                    );
+                                });
+                        }
                         ui.add_space(4.0);
                         let cancel_btn = egui::Button::new(
                             egui::RichText::new("Cancel")
