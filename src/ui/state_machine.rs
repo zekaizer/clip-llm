@@ -921,4 +921,94 @@ mod tests {
         assert_eq!(*sm.state(), OverlayState::Processing);
         assert!(effects.iter().any(|e| matches!(e, UiEffect::SendProcess { .. })));
     }
+
+    // === Streaming text ===
+
+    #[test]
+    fn stream_delta_appends_text() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+
+        sm.handle(UiEvent::StreamDelta { text: "foo".into(), request_id: rid });
+        sm.handle(UiEvent::StreamDelta { text: " bar".into(), request_id: rid });
+
+        assert_eq!(sm.streaming_text(), "foo bar");
+    }
+
+    #[test]
+    fn stream_delta_stale_ignored() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+
+        // Stale request_id.
+        sm.handle(UiEvent::StreamDelta { text: "stale".into(), request_id: rid + 100 });
+
+        assert_eq!(sm.streaming_text(), "");
+    }
+
+    #[test]
+    fn stream_delta_not_processing_ignored() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+
+        // Transition to Result.
+        sm.handle(UiEvent::WorkerResult { text: "done".into(), request_id: rid });
+
+        // Delta arrives after Result — ignored.
+        sm.handle(UiEvent::StreamDelta { text: "late".into(), request_id: rid });
+
+        assert_eq!(sm.streaming_text(), "");
+    }
+
+    #[test]
+    fn streaming_text_cleared_on_result() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+
+        sm.handle(UiEvent::StreamDelta { text: "partial".into(), request_id: rid });
+        assert_eq!(sm.streaming_text(), "partial");
+
+        sm.handle(UiEvent::WorkerResult { text: "done".into(), request_id: rid });
+        assert_eq!(sm.streaming_text(), "");
+    }
+
+    #[test]
+    fn streaming_text_cleared_on_cancel() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+
+        sm.handle(UiEvent::StreamDelta { text: "partial".into(), request_id: rid });
+        sm.handle(UiEvent::UserCancel);
+
+        assert_eq!(sm.streaming_text(), "");
+    }
+
+    #[test]
+    fn streaming_text_cleared_on_mode_switch() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+
+        sm.handle(UiEvent::StreamDelta { text: "partial".into(), request_id: rid });
+        sm.handle(UiEvent::UserSwitchMode(ProcessMode::Correct));
+
+        assert_eq!(sm.streaming_text(), "");
+    }
+
+    #[test]
+    fn streaming_text_cleared_on_new_text() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+
+        sm.handle(UiEvent::StreamDelta { text: "partial".into(), request_id: rid });
+        start_processing(&mut sm, "new input");
+
+        assert_eq!(sm.streaming_text(), "");
+    }
 }
