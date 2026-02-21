@@ -65,13 +65,24 @@ pub fn render(state: &OverlayState, mode: ProcessMode, ctx: &egui::Context) -> O
                             );
                         });
                         ui.add_space(4.0);
-                        if ui.small_button("Cancel").clicked() {
+                        let cancel_btn = egui::Button::new(
+                            egui::RichText::new("Cancel")
+                                .size(13.0)
+                                .color(egui::Color32::from_rgb(255, 140, 140)),
+                        )
+                        .fill(egui::Color32::from_rgba_unmultiplied(80, 30, 30, 180))
+                        .corner_radius(6.0);
+                        if ui.add(cancel_btn).clicked() {
                             action = OverlayAction::Cancel;
                         }
                     }
                     OverlayState::Result(text) => {
                         egui::ScrollArea::vertical()
                             .max_height(MAX_RESULT_HEIGHT)
+                            .auto_shrink(true)
+                            .scroll_bar_visibility(
+                                egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
+                            )
                             .show(ui, |ui| {
                                 ui.label(
                                     egui::RichText::new(text)
@@ -79,12 +90,6 @@ pub fn render(state: &OverlayState, mode: ProcessMode, ctx: &egui::Context) -> O
                                         .size(18.0),
                                 );
                             });
-                        ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new("Copied to clipboard")
-                                .color(egui::Color32::from_gray(120))
-                                .size(13.0),
-                        );
                     }
                     OverlayState::Error(msg) => {
                         ui.label(

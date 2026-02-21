@@ -116,6 +116,7 @@ impl OverlayApp {
         });
         self.state = OverlayState::Processing;
         self.capture_mouse_position();
+        self.user_repositioned = false;
         self.show_window(ctx);
     }
 
@@ -154,6 +155,7 @@ impl OverlayApp {
         error!("pipeline error: {message}");
         self.state = OverlayState::Error(message);
         self.capture_mouse_position();
+        self.user_repositioned = false;
         self.show_window(ctx);
     }
 
@@ -182,12 +184,13 @@ impl OverlayApp {
         #[cfg(target_os = "macos")]
         crate::platform::macos::configure_window_for_spaces();
 
-        let win_size = ctx
-            .input(|i| i.viewport().inner_rect)
-            .map(|r| r.size())
-            .unwrap_or(egui::vec2(480.0, 120.0));
-        self.reposition_window(ctx, win_size);
-        self.user_repositioned = false;
+        if !self.user_repositioned {
+            let win_size = ctx
+                .input(|i| i.viewport().inner_rect)
+                .map(|r| r.size())
+                .unwrap_or(egui::vec2(480.0, 120.0));
+            self.reposition_window(ctx, win_size);
+        }
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         self.has_been_focused = false;
