@@ -125,6 +125,7 @@ dependencies = [
  "thiserror",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
