@@ -34,34 +34,39 @@ extern "C" {
     fn objc_msgSend(obj: *mut c_void, sel: *mut c_void) -> *mut c_void;
 }
 
-/// Set NSWindowCollectionBehavior on the app window so that
-/// the overlay moves to the active Space and can appear over fullscreen apps.
+/// Get the first NSWindow from [NSApp windows].
+/// Returns null if unavailable.
+unsafe fn get_app_window() -> *mut c_void {
+    let cls = objc_getClass(c"NSApplication".as_ptr());
+    if cls.is_null() {
+        return std::ptr::null_mut();
+    }
+    let app = objc_msgSend(cls, sel_registerName(c"sharedApplication".as_ptr()));
+    if app.is_null() {
+        return std::ptr::null_mut();
+    }
+    let windows = objc_msgSend(app, sel_registerName(c"windows".as_ptr()));
+    if windows.is_null() {
+        return std::ptr::null_mut();
+    }
+    objc_msgSend(windows, sel_registerName(c"firstObject".as_ptr()))
+}
+
+/// Configure the NSWindow for overlay use:
+/// - Moves to active Space and can appear over fullscreen apps.
+/// - Disables native macOS window shadow (we draw our own via egui Frame).
 /// Returns true if successfully configured.
 pub fn configure_window_for_spaces() -> bool {
-    // Use typed function pointer cast for objc_msgSend with extra args
-    // to avoid clashing extern declarations and ensure correct arm64 ABI.
     type MsgSendUlong = unsafe extern "C" fn(*mut c_void, *mut c_void, c_ulong);
     let msg_send_ulong: MsgSendUlong = unsafe { std::mem::transmute(objc_msgSend as *const ()) };
 
+    type MsgSendBool = unsafe extern "C" fn(*mut c_void, *mut c_void, bool);
+    let msg_send_bool: MsgSendBool = unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+
     unsafe {
-        let cls = objc_getClass(c"NSApplication".as_ptr());
-        if cls.is_null() {
-            warn!("failed to get NSApplication class");
-            return false;
-        }
-        let app = objc_msgSend(cls, sel_registerName(c"sharedApplication".as_ptr()));
-        if app.is_null() {
-            warn!("failed to get shared NSApplication");
-            return false;
-        }
-        // Use [NSApp windows].firstObject instead of keyWindow,
-        // because the window may not be key when hidden.
-        let windows = objc_msgSend(app, sel_registerName(c"windows".as_ptr()));
-        if windows.is_null() {
-            return false;
-        }
-        let window = objc_msgSend(windows, sel_registerName(c"firstObject".as_ptr()));
+        let window = get_app_window();
         if window.is_null() {
+            warn!("failed to get app window for Spaces config");
             return false;
         }
         let behavior = NS_WINDOW_COLLECTION_BEHAVIOR_MOVE_TO_ACTIVE_SPACE
@@ -69,10 +74,17 @@ pub fn configure_window_for_spaces() -> bool {
         let sel_set = sel_registerName(c"setCollectionBehavior:".as_ptr());
         msg_send_ulong(window, sel_set, behavior);
 
-        debug!("configured NSWindow collection behavior for Spaces");
+        // Disable native macOS window shadow. winit defaults hasShadow=YES even
+        // for transparent windows, which creates a visible gray outline around
+        // the overlay. The egui Frame renders its own shadow inside the window.
+        let sel_shadow = sel_registerName(c"setHasShadow:".as_ptr());
+        msg_send_bool(window, sel_shadow, false);
+
+        debug!("configured NSWindow for Spaces + disabled native shadow");
         true
     }
 }
+
 
 extern "C" {
     fn CGGetDisplaysWithPoint(

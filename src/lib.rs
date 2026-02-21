@@ -9,6 +9,56 @@ pub mod worker;
 
 use thiserror::Error;
 
+// -- Process mode --
+
+/// Available processing modes for the LLM pipeline.
+/// Add new variants here and to `ALL` to extend the tab bar automatically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProcessMode {
+    #[default]
+    Translate,
+    Correct,
+}
+
+impl ProcessMode {
+    /// All modes in tab bar display order.
+    pub const ALL: &[ProcessMode] = &[ProcessMode::Translate, ProcessMode::Correct];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Translate => "Translate",
+            Self::Correct => "Correct",
+        }
+    }
+
+    pub fn processing_label(self) -> &'static str {
+        match self {
+            Self::Translate => "Translating...",
+            Self::Correct => "Correcting...",
+        }
+    }
+
+    pub fn system_prompt(self) -> &'static str {
+        match self {
+            Self::Translate => "\
+You are a Korean↔English translator for software engineering text. \
+Auto-detect the input language: if Korean, translate to English; if English, translate to Korean. \
+Rules: \
+- If the input contains code: preserve all whitespace, indentation, and structure exactly. Never dedent or normalize. Do not translate code, variable names, or identifiers — only translate comments and string literals. \
+- If the input is plain text: translate naturally while keeping the general structure. \
+- Output the translation only — no preamble, labels, explanations, or markdown formatting.",
+            Self::Correct => "\
+You are a proofreader for software engineering text. \
+Auto-detect the input language and correct it in the same language. \
+Fix grammar, spelling, punctuation, and awkward phrasing to improve naturalness while preserving the original meaning and tone. \
+Rules: \
+- If the input contains code: preserve all whitespace, indentation, and structure exactly. Never dedent or normalize. Do not modify code, variable names, or identifiers — only correct comments and string literals. \
+- If the input is plain text: correct naturally while keeping the general structure. \
+- Output the corrected text only — no preamble, labels, explanations, or markdown formatting.",
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum PlatformError {
     #[error("accessibility permission required")]

@@ -6,9 +6,10 @@ use tracing::{debug, error, info};
 
 use crate::api::client::LlmClient;
 use crate::api::response::strip_think_blocks;
+use crate::ProcessMode;
 
 pub enum WorkerCommand {
-    Translate { text: String },
+    Process { text: String, mode: ProcessMode },
     Cancel,
 }
 
@@ -38,7 +39,7 @@ pub fn spawn_worker(
 
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
-                    WorkerCommand::Translate { text } => {
+                    WorkerCommand::Process { text, mode } => {
                         // Cancel any in-flight request.
                         if let Some(tx) = cancel_tx.take() {
                             let _ = tx.send(());
@@ -51,11 +52,11 @@ pub fn spawn_worker(
                         let llm = llm.clone();
                         let resp_tx = resp_tx.clone();
 
-                        info!("worker: starting translation ({} chars)", text.len());
+                        info!("worker: starting {} ({} chars)", mode.label(), text.len());
 
                         tokio::spawn(async move {
                             let result = tokio::select! {
-                                r = llm.complete(&text) => r,
+                                r = llm.complete(&text, mode) => r,
                                 _ = c_rx => {
                                     debug!("worker: request cancelled");
                                     return;
@@ -72,7 +73,8 @@ pub fn spawn_worker(
                                         }
                                     } else {
                                         info!(
-                                            "worker: translation complete ({} chars)",
+                                            "worker: {} complete ({} chars)",
+                                            mode.label(),
                                             stripped.len()
                                         );
                                         WorkerResponse::Complete { result: stripped }
