@@ -30,41 +30,28 @@ fn main() {
     }
 }
 
-/// Load a system CJK font so Korean text renders correctly.
+/// Configure fonts with embedded D2Coding (zstd-compressed) for broad Unicode + Korean coverage.
 fn configure_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
-    // Try common CJK font paths across platforms.
-    let candidates: &[&str] = &[
-        // macOS
-        "/System/Library/Fonts/AppleSDGothicNeo.ttc",
-        "/System/Library/Fonts/Supplemental/AppleGothic.ttf",
-        // Windows
-        "C:\\Windows\\Fonts\\malgun.ttf",
-    ];
+    let compressed = include_bytes!(concat!(env!("OUT_DIR"), "/D2Coding.ttf.zst"));
+    let font_bytes = zstd::decode_all(&compressed[..]).expect("failed to decompress font");
+    let font_data = egui::FontData::from_owned(font_bytes);
+    fonts
+        .font_data
+        .insert("d2coding".to_owned(), font_data.into());
 
-    for path in candidates {
-        if let Ok(data) = std::fs::read(path) {
-            fonts.font_data.insert(
-                "system_cjk".to_owned(),
-                egui::FontData::from_owned(data).into(),
-            );
-            // Insert before NotoEmoji so the CJK font's broad Unicode
-            // coverage is tried before emoji glyphs block the fallback.
-            fonts
-                .families
-                .get_mut(&egui::FontFamily::Proportional)
-                .unwrap()
-                .insert(1, "system_cjk".to_owned());
-            fonts
-                .families
-                .get_mut(&egui::FontFamily::Monospace)
-                .unwrap()
-                .insert(1, "system_cjk".to_owned());
-            info!("loaded CJK font from {path}");
-            break;
-        }
-    }
+    // Use D2Coding as primary font for both proportional and monospace.
+    fonts
+        .families
+        .get_mut(&egui::FontFamily::Proportional)
+        .unwrap()
+        .insert(0, "d2coding".to_owned());
+    fonts
+        .families
+        .get_mut(&egui::FontFamily::Monospace)
+        .unwrap()
+        .insert(0, "d2coding".to_owned());
 
     ctx.set_fonts(fonts);
 }
