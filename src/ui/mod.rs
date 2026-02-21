@@ -8,59 +8,28 @@ use tokio::sync::mpsc as tokio_mpsc;
 
 use eframe::egui;
 use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 use crate::clipboard::ClipboardManager;
 use crate::hotkey::{HotkeyDetector, TapAction};
 use crate::platform::{NativePlatform, Platform};
 use crate::worker::{WorkerCommand, WorkerResponse};
-use crate::ProcessMode;
+
+pub use state_machine::OverlayState;
+use state_machine::{StateMachine, UiEffect, UiEvent};
 
 /// Polling interval when overlay is hidden (for hotkey detection).
 const IDLE_POLL_MS: u64 = 100;
 
-#[derive(Debug)]
-pub enum OverlayState {
-    Hidden,
-    Processing,
-    Result(String),
-    Error(String),
-}
-
-impl OverlayState {
-    pub fn variant_name(&self) -> &'static str {
-        match self {
-            Self::Hidden => "Hidden",
-            Self::Processing => "Processing",
-            Self::Result(_) => "Result",
-            Self::Error(_) => "Error",
-        }
-    }
-}
-
 pub struct OverlayApp {
-    state: OverlayState,
-    mode: ProcessMode,
-    /// Original input text, retained for re-processing on mode switch.
-    original_text: Option<String>,
+    sm: StateMachine,
     cmd_tx: tokio_mpsc::UnboundedSender<WorkerCommand>,
     resp_rx: mpsc::Receiver<WorkerResponse>,
     clipboard: ClipboardManager,
     platform: NativePlatform,
     detector: HotkeyDetector,
-    /// True once the window has received focus after show_window.
-    /// Only check for focus loss after this becomes true.
-    has_been_focused: bool,
-    /// Mouse cursor position captured at hotkey trigger time (egui logical points).
+    /// Mouse cursor position captured at hotkey trigger time.
     spawn_position: Option<egui::Pos2>,
-    /// True after the user drags the overlay; suppresses automatic repositioning.
-    user_repositioned: bool,
-    /// Monotonically increasing request counter for stale response filtering.
-    request_id_counter: u64,
-    /// The request_id of the currently active request.
-    current_request_id: u64,
-    /// Tracks state variant changes to reset egui Area sizing on transitions.
-    prev_state_disc: std::mem::Discriminant<OverlayState>,
     #[cfg(feature = "diagnostics")]
     diag: crate::diagnostics::DiagCollector,
     #[cfg(feature = "diagnostics")]
@@ -76,20 +45,13 @@ impl OverlayApp {
         clipboard: ClipboardManager,
     ) -> Self {
         Self {
-            state: OverlayState::Hidden,
-            mode: ProcessMode::default(),
-            original_text: None,
+            sm: StateMachine::new(crate::ProcessMode::default()),
             cmd_tx,
             resp_rx,
             clipboard,
             platform: NativePlatform,
             detector: HotkeyDetector::new(),
-            has_been_focused: false,
             spawn_position: None,
-            user_repositioned: false,
-            request_id_counter: 0,
-            current_request_id: 0,
-            prev_state_disc: std::mem::discriminant(&OverlayState::Hidden),
             #[cfg(feature = "diagnostics")]
             diag: crate::diagnostics::DiagCollector::new(),
             #[cfg(feature = "diagnostics")]
@@ -98,6 +60,60 @@ impl OverlayApp {
             prev_state_name: "Hidden",
         }
     }
+
+    // -- Effect execution --
+
+    fn execute_effects(&mut self, effects: Vec<UiEffect>, ctx: &egui::Context) {
+        for effect in effects {
+            match effect {
+                UiEffect::SendProcess {
+                    text,
+                    mode,
+                    request_id,
+                } => {
+                    info!("starting {} ({} chars)", mode.label(), text.len());
+                    let _ = self.cmd_tx.send(WorkerCommand::Process {
+                        text,
+                        mode,
+                        request_id,
+                    });
+                }
+                UiEffect::SendCancel => {
+                    let _ = self.cmd_tx.send(WorkerCommand::Cancel);
+                }
+                UiEffect::WriteClipboard(text) => {
+                    if let Err(e) = self.clipboard.write_text(&text) {
+                        error!("clipboard write failed: {e}");
+                        let err_effects =
+                            self.sm.handle(UiEvent::ClipboardWriteError(e.to_string()));
+                        // ClipboardWriteError never emits WriteClipboard — recursion safe.
+                        self.execute_effects(err_effects, ctx);
+                    } else {
+                        info!(
+                            "{} complete ({} chars), copied to clipboard",
+                            self.sm.mode().label(),
+                            text.len()
+                        );
+                    }
+                }
+                UiEffect::ShowWindow => self.show_window(ctx),
+                UiEffect::HideWindow => self.hide_window(ctx),
+                UiEffect::CaptureMousePosition => self.capture_mouse_position(),
+                UiEffect::ResetAreas => {
+                    #[cfg(feature = "diagnostics")]
+                    {
+                        let to = self.sm.variant_name();
+                        self.diag
+                            .on_state_transition(self.prev_state_name, to);
+                        self.prev_state_name = to;
+                    }
+                    ctx.memory_mut(|m| m.reset_areas());
+                }
+            }
+        }
+    }
+
+    // -- Hotkey handling --
 
     fn poll_hotkeys(&mut self, ctx: &egui::Context) {
         let receiver = GlobalHotKeyEvent::receiver();
@@ -120,90 +136,68 @@ impl OverlayApp {
     }
 
     fn trigger_single_tap(&mut self, ctx: &egui::Context) {
-        match self.clipboard.read_clipboard() {
-            Ok(text) => self.start_processing(text, ctx),
-            Err(e) => self.show_error(e.to_string(), ctx),
-        }
+        let event = match self.clipboard.read_clipboard() {
+            Ok(text) => UiEvent::TextReady(text),
+            Err(e) => UiEvent::ClipboardWriteError(e.to_string()),
+        };
+        let effects = self.sm.handle(event);
+        self.execute_effects(effects, ctx);
     }
 
     fn trigger_double_tap(&mut self, ctx: &egui::Context) {
-        match self.clipboard.copy_and_read(&self.platform) {
-            Ok(text) => self.start_processing(text, ctx),
-            Err(e) => self.show_error(e.to_string(), ctx),
+        let event = match self.clipboard.copy_and_read(&self.platform) {
+            Ok(text) => UiEvent::TextReady(text),
+            Err(e) => UiEvent::ClipboardWriteError(e.to_string()),
+        };
+        let effects = self.sm.handle(event);
+        self.execute_effects(effects, ctx);
+    }
+
+    // -- Worker response polling --
+
+    fn poll_responses(&mut self, ctx: &egui::Context) {
+        while let Ok(response) = self.resp_rx.try_recv() {
+            let event = match response {
+                WorkerResponse::Complete { result, request_id } => {
+                    UiEvent::WorkerResult {
+                        text: result,
+                        request_id,
+                    }
+                }
+                WorkerResponse::Error { message, request_id } => {
+                    UiEvent::WorkerError {
+                        message,
+                        request_id,
+                    }
+                }
+            };
+            let effects = self.sm.handle(event);
+            self.execute_effects(effects, ctx);
         }
     }
+
+    // -- Focus handling --
+
+    fn check_focus_lost(&mut self, ctx: &egui::Context) {
+        if matches!(self.sm.state(), OverlayState::Hidden) {
+            return;
+        }
+        let focused = ctx.input(|i| i.viewport().focused);
+        if focused == Some(true) {
+            self.sm.set_focused();
+        } else if focused == Some(false) {
+            let effects = self.sm.handle(UiEvent::FocusLost);
+            self.execute_effects(effects, ctx);
+        }
+    }
+
+    // -- Window management (platform / egui dependent) --
 
     fn capture_mouse_position(&mut self) {
         self.spawn_position = self
             .platform
             .mouse_position()
             .map(|(x, y)| egui::pos2(x as f32, y as f32));
-    }
-
-    fn next_request_id(&mut self) -> u64 {
-        self.request_id_counter += 1;
-        self.request_id_counter
-    }
-
-    fn start_processing(&mut self, text: String, ctx: &egui::Context) {
-        info!("starting {} ({} chars)", self.mode.label(), text.len());
-        self.original_text = Some(text.clone());
-        let rid = self.next_request_id();
-        self.current_request_id = rid;
-        let _ = self.cmd_tx.send(WorkerCommand::Process {
-            text,
-            mode: self.mode,
-            request_id: rid,
-        });
-        self.state = OverlayState::Processing;
-        self.capture_mouse_position();
-        self.user_repositioned = false;
-        self.show_window(ctx);
-    }
-
-    fn switch_mode(&mut self, new_mode: ProcessMode) {
-        if self.mode == new_mode {
-            return;
-        }
-        self.mode = new_mode;
-
-        match &self.state {
-            OverlayState::Processing => {
-                // Cancel current request and re-send with new mode.
-                let _ = self.cmd_tx.send(WorkerCommand::Cancel);
-                if let Some(text) = self.original_text.clone() {
-                    let rid = self.next_request_id();
-                    self.current_request_id = rid;
-                    let _ = self.cmd_tx.send(WorkerCommand::Process {
-                        text,
-                        mode: self.mode,
-                        request_id: rid,
-                    });
-                }
-            }
-            OverlayState::Result(_) | OverlayState::Error(_) => {
-                // Re-process original text with new mode.
-                if let Some(text) = self.original_text.clone() {
-                    let rid = self.next_request_id();
-                    self.current_request_id = rid;
-                    let _ = self.cmd_tx.send(WorkerCommand::Process {
-                        text,
-                        mode: self.mode,
-                        request_id: rid,
-                    });
-                    self.state = OverlayState::Processing;
-                }
-            }
-            OverlayState::Hidden => {}
-        }
-    }
-
-    fn show_error(&mut self, message: String, ctx: &egui::Context) {
-        error!("pipeline error: {message}");
-        self.state = OverlayState::Error(message);
-        self.capture_mouse_position();
-        self.user_repositioned = false;
-        self.show_window(ctx);
     }
 
     /// Reposition the window so it is centered on `spawn_position`,
@@ -227,67 +221,16 @@ impl OverlayApp {
         }
     }
 
-    fn show_window(&mut self, ctx: &egui::Context) {
+    fn show_window(&self, ctx: &egui::Context) {
         #[cfg(target_os = "macos")]
         crate::platform::macos::configure_window_for_spaces();
 
-        if !self.user_repositioned {
-            let win_size = ctx
-                .input(|i| i.viewport().inner_rect)
-                .map(|r| r.size())
-                .unwrap_or(egui::vec2(400.0, 120.0));
-            self.reposition_window(ctx, win_size);
-        }
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-        self.has_been_focused = false;
     }
 
-    fn hide_window(&mut self, ctx: &egui::Context) {
-        self.state = OverlayState::Hidden;
+    fn hide_window(&self, ctx: &egui::Context) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-    }
-
-    fn poll_responses(&mut self, ctx: &egui::Context) {
-        while let Ok(response) = self.resp_rx.try_recv() {
-            match response {
-                WorkerResponse::Complete { result, request_id } => {
-                    if request_id != self.current_request_id {
-                        debug!("ignoring stale response (id={request_id}, current={})", self.current_request_id);
-                        continue;
-                    }
-                    if let Err(e) = self.clipboard.write_text(&result) {
-                        self.state = OverlayState::Error(e.to_string());
-                    } else {
-                        info!("{} complete ({} chars), copied to clipboard", self.mode.label(), result.len());
-                        self.state = OverlayState::Result(result);
-                    }
-                }
-                WorkerResponse::Error { message, request_id } => {
-                    if request_id != self.current_request_id {
-                        debug!("ignoring stale error (id={request_id}, current={})", self.current_request_id);
-                        continue;
-                    }
-                    error!("worker error: {message}");
-                    self.state = OverlayState::Error(message);
-                }
-            }
-            // Ensure window is visible for result/error.
-            self.show_window(ctx);
-        }
-    }
-
-    fn check_focus_lost(&mut self, ctx: &egui::Context) {
-        if matches!(self.state, OverlayState::Hidden) {
-            return;
-        }
-        let focused = ctx.input(|i| i.viewport().focused);
-        if focused == Some(true) {
-            self.has_been_focused = true;
-        } else if focused == Some(false) && self.has_been_focused {
-            // Only close after we've confirmed the window had focus at least once.
-            self.hide_window(ctx);
-        }
     }
 }
 
@@ -305,31 +248,39 @@ impl eframe::App for OverlayApp {
 
         // Ensure window is hidden when state is Hidden.
         // Fixes macOS startup where with_visible(false) doesn't fully suppress the window.
-        if matches!(self.state, OverlayState::Hidden) {
+        if matches!(self.sm.state(), OverlayState::Hidden) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
 
+        // 1. Process worker responses.
         self.poll_responses(ctx);
+
+        // 2. Process hotkeys.
         self.poll_hotkeys(ctx);
 
-        // --- Diagnostics: drive scenario runner ---
+        // 3. Diagnostics: drive scenario runner.
         #[cfg(feature = "diagnostics")]
         {
-            let state_name = self.state.variant_name();
+            let state_name = self.sm.variant_name();
             match self.scenario_runner.tick(state_name, &self.cmd_tx) {
                 crate::diagnostics::ScenarioAction::None => {}
                 crate::diagnostics::ScenarioAction::ShowOverlay { mode } => {
-                    self.mode = mode;
-                    self.state = OverlayState::Processing;
-                    self.capture_mouse_position();
-                    self.user_repositioned = false;
-                    self.show_window(ctx);
+                    self.sm.set_mode(mode);
+                    let effects = self.sm.handle(UiEvent::TextReady(
+                        // Scenario runner already sent the Process command;
+                        // we need the text for state machine bookkeeping.
+                        // TODO(step4): refactor runner to not send commands directly.
+                        String::new(),
+                    ));
+                    self.execute_effects(effects, ctx);
                 }
                 crate::diagnostics::ScenarioAction::SwitchMode(mode) => {
-                    self.switch_mode(mode);
+                    let effects = self.sm.handle(UiEvent::UserSwitchMode(mode));
+                    self.execute_effects(effects, ctx);
                 }
                 crate::diagnostics::ScenarioAction::HideOverlay => {
-                    self.hide_window(ctx);
+                    let effects = self.sm.handle(UiEvent::UserClose);
+                    self.execute_effects(effects, ctx);
                 }
                 crate::diagnostics::ScenarioAction::Quit => {
                     info!("diag: all scenarios finished, exiting");
@@ -338,7 +289,7 @@ impl eframe::App for OverlayApp {
             }
         }
 
-        // --- Diagnostics: receive screenshot events ---
+        // 4. Diagnostics: receive screenshot events.
         #[cfg(feature = "diagnostics")]
         ctx.input(|i| {
             for event in &i.events {
@@ -348,73 +299,56 @@ impl eframe::App for OverlayApp {
             }
         });
 
-        // Reset egui Area stored sizing when state variant changes.
-        // egui::Area persists the previous frame's content size as the next frame's
-        // max_rect. Without this reset, transitioning from a short state (Processing)
-        // to a tall one (Result) would starve the ScrollArea of vertical space.
-        let disc = std::mem::discriminant(&self.state);
-        if disc != self.prev_state_disc {
-            #[cfg(feature = "diagnostics")]
-            {
-                let to = self.state.variant_name();
-                self.diag.on_state_transition(self.prev_state_name, to);
-                self.prev_state_name = to;
-            }
+        // 5. Render overlay.
+        let output = overlay::render(self.sm.state(), self.sm.mode(), ctx);
 
-            ctx.memory_mut(|m| m.reset_areas());
-            self.prev_state_disc = disc;
-        }
-
-        let output = overlay::render(&self.state, self.mode, ctx);
-
-        // Resize viewport to fit rendered content.
+        // 6. Resize viewport to fit rendered content.
         if let Some(desired) = output.desired_size {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(desired));
 
-            if !matches!(self.state, OverlayState::Hidden) && !self.user_repositioned {
+            if !matches!(self.sm.state(), OverlayState::Hidden) && !self.sm.user_repositioned() {
                 self.reposition_window(ctx, desired);
             }
         }
 
-        match output.action {
-            overlay::OverlayAction::None => {}
-            overlay::OverlayAction::Close => {
-                self.hide_window(ctx);
-            }
-            overlay::OverlayAction::Cancel => {
-                let _ = self.cmd_tx.send(WorkerCommand::Cancel);
-                self.hide_window(ctx);
-            }
+        // 7. Handle overlay UI actions.
+        let event = match output.action {
+            overlay::OverlayAction::Close => Some(UiEvent::UserClose),
+            overlay::OverlayAction::Cancel => Some(UiEvent::UserCancel),
+            overlay::OverlayAction::SwitchMode(m) => Some(UiEvent::UserSwitchMode(m)),
             overlay::OverlayAction::StartDrag => {
-                self.user_repositioned = true;
+                self.sm.set_user_repositioned();
                 ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                None
             }
-            overlay::OverlayAction::SwitchMode(new_mode) => {
-                self.switch_mode(new_mode);
-            }
+            overlay::OverlayAction::None => None,
+        };
+        if let Some(ev) = event {
+            let effects = self.sm.handle(ev);
+            self.execute_effects(effects, ctx);
         }
 
-        // --- Diagnostics: record frame + flush stale screenshots ---
+        // 8. Diagnostics: record frame data + flush stale screenshots.
         #[cfg(feature = "diagnostics")]
         {
             use crate::diagnostics::FrameSnapshot;
             self.diag.record_frame(FrameSnapshot {
                 frame: self.diag.frame_counter(),
-                state: self.state.variant_name(),
-                mode: self.mode.label(),
+                state: self.sm.variant_name(),
+                mode: self.sm.mode().label(),
                 content_size: output.content_size.map(|v| [v.x, v.y]),
                 desired_size: output.desired_size.map(|v| [v.x, v.y]),
                 viewport_inner_rect: ctx
                     .input(|i| i.viewport().inner_rect)
                     .map(|r| [r.min.x, r.min.y, r.max.x, r.max.y]),
                 spawn_position: self.spawn_position.map(|p| [p.x, p.y]),
-                user_repositioned: self.user_repositioned,
+                user_repositioned: self.sm.user_repositioned(),
             });
             self.diag.tick_screenshot(ctx);
             self.diag.flush_pending_if_stale();
         }
 
-        // Skip focus-loss auto-hide when diagnostics scenario runner is active.
+        // 9. Focus-loss auto-hide (skip during diagnostics).
         #[cfg(feature = "diagnostics")]
         let skip_focus_check = true;
         #[cfg(not(feature = "diagnostics"))]
@@ -424,8 +358,8 @@ impl eframe::App for OverlayApp {
             self.check_focus_lost(ctx);
         }
 
-        // Schedule next repaint.
-        match &self.state {
+        // 10. Schedule next repaint.
+        match self.sm.state() {
             OverlayState::Hidden => {
                 ctx.request_repaint_after(Duration::from_millis(IDLE_POLL_MS));
             }
