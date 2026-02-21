@@ -1,3 +1,4 @@
+use std::ffi::{c_char, c_ulong, c_void};
 use std::thread;
 use std::time::Duration;
 
@@ -5,7 +6,7 @@ use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode,
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::Platform;
 use crate::PlatformError;
@@ -16,9 +17,60 @@ const KEY_C: CGKeyCode = 0x08;
 /// Delay between key-down and key-up events (ms).
 const KEY_EVENT_DELAY_MS: u64 = 50;
 
+/// NSWindowCollectionBehavior flags.
+const NS_WINDOW_COLLECTION_BEHAVIOR_MOVE_TO_ACTIVE_SPACE: c_ulong = 1 << 1;
+const NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY: c_ulong = 1 << 8;
+
 #[link(name = "AppKit", kind = "framework")]
 extern "C" {
     fn AXIsProcessTrusted() -> bool;
+}
+
+#[link(name = "objc", kind = "dylib")]
+extern "C" {
+    fn objc_getClass(name: *const c_char) -> *mut c_void;
+    fn sel_registerName(name: *const c_char) -> *mut c_void;
+    fn objc_msgSend(obj: *mut c_void, sel: *mut c_void) -> *mut c_void;
+}
+
+/// Set NSWindowCollectionBehavior on the app window so that
+/// the overlay moves to the active Space and can appear over fullscreen apps.
+/// Returns true if successfully configured.
+pub fn configure_window_for_spaces() -> bool {
+    // Use typed function pointer cast for objc_msgSend with extra args
+    // to avoid clashing extern declarations and ensure correct arm64 ABI.
+    type MsgSendUlong = unsafe extern "C" fn(*mut c_void, *mut c_void, c_ulong);
+    let msg_send_ulong: MsgSendUlong = unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+
+    unsafe {
+        let cls = objc_getClass(c"NSApplication".as_ptr());
+        if cls.is_null() {
+            warn!("failed to get NSApplication class");
+            return false;
+        }
+        let app = objc_msgSend(cls, sel_registerName(c"sharedApplication".as_ptr()));
+        if app.is_null() {
+            warn!("failed to get shared NSApplication");
+            return false;
+        }
+        // Use [NSApp windows].firstObject instead of keyWindow,
+        // because the window may not be key when hidden.
+        let windows = objc_msgSend(app, sel_registerName(c"windows".as_ptr()));
+        if windows.is_null() {
+            return false;
+        }
+        let window = objc_msgSend(windows, sel_registerName(c"firstObject".as_ptr()));
+        if window.is_null() {
+            return false;
+        }
+        let behavior = NS_WINDOW_COLLECTION_BEHAVIOR_MOVE_TO_ACTIVE_SPACE
+            | NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY;
+        let sel_set = sel_registerName(c"setCollectionBehavior:".as_ptr());
+        msg_send_ulong(window, sel_set, behavior);
+
+        debug!("configured NSWindow collection behavior for Spaces");
+        true
+    }
 }
 
 pub struct MacOsPlatform;
