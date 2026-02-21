@@ -20,6 +20,15 @@ cargo test <test_name>         # run single test
 
 Cross-compile to Windows (from macOS): `cargo build --release --target x86_64-pc-windows-gnu`
 
+### Diagnostics
+
+```bash
+DIAG_MOCK=1 cargo run --features diagnostics   # mock LLM, auto-run all scenarios
+cargo run --features diagnostics                # real LLM, auto-run all scenarios
+```
+
+Runs 7 test scenarios automatically (short text, long scroll, mode switch, error, Korean, correct mode, text wrapping), captures a screenshot + JSON sidecar per state transition, then exits. Output: `target/diagnostics/`. See `src/diagnostics.rs` for details.
+
 ## Workflow
 
 - Create a feature branch per feature: `phase<N>-<feature>` (e.g. `phase1-api-client`, `phase2-sse-streaming`).
