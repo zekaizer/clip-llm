@@ -1,3 +1,4 @@
+use std::env;
 use std::time::Duration;
 
 use reqwest::blocking::Client;
@@ -6,9 +7,10 @@ use tracing::{debug, info};
 
 use crate::ApiError;
 
-// Phase 1: all values hardcoded as constants.
-const API_ENDPOINT: &str = "http://localhost:8000/v1/chat/completions";
-const MODEL_NAME: &str = "MiniMaxAI/MiniMax-M2.5";
+// Defaults — overridable via environment variables.
+const DEFAULT_API_ENDPOINT: &str = "http://localhost:8000/v1";
+const CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
+const DEFAULT_MODEL_NAME: &str = "MiniMaxAI/MiniMax-M2.5";
 const SYSTEM_PROMPT: &str = "You are a helpful assistant.";
 const TEMPERATURE: f64 = 0.3;
 const MAX_TOKENS: u32 = 1024;
@@ -51,6 +53,9 @@ pub(crate) struct ResponseMessage {
 
 pub struct LlmClient {
     client: Client,
+    endpoint: String,
+    model: String,
+    api_key: Option<String>,
 }
 
 #[cfg(test)]
@@ -81,17 +86,31 @@ mod tests {
 
 impl LlmClient {
     pub fn new() -> Result<Self, ApiError> {
+        let base = env::var("CLIP_LLM_API_ENDPOINT")
+            .unwrap_or_else(|_| DEFAULT_API_ENDPOINT.to_string());
+        let endpoint = format!("{}{}", base.trim_end_matches('/'), CHAT_COMPLETIONS_PATH);
+        let model =
+            env::var("CLIP_LLM_MODEL").unwrap_or_else(|_| DEFAULT_MODEL_NAME.to_string());
+        let api_key = env::var("CLIP_LLM_API_KEY").ok();
+
+        info!("endpoint={endpoint}, model={model}, api_key={}", if api_key.is_some() { "set" } else { "unset" });
+
         let client = Client::builder()
             .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
             .build()?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            endpoint,
+            model,
+            api_key,
+        })
     }
 
     /// Send user text to the vLLM server and return the raw response content.
     /// Think-block stripping is handled separately by `response::strip_think_blocks`.
     pub fn complete(&self, user_text: &str) -> Result<String, ApiError> {
         let body = ChatRequest {
-            model: MODEL_NAME,
+            model: &self.model,
             messages: vec![
                 Message {
                     role: "system",
@@ -106,15 +125,15 @@ impl LlmClient {
             max_tokens: MAX_TOKENS,
         };
 
-        info!("sending request to {}", API_ENDPOINT);
-        debug!("model={}, temperature={}, max_tokens={}", MODEL_NAME, TEMPERATURE, MAX_TOKENS);
+        info!("sending request to {}", self.endpoint);
+        debug!("model={}, temperature={}, max_tokens={}", self.model, TEMPERATURE, MAX_TOKENS);
 
-        let resp = self
-            .client
-            .post(API_ENDPOINT)
-            .json(&body)
-            .send()?
-            .error_for_status()?;
+        let mut req = self.client.post(&self.endpoint).json(&body);
+        if let Some(key) = &self.api_key {
+            req = req.bearer_auth(key);
+        }
+
+        let resp = req.send()?.error_for_status()?;
 
         let chat: ChatResponse = resp.json()?;
 
