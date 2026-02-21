@@ -20,7 +20,7 @@ fn main() {
         )
         .init();
     debug!("debug logging enabled");
-    info!("clip-llm starting");
+    info!("clip-llm v{} starting", env!("CARGO_PKG_VERSION"));
 
     if let Err(e) = run() {
         error!("fatal: {e}");
