@@ -258,20 +258,15 @@ impl eframe::App for OverlayApp {
         // 2. Process hotkeys.
         self.poll_hotkeys(ctx);
 
-        // 3. Diagnostics: drive scenario runner.
+        // 3. Diagnostics: drive scenario runner via state machine.
         #[cfg(feature = "diagnostics")]
         {
             let state_name = self.sm.variant_name();
-            match self.scenario_runner.tick(state_name, &self.cmd_tx) {
+            match self.scenario_runner.tick(state_name) {
                 crate::diagnostics::ScenarioAction::None => {}
-                crate::diagnostics::ScenarioAction::ShowOverlay { mode } => {
+                crate::diagnostics::ScenarioAction::ShowOverlay { mode, text } => {
                     self.sm.set_mode(mode);
-                    let effects = self.sm.handle(UiEvent::TextReady(
-                        // Scenario runner already sent the Process command;
-                        // we need the text for state machine bookkeeping.
-                        // TODO(step4): refactor runner to not send commands directly.
-                        String::new(),
-                    ));
+                    let effects = self.sm.handle(UiEvent::TextReady(text));
                     self.execute_effects(effects, ctx);
                 }
                 crate::diagnostics::ScenarioAction::SwitchMode(mode) => {
