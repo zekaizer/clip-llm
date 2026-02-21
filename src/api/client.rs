@@ -13,7 +13,7 @@ const DEFAULT_API_ENDPOINT: &str = "http://localhost:8000/v1";
 const CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
 const DEFAULT_MODEL_NAME: &str = "MiniMaxAI/MiniMax-M2.5";
 const TEMPERATURE: f64 = 0.1;
-const MAX_TOKENS: u32 = 1024;
+const MAX_TOKENS: u32 = 16384;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
 
 // -- Request types (OpenAI chat completions schema) --
