@@ -7,7 +7,7 @@ use tracing::{error, info, warn};
 use clip_llm::api::client::LlmClient;
 use clip_llm::api::response::strip_think_blocks;
 use clip_llm::clipboard::ClipboardManager;
-use clip_llm::hotkey::DoubleTapDetector;
+use clip_llm::hotkey::{HotkeyDetector, TapAction};
 use clip_llm::platform::{self, NativePlatform, Platform};
 use clip_llm::{AppError, HotkeyError};
 
@@ -35,9 +35,9 @@ fn run() -> Result<(), AppError> {
         .register(hotkey)
         .map_err(|e| HotkeyError::RegisterFailed(e.to_string()))?;
 
-    info!("registered hotkey: Ctrl+Shift+C (double-tap to activate)");
+    info!("registered hotkey: Ctrl+Shift+C (single-tap: clipboard, double-tap: copy selection)");
 
-    let mut detector = DoubleTapDetector::new();
+    let mut detector = HotkeyDetector::new();
     let mut clipboard = ClipboardManager::new()?;
     let llm = LlmClient::new()?;
     let receiver = GlobalHotKeyEvent::receiver();
@@ -49,27 +49,55 @@ fn run() -> Result<(), AppError> {
                 continue;
             }
 
-            if !detector.on_press() {
-                continue;
+            match detector.on_press() {
+                TapAction::Pending => {}
+                TapAction::DoubleTap => {
+                    info!("double-tap triggered, copying selection...");
+                    if let Err(e) = handle_copy_pipeline(&mut clipboard, &plat, &llm) {
+                        error!("pipeline error: {e}");
+                    }
+                }
             }
+        }
 
-            info!("double-tap triggered, processing...");
-            if let Err(e) = handle_pipeline(&mut clipboard, &plat, &llm) {
+        // Check if a single-tap has timed out.
+        if detector.check_timeout() {
+            info!("single-tap triggered, using clipboard content...");
+            if let Err(e) = handle_clipboard_pipeline(&mut clipboard, &llm) {
                 error!("pipeline error: {e}");
             }
         }
     });
 }
 
-fn handle_pipeline(
+/// Single-tap: read existing clipboard content and send to LLM.
+fn handle_clipboard_pipeline(
+    clipboard: &mut ClipboardManager,
+    llm: &LlmClient,
+) -> Result<(), AppError> {
+    let input = clipboard.read_clipboard()?;
+    process_llm(clipboard, llm, &input)
+}
+
+/// Double-tap: copy current selection, then send to LLM.
+fn handle_copy_pipeline(
     clipboard: &mut ClipboardManager,
     platform: &dyn Platform,
     llm: &LlmClient,
 ) -> Result<(), AppError> {
-    let input = clipboard.read_text(platform)?;
+    let input = clipboard.copy_and_read(platform)?;
+    process_llm(clipboard, llm, &input)
+}
+
+/// Shared LLM processing: send input, strip think blocks, write response to clipboard.
+fn process_llm(
+    clipboard: &mut ClipboardManager,
+    llm: &LlmClient,
+    input: &str,
+) -> Result<(), AppError> {
     info!("input: {} chars", input.len());
 
-    let raw_response = llm.complete(&input)?;
+    let raw_response = llm.complete(input)?;
     let response = strip_think_blocks(&raw_response);
 
     if response.is_empty() {

@@ -5,35 +5,62 @@ use tracing::debug;
 /// Timeout window for double-tap detection.
 const DOUBLE_TAP_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// Detects double-tap of a hotkey within a timeout window.
-/// Returns `true` from `on_press()` when the second tap is detected.
-pub struct DoubleTapDetector {
+/// Result of a hotkey press event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TapAction {
+    /// First tap registered, waiting for potential second tap.
+    Pending,
+    /// Double-tap confirmed within the timeout window.
+    DoubleTap,
+}
+
+/// Detects single-tap vs double-tap of a hotkey.
+///
+/// - `on_press()` returns `Pending` on first tap, `DoubleTap` on second tap within timeout.
+/// - `check_timeout()` returns `true` when a pending single-tap has expired (single-tap confirmed).
+pub struct HotkeyDetector {
     last_press: Option<Instant>,
 }
 
-impl Default for DoubleTapDetector {
+impl Default for HotkeyDetector {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl DoubleTapDetector {
+impl HotkeyDetector {
     pub fn new() -> Self {
         Self { last_press: None }
     }
 
-    /// Call on each hotkey press event. Returns `true` if this press
-    /// completes a double-tap within the timeout window.
-    pub fn on_press(&mut self) -> bool {
+    /// Call on each hotkey press event.
+    /// Returns `DoubleTap` if this press completes a double-tap within the timeout,
+    /// otherwise returns `Pending`.
+    pub fn on_press(&mut self) -> TapAction {
         let now = Instant::now();
         if let Some(last) = self.last_press.take() {
             if now.duration_since(last) <= DOUBLE_TAP_TIMEOUT {
                 debug!("double-tap detected");
-                return true;
+                return TapAction::DoubleTap;
             }
         }
         // First tap or timeout expired — record and wait.
         self.last_press = Some(now);
+        debug!("single tap registered, waiting for potential double-tap");
+        TapAction::Pending
+    }
+
+    /// Check if a pending single-tap has timed out.
+    /// Returns `true` when a first tap was recorded and the timeout has elapsed,
+    /// confirming a single-tap action.
+    pub fn check_timeout(&mut self) -> bool {
+        if let Some(last) = self.last_press {
+            if last.elapsed() > DOUBLE_TAP_TIMEOUT {
+                self.last_press = None;
+                debug!("single-tap confirmed (timeout elapsed)");
+                return true;
+            }
+        }
         false
     }
 }
@@ -44,31 +71,50 @@ mod tests {
     use std::thread;
 
     #[test]
-    fn single_press_does_not_trigger() {
-        let mut d = DoubleTapDetector::new();
-        assert!(!d.on_press());
+    fn single_press_returns_pending() {
+        let mut d = HotkeyDetector::new();
+        assert_eq!(d.on_press(), TapAction::Pending);
     }
 
     #[test]
-    fn double_press_triggers() {
-        let mut d = DoubleTapDetector::new();
-        assert!(!d.on_press());
-        assert!(d.on_press());
+    fn double_press_returns_double_tap() {
+        let mut d = HotkeyDetector::new();
+        assert_eq!(d.on_press(), TapAction::Pending);
+        assert_eq!(d.on_press(), TapAction::DoubleTap);
     }
 
     #[test]
-    fn timeout_resets() {
-        let mut d = DoubleTapDetector::new();
-        assert!(!d.on_press());
+    fn timeout_resets_to_pending() {
+        let mut d = HotkeyDetector::new();
+        assert_eq!(d.on_press(), TapAction::Pending);
         thread::sleep(Duration::from_millis(550));
-        assert!(!d.on_press());
+        assert_eq!(d.on_press(), TapAction::Pending);
     }
 
     #[test]
-    fn resets_after_trigger() {
-        let mut d = DoubleTapDetector::new();
-        assert!(!d.on_press()); // first tap
-        assert!(d.on_press());  // second tap → trigger
-        assert!(!d.on_press()); // third tap → new first tap
+    fn resets_after_double_tap() {
+        let mut d = HotkeyDetector::new();
+        assert_eq!(d.on_press(), TapAction::Pending);
+        assert_eq!(d.on_press(), TapAction::DoubleTap);
+        assert_eq!(d.on_press(), TapAction::Pending);
+    }
+
+    #[test]
+    fn check_timeout_confirms_single_tap() {
+        let mut d = HotkeyDetector::new();
+        assert_eq!(d.on_press(), TapAction::Pending);
+        assert!(!d.check_timeout()); // not yet expired
+        thread::sleep(Duration::from_millis(550));
+        assert!(d.check_timeout()); // now expired → single-tap confirmed
+        assert!(!d.check_timeout()); // consumed, no longer pending
+    }
+
+    #[test]
+    fn check_timeout_not_triggered_after_double_tap() {
+        let mut d = HotkeyDetector::new();
+        assert_eq!(d.on_press(), TapAction::Pending);
+        assert_eq!(d.on_press(), TapAction::DoubleTap);
+        thread::sleep(Duration::from_millis(550));
+        assert!(!d.check_timeout()); // double-tap consumed last_press
     }
 }
