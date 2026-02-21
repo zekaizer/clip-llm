@@ -113,12 +113,13 @@ impl LlmClient {
     /// Think-block stripping is handled separately by `response::strip_think_blocks`.
     pub async fn complete(&self, user_text: &str, mode: ProcessMode) -> Result<String, ApiError> {
         let inner = &self.0;
+        let sys_prompt = mode.system_prompt();
         let body = ChatRequest {
             model: &inner.model,
             messages: vec![
                 Message {
                     role: "system",
-                    content: mode.system_prompt(),
+                    content: &sys_prompt,
                 },
                 Message {
                     role: "user",

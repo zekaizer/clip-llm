@@ -710,4 +710,41 @@ mod tests {
         assert_eq!(*sm.state(), OverlayState::Hidden);
         assert!(sm.original_text().is_none());
     }
+
+    // === Summarize mode ===
+
+    #[test]
+    fn text_ready_with_summarize_mode() {
+        let mut sm = StateMachine::new(ProcessMode::Summarize);
+        let effects = start_processing(&mut sm, "long text to summarize");
+
+        assert_eq!(*sm.state(), OverlayState::Processing);
+        assert_eq!(sm.mode(), ProcessMode::Summarize);
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            UiEffect::SendProcess { mode: ProcessMode::Summarize, .. }
+        )));
+    }
+
+    #[test]
+    fn switch_to_summarize_from_result() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+
+        sm.handle(UiEvent::WorkerResult {
+            text: "translated".into(),
+            request_id: rid,
+        });
+        assert_eq!(*sm.state(), OverlayState::Result("translated".into()));
+
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Summarize));
+        assert_eq!(*sm.state(), OverlayState::Processing);
+        assert_eq!(sm.mode(), ProcessMode::Summarize);
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            UiEffect::SendProcess { mode: ProcessMode::Summarize, .. }
+        )));
+        assert!(effects.contains(&UiEffect::ResetAreas));
+    }
 }

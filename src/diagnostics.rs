@@ -372,6 +372,20 @@ impl DiagScenarioRunner {
                 switch_to: None,
             },
             Scenario {
+                name: "summarize_mode",
+                input: "Rust is a systems programming language focused on safety, speed, and \
+                    concurrency. It achieves memory safety without garbage collection through \
+                    its ownership system with three key rules: each value has exactly one owner, \
+                    ownership can be transferred (moved) but not implicitly copied, and when the \
+                    owner goes out of scope the value is dropped. The borrow checker enforces \
+                    these rules at compile time, preventing data races and use-after-free bugs \
+                    without any runtime overhead. Rust also provides fearless concurrency through \
+                    its type system, ensuring thread safety at compile time rather than relying \
+                    on runtime checks or locks.",
+                mode: ProcessMode::Summarize,
+                switch_to: None,
+            },
+            Scenario {
                 name: "long_single_line",
                 input: "A",
                 mode: ProcessMode::Translate,
