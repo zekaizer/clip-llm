@@ -10,6 +10,7 @@ pub enum OverlayAction {
     None,
     Close,
     Cancel,
+    StartDrag,
 }
 
 pub struct OverlayOutput {
@@ -43,6 +44,7 @@ pub fn render(state: &OverlayState, ctx: &egui::Context) -> OverlayOutput {
 
     let area_resp = egui::Area::new("overlay".into())
         .fixed_pos(egui::pos2(0.0, 0.0))
+        .sense(egui::Sense::drag())
         .show(ctx, |ui| {
             frame.show(ui, |ui| {
                 ui.set_width(OVERLAY_WIDTH);
@@ -90,6 +92,11 @@ pub fn render(state: &OverlayState, ctx: &egui::Context) -> OverlayOutput {
                 }
             });
         });
+
+    // Drag the OS window when the user drags the overlay area.
+    if area_resp.response.drag_started() {
+        action = OverlayAction::StartDrag;
+    }
 
     // Close on Escape key.
     if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {

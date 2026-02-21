@@ -37,6 +37,8 @@ pub struct OverlayApp {
     has_been_focused: bool,
     /// Mouse cursor position captured at hotkey trigger time (egui logical points).
     spawn_position: Option<egui::Pos2>,
+    /// True after the user drags the overlay; suppresses automatic repositioning.
+    user_repositioned: bool,
 }
 
 impl OverlayApp {
@@ -54,6 +56,7 @@ impl OverlayApp {
             detector: HotkeyDetector::new(),
             has_been_focused: false,
             spawn_position: None,
+            user_repositioned: false,
         }
     }
 
@@ -135,6 +138,7 @@ impl OverlayApp {
             .map(|r| r.size())
             .unwrap_or(egui::vec2(480.0, 120.0));
         self.reposition_window(ctx, win_size);
+        self.user_repositioned = false;
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         self.has_been_focused = false;
@@ -197,7 +201,7 @@ impl eframe::App for OverlayApp {
         // Resize viewport to fit content and re-center on spawn position.
         if let Some(desired) = output.desired_size {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(desired));
-            if !matches!(self.state, OverlayState::Hidden) {
+            if !matches!(self.state, OverlayState::Hidden) && !self.user_repositioned {
                 self.reposition_window(ctx, desired);
             }
         }
@@ -210,6 +214,10 @@ impl eframe::App for OverlayApp {
             overlay::OverlayAction::Cancel => {
                 let _ = self.cmd_tx.send(WorkerCommand::Cancel);
                 self.hide_window(ctx);
+            }
+            overlay::OverlayAction::StartDrag => {
+                self.user_repositioned = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
         }
 
