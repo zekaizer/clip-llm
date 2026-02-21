@@ -51,6 +51,11 @@ struct TransitionContext {
 // DiagCollector
 // ---------------------------------------------------------------------------
 
+/// Extra frames to wait after viewport settles before capturing.
+/// macOS compositor applies a fade-in when a window becomes visible;
+/// this delay lets the window reach full opacity.
+const POST_SETTLE_DELAY: u64 = 10;
+
 pub struct DiagCollector {
     ring: VecDeque<FrameSnapshot>,
     frame_counter: u64,
@@ -58,6 +63,8 @@ pub struct DiagCollector {
     /// True once we've sent the Screenshot viewport command and are waiting
     /// for the Event::Screenshot callback.
     screenshot_requested: bool,
+    /// Frame at which the viewport first settled (size matched desired).
+    settled_at_frame: Option<u64>,
     dump_counter: u32,
     dump_dir: PathBuf,
     transition_ctx: Option<TransitionContext>,
@@ -80,6 +87,7 @@ impl DiagCollector {
             frame_counter: 0,
             pending_screenshot: false,
             screenshot_requested: false,
+            settled_at_frame: None,
             dump_counter: 0,
             dump_dir,
             transition_ctx: None,
@@ -133,32 +141,39 @@ impl DiagCollector {
 
         self.pending_screenshot = true;
         self.screenshot_requested = false;
+        self.settled_at_frame = None;
     }
 
     /// Called every frame after rendering. Checks if the viewport has settled
-    /// (content rendered + window resized to match) and then requests screenshot.
+    /// (content rendered + window resized to match), then waits for macOS
+    /// fade-in to complete before requesting the screenshot.
     pub fn tick_screenshot(&mut self, ctx: &egui::Context) {
         if !self.pending_screenshot || self.screenshot_requested {
             return;
         }
         if let Some(snap) = self.ring.back() {
             let settled = match (snap.desired_size, snap.viewport_inner_rect) {
-                // Content rendered and viewport resized to approximately match.
                 (Some(desired), Some(vp)) => {
                     let vp_w = vp[2] - vp[0];
                     let vp_h = vp[3] - vp[1];
                     (vp_w - desired[0]).abs() < 4.0 && (vp_h - desired[1]).abs() < 4.0
                 }
-                // Hidden state: no content, just capture immediately.
                 (None, _) => true,
                 _ => false,
             };
+
             if settled {
-                debug!("diag: viewport settled at frame {}, requesting screenshot", self.frame_counter);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(
-                    egui::UserData::default(),
-                ));
-                self.screenshot_requested = true;
+                let settled_frame = *self.settled_at_frame.get_or_insert(self.frame_counter);
+                if self.frame_counter >= settled_frame + POST_SETTLE_DELAY {
+                    debug!(
+                        "diag: requesting screenshot at frame {} (settled at {})",
+                        self.frame_counter, settled_frame
+                    );
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(
+                        egui::UserData::default(),
+                    ));
+                    self.screenshot_requested = true;
+                }
             }
         }
     }
@@ -240,13 +255,17 @@ fn save_color_image_as_png(
     // Alpha-composite onto a dark background so transparent regions
     // render as visible dark gray instead of white/invisible in PNG.
     let bg: [u8; 3] = [20, 20, 20];
+    // egui::Color32 uses premultiplied alpha — r()/g()/b() already have
+    // alpha baked in. Composite: out = src_premul + bg * (1 - src_a).
     let rgba: Vec<u8> = image
         .pixels
         .iter()
         .flat_map(|c| {
             let a = c.a() as f32 / 255.0;
-            let blend = |fg: u8, bg: u8| -> u8 {
-                (fg as f32 * a + bg as f32 * (1.0 - a)).round() as u8
+            let blend = |fg_premul: u8, bg: u8| -> u8 {
+                (fg_premul as f32 + bg as f32 * (1.0 - a))
+                    .round()
+                    .min(255.0) as u8
             };
             [blend(c.r(), bg[0]), blend(c.g(), bg[1]), blend(c.b(), bg[2]), 255]
         })
