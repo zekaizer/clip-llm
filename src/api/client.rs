@@ -53,6 +53,32 @@ pub struct LlmClient {
     client: Client,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_valid_response() {
+        let json = r#"{"choices":[{"message":{"content":"hello"}}]}"#;
+        let resp: ChatResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.choices[0].message.content, "hello");
+    }
+
+    #[test]
+    fn parse_empty_choices() {
+        let json = r#"{"choices":[]}"#;
+        let resp: ChatResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.choices.is_empty());
+    }
+
+    #[test]
+    fn parse_ignores_extra_fields() {
+        let json = r#"{"id":"x","choices":[{"index":0,"message":{"role":"assistant","content":"hi"}}]}"#;
+        let resp: ChatResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.choices[0].message.content, "hi");
+    }
+}
+
 impl LlmClient {
     pub fn new() -> Result<Self, ApiError> {
         let client = Client::builder()
