@@ -1,1 +1,110 @@
-// Placeholder — implemented in next commit.
+use std::time::Duration;
+
+use reqwest::blocking::Client;
+use serde::{Deserialize, Serialize};
+use tracing::{debug, info};
+
+use crate::ApiError;
+
+// Phase 1: all values hardcoded as constants.
+const API_ENDPOINT: &str = "http://localhost:8000/v1/chat/completions";
+const MODEL_NAME: &str = "MiniMaxAI/MiniMax-M2.5";
+const SYSTEM_PROMPT: &str = "You are a helpful assistant.";
+const TEMPERATURE: f64 = 0.3;
+const MAX_TOKENS: u32 = 1024;
+const REQUEST_TIMEOUT_SECS: u64 = 30;
+
+// -- Request types (OpenAI chat completions schema) --
+
+#[derive(Serialize)]
+struct ChatRequest<'a> {
+    model: &'a str,
+    messages: Vec<Message<'a>>,
+    temperature: f64,
+    max_tokens: u32,
+}
+
+#[derive(Serialize)]
+struct Message<'a> {
+    role: &'a str,
+    content: &'a str,
+}
+
+// -- Response types --
+
+#[derive(Deserialize)]
+pub(crate) struct ChatResponse {
+    pub choices: Vec<Choice>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct Choice {
+    pub message: ResponseMessage,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ResponseMessage {
+    pub content: String,
+}
+
+// -- Client --
+
+pub struct LlmClient {
+    client: Client,
+}
+
+impl LlmClient {
+    pub fn new() -> Result<Self, ApiError> {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+            .build()?;
+        Ok(Self { client })
+    }
+
+    /// Send user text to the vLLM server and return the raw response content.
+    /// Think-block stripping is handled separately by `response::strip_think_blocks`.
+    pub fn complete(&self, user_text: &str) -> Result<String, ApiError> {
+        let body = ChatRequest {
+            model: MODEL_NAME,
+            messages: vec![
+                Message {
+                    role: "system",
+                    content: SYSTEM_PROMPT,
+                },
+                Message {
+                    role: "user",
+                    content: user_text,
+                },
+            ],
+            temperature: TEMPERATURE,
+            max_tokens: MAX_TOKENS,
+        };
+
+        info!("sending request to {}", API_ENDPOINT);
+        debug!("model={}, temperature={}, max_tokens={}", MODEL_NAME, TEMPERATURE, MAX_TOKENS);
+
+        let resp = self
+            .client
+            .post(API_ENDPOINT)
+            .json(&body)
+            .send()?
+            .error_for_status()?;
+
+        let chat: ChatResponse = resp.json()?;
+
+        let content = chat
+            .choices
+            .into_iter()
+            .next()
+            .ok_or(ApiError::EmptyResponse)?
+            .message
+            .content;
+
+        if content.is_empty() {
+            return Err(ApiError::EmptyResponse);
+        }
+
+        info!("received response ({} chars)", content.len());
+        Ok(content)
+    }
+}
