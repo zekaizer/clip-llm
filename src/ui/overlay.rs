@@ -21,6 +21,8 @@ pub struct OverlayOutput {
     pub action: OverlayAction,
     /// Desired viewport size based on rendered content.
     pub desired_size: Option<egui::Vec2>,
+    /// Raw content size before shadow padding (for diagnostics).
+    pub content_size: Option<egui::Vec2>,
 }
 
 /// Render the overlay panel. Returns action and desired viewport size.
@@ -29,6 +31,7 @@ pub fn render(state: &OverlayState, mode: ProcessMode, ctx: &egui::Context) -> O
         return OverlayOutput {
             action: OverlayAction::None,
             desired_size: None,
+            content_size: None,
         };
     }
 
@@ -146,6 +149,7 @@ pub fn render(state: &OverlayState, mode: ProcessMode, ctx: &egui::Context) -> O
     OverlayOutput {
         action,
         desired_size: Some(desired),
+        content_size: Some(content_size),
     }
 }
 

@@ -26,6 +26,17 @@ pub enum OverlayState {
     Error(String),
 }
 
+impl OverlayState {
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            Self::Hidden => "Hidden",
+            Self::Processing => "Processing",
+            Self::Result(_) => "Result",
+            Self::Error(_) => "Error",
+        }
+    }
+}
+
 pub struct OverlayApp {
     state: OverlayState,
     mode: ProcessMode,
@@ -45,6 +56,12 @@ pub struct OverlayApp {
     user_repositioned: bool,
     /// Tracks state variant changes to reset egui Area sizing on transitions.
     prev_state_disc: std::mem::Discriminant<OverlayState>,
+    #[cfg(feature = "diagnostics")]
+    diag: crate::diagnostics::DiagCollector,
+    #[cfg(feature = "diagnostics")]
+    scenario_runner: crate::diagnostics::DiagScenarioRunner,
+    #[cfg(feature = "diagnostics")]
+    prev_state_name: &'static str,
 }
 
 impl OverlayApp {
@@ -66,6 +83,12 @@ impl OverlayApp {
             spawn_position: None,
             user_repositioned: false,
             prev_state_disc: std::mem::discriminant(&OverlayState::Hidden),
+            #[cfg(feature = "diagnostics")]
+            diag: crate::diagnostics::DiagCollector::new(),
+            #[cfg(feature = "diagnostics")]
+            scenario_runner: crate::diagnostics::DiagScenarioRunner::new(),
+            #[cfg(feature = "diagnostics")]
+            prev_state_name: "Hidden",
         }
     }
 
@@ -260,12 +283,51 @@ impl eframe::App for OverlayApp {
         self.poll_responses(ctx);
         self.poll_hotkeys(ctx);
 
+        // --- Diagnostics: drive scenario runner ---
+        #[cfg(feature = "diagnostics")]
+        {
+            let state_name = self.state.variant_name();
+            match self.scenario_runner.tick(state_name, &self.cmd_tx) {
+                crate::diagnostics::ScenarioAction::None => {}
+                crate::diagnostics::ScenarioAction::ShowOverlay { mode } => {
+                    self.mode = mode;
+                    self.state = OverlayState::Processing;
+                    self.capture_mouse_position();
+                    self.user_repositioned = false;
+                    self.show_window(ctx);
+                }
+                crate::diagnostics::ScenarioAction::SwitchMode(mode) => {
+                    self.switch_mode(mode);
+                }
+                crate::diagnostics::ScenarioAction::HideOverlay => {
+                    self.hide_window(ctx);
+                }
+            }
+        }
+
+        // --- Diagnostics: receive screenshot events ---
+        #[cfg(feature = "diagnostics")]
+        ctx.input(|i| {
+            for event in &i.events {
+                if let egui::Event::Screenshot { image, .. } = event {
+                    self.diag.on_screenshot(image);
+                }
+            }
+        });
+
         // Reset egui Area stored sizing when state variant changes.
         // egui::Area persists the previous frame's content size as the next frame's
         // max_rect. Without this reset, transitioning from a short state (Processing)
         // to a tall one (Result) would starve the ScrollArea of vertical space.
         let disc = std::mem::discriminant(&self.state);
         if disc != self.prev_state_disc {
+            #[cfg(feature = "diagnostics")]
+            {
+                let to = self.state.variant_name();
+                self.diag.on_state_transition(self.prev_state_name, to, ctx);
+                self.prev_state_name = to;
+            }
+
             ctx.memory_mut(|m| m.reset_areas());
             self.prev_state_disc = disc;
         }
@@ -299,7 +361,34 @@ impl eframe::App for OverlayApp {
             }
         }
 
-        self.check_focus_lost(ctx);
+        // --- Diagnostics: record frame + flush stale screenshots ---
+        #[cfg(feature = "diagnostics")]
+        {
+            use crate::diagnostics::FrameSnapshot;
+            self.diag.record_frame(FrameSnapshot {
+                frame: self.diag.frame_counter(),
+                state: self.state.variant_name(),
+                mode: self.mode.label(),
+                content_size: output.content_size.map(|v| [v.x, v.y]),
+                desired_size: output.desired_size.map(|v| [v.x, v.y]),
+                viewport_inner_rect: ctx
+                    .input(|i| i.viewport().inner_rect)
+                    .map(|r| [r.min.x, r.min.y, r.max.x, r.max.y]),
+                spawn_position: self.spawn_position.map(|p| [p.x, p.y]),
+                user_repositioned: self.user_repositioned,
+            });
+            self.diag.flush_pending_if_stale();
+        }
+
+        // Skip focus-loss auto-hide when diagnostics scenario runner is active.
+        #[cfg(feature = "diagnostics")]
+        let skip_focus_check = true;
+        #[cfg(not(feature = "diagnostics"))]
+        let skip_focus_check = false;
+
+        if !skip_focus_check {
+            self.check_focus_lost(ctx);
+        }
 
         // Schedule next repaint.
         match &self.state {

@@ -46,6 +46,15 @@ pub fn spawn_worker(
                             debug!("cancelled previous in-flight request");
                         }
 
+                        // Mock mode: return canned responses without LLM call.
+                        #[cfg(feature = "diagnostics")]
+                        if std::env::var("DIAG_MOCK").is_ok() {
+                            let mock = crate::diagnostics::mock_response(&text);
+                            info!("worker: mock {} ({} chars)", mode.label(), mock.len());
+                            let _ = resp_tx.send(WorkerResponse::Complete { result: mock });
+                            continue;
+                        }
+
                         let (c_tx, c_rx) = tokio::sync::oneshot::channel();
                         cancel_tx = Some(c_tx);
 
