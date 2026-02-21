@@ -29,7 +29,7 @@ pub enum WorkerResponse {
 /// does not block the single-threaded tokio runtime.
 pub fn spawn_worker(
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<WorkerCommand>,
-    resp_tx: mpsc::SyncSender<WorkerResponse>,
+    resp_tx: mpsc::Sender<WorkerResponse>,
     llm: LlmClient,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
