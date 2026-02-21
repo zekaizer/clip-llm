@@ -4,8 +4,8 @@ System-wide LLM clipboard assistant. Captures text via global hotkey, sends it t
 
 ## Features
 
-- Global hotkey trigger (`Ctrl+Shift+C` double-tap)
-- Clipboard read with auto-copy fallback
+- Global hotkey trigger (`Ctrl+Shift+C` single-tap: clipboard, double-tap: copy selection)
+- Clipboard read / copy simulation
 - OpenAI-compatible API integration (vLLM)
 - `<think>` block stripping
 - Cross-platform (macOS, Windows 11)

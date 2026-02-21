@@ -48,7 +48,7 @@ Platform trait covers:
 - `check_accessibility()` — macOS: prompt for Accessibility permission, Windows: no-op
 
 Platform-independent values handled outside the trait:
-- Hotkey: `Ctrl+Shift+C` double-tap (same on both platforms)
+- Hotkey: `Ctrl+Shift+C` single-tap (clipboard) / double-tap (copy selection) on both platforms
 - Config directory: `dirs::config_dir()` (cross-platform)
 
 ### Event Loop
@@ -80,15 +80,15 @@ Hardcoded single prompt template. macOS + Windows. Console log for status. Block
 
 2. **Global hotkey registration**
    - Register `Ctrl+Shift+C` via `global-hotkey` (same on both platforms)
-   - Double-tap detection: first press starts timer (500ms), second press within timeout triggers action
+   - Two activation modes via tap detection (500ms timeout window):
+     - **Single-tap**: use existing clipboard content as LLM input
+     - **Double-tap**: copy current selection first, then use as LLM input
    - macOS: requires Accessibility permission (detect and prompt)
    - Windows: no special permission required
 
-3. **Clipboard read with fallback**
-   - Read current clipboard text via `arboard`
-   - If empty, simulate copy via platform trait (`CGEvent` on macOS, `SendInput` on Windows)
-   - Poll clipboard for change (compare with previous content) up to 2s, read immediately on change
-   - Preserve original clipboard content on failure
+3. **Clipboard read**
+   - **Single-tap mode**: read current clipboard text via `arboard` directly
+   - **Double-tap mode**: simulate copy via platform trait (`CGEvent` on macOS, `SendInput` on Windows), then poll clipboard for change up to 2s
 
 4. **vLLM API call (blocking)**
    - POST to hardcoded endpoint (`http://<host>:8000/v1/chat/completions`)
