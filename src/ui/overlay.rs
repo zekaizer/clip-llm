@@ -2,7 +2,7 @@ use eframe::egui;
 
 use super::OverlayState;
 
-const OVERLAY_WIDTH: f32 = 360.0;
+const OVERLAY_WIDTH: f32 = 480.0;
 const MAX_RESULT_HEIGHT: f32 = 400.0;
 
 /// Action requested by the overlay UI.
@@ -29,7 +29,7 @@ pub fn render(state: &OverlayState, ctx: &egui::Context) -> OverlayOutput {
 
     let mut action = OverlayAction::None;
 
-    let margin = egui::Margin::symmetric(16, 12);
+    let margin = egui::Margin::symmetric(20, 16);
     let frame = egui::Frame::new()
         .fill(egui::Color32::from_rgba_unmultiplied(30, 30, 30, 230))
         .corner_radius(12)
@@ -42,7 +42,7 @@ pub fn render(state: &OverlayState, ctx: &egui::Context) -> OverlayOutput {
         });
 
     let area_resp = egui::Area::new("overlay".into())
-        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .fixed_pos(egui::pos2(0.0, 0.0))
         .show(ctx, |ui| {
             frame.show(ui, |ui| {
                 ui.set_width(OVERLAY_WIDTH);
@@ -54,7 +54,7 @@ pub fn render(state: &OverlayState, ctx: &egui::Context) -> OverlayOutput {
                             ui.label(
                                 egui::RichText::new("Translating...")
                                     .color(egui::Color32::WHITE)
-                                    .size(14.0),
+                                    .size(18.0),
                             );
                         });
                         ui.add_space(4.0);
@@ -69,21 +69,21 @@ pub fn render(state: &OverlayState, ctx: &egui::Context) -> OverlayOutput {
                                 ui.label(
                                     egui::RichText::new(text)
                                         .color(egui::Color32::WHITE)
-                                        .size(14.0),
+                                        .size(18.0),
                                 );
                             });
                         ui.add_space(4.0);
                         ui.label(
                             egui::RichText::new("Copied to clipboard")
                                 .color(egui::Color32::from_gray(120))
-                                .size(11.0),
+                                .size(13.0),
                         );
                     }
                     OverlayState::Error(msg) => {
                         ui.label(
                             egui::RichText::new(format!("Error: {msg}"))
                                 .color(egui::Color32::from_rgb(255, 100, 100))
-                                .size(13.0),
+                                .size(16.0),
                         );
                     }
                     OverlayState::Hidden => unreachable!(),
