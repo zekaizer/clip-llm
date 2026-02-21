@@ -24,7 +24,7 @@ Cross-compile to Windows (from macOS): `cargo build --release --target x86_64-pc
 
 - Create a feature branch per feature: `phase<N>-<feature>` (e.g. `phase1-api-client`, `phase2-sse-streaming`).
 - Create a fix branch per bug fix: `fix-<description>` (e.g. `fix-macos-hotkey-events`).
-- Always merge with `--no-ff` to create a merge commit.
+- Merge with `--no-ff` to create a merge commit. Exception: single-commit branches can be fast-forward merged.
 - Commit per feature/logical unit during implementation — do not batch unrelated changes into a single commit.
 - Commit messages in English, following [Conventional Commits](https://www.conventionalcommits.org/) format (e.g. `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`).
 
