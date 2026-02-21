@@ -4,6 +4,7 @@ pub mod api;
 pub mod clipboard;
 pub mod hotkey;
 pub mod platform;
+pub mod ui;
 pub mod worker;
 
 use thiserror::Error;
