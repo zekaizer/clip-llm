@@ -73,6 +73,10 @@ The project follows a 7-phase incremental plan defined in [docs/REQUIREMENTS.md]
 | `notify-rust` | Toast notifications | 3+ |
 | `toml` | Config file parsing | 4+ |
 
+## Known Issues / Improvement Needed
+
+- **macOS fullscreen overlay**: The overlay cannot appear over fullscreen apps (apps that create their own dedicated Space). `MoveToActiveSpace` + `FullScreenAuxiliary` + `CanJoinAllSpaces` + higher window levels (101) were all tried without success. DeepL achieves this — likely uses `NSPanel` or a private API. Needs further investigation.
+
 ## API Integration
 
 - Endpoint: OpenAI-compatible `/v1/chat/completions`

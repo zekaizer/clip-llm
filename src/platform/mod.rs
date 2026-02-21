@@ -11,7 +11,7 @@ pub trait Platform {
 }
 
 #[cfg(target_os = "macos")]
-mod macos;
+pub(crate) mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::MacOsPlatform as NativePlatform;
 

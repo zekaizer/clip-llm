@@ -128,6 +128,9 @@ impl OverlayApp {
     }
 
     fn show_window(&mut self, ctx: &egui::Context) {
+        #[cfg(target_os = "macos")]
+        crate::platform::macos::configure_window_for_spaces();
+
         let win_size = ctx
             .input(|i| i.viewport().inner_rect)
             .map(|r| r.size())
