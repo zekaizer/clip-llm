@@ -24,6 +24,7 @@ fn main() {
 fn run() -> Result<(), AppError> {
     let plat = NativePlatform;
     plat.check_accessibility()?;
+    platform::init();
 
     let manager = GlobalHotKeyManager::new()
         .map_err(|e| HotkeyError::InitFailed(e.to_string()))?;

@@ -17,6 +17,15 @@ mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::WindowsPlatform as NativePlatform;
 
+/// Platform-specific initialization. Must be called before hotkey registration.
+#[cfg(target_os = "macos")]
+pub fn init() {
+    macos::init_impl();
+}
+
+#[cfg(target_os = "windows")]
+pub fn init() {}
+
 /// Run the platform event loop. Calls `tick` on each iteration.
 /// This function never returns under normal operation.
 #[cfg(target_os = "macos")]
