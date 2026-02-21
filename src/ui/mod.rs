@@ -11,7 +11,7 @@ use tracing::{error, info};
 
 use crate::clipboard::ClipboardManager;
 use crate::hotkey::{HotkeyDetector, TapAction};
-use crate::platform::NativePlatform;
+use crate::platform::{NativePlatform, Platform};
 use crate::worker::{WorkerCommand, WorkerResponse};
 
 /// Polling interval when overlay is hidden (for hotkey detection).
@@ -35,6 +35,8 @@ pub struct OverlayApp {
     /// True once the window has received focus after show_window.
     /// Only check for focus loss after this becomes true.
     has_been_focused: bool,
+    /// Mouse cursor position captured at hotkey trigger time (egui logical points).
+    spawn_position: Option<egui::Pos2>,
 }
 
 impl OverlayApp {
@@ -51,6 +53,7 @@ impl OverlayApp {
             platform: NativePlatform,
             detector: HotkeyDetector::new(),
             has_been_focused: false,
+            spawn_position: None,
         }
     }
 
@@ -88,20 +91,46 @@ impl OverlayApp {
         }
     }
 
+    fn capture_mouse_position(&mut self) {
+        self.spawn_position = self
+            .platform
+            .mouse_position()
+            .map(|(x, y)| egui::pos2(x as f32, y as f32));
+    }
+
     fn start_translation(&mut self, text: String, ctx: &egui::Context) {
         info!("starting translation ({} chars)", text.len());
         let _ = self.cmd_tx.send(WorkerCommand::Translate { text });
         self.state = OverlayState::Processing;
+        self.capture_mouse_position();
         self.show_window(ctx);
     }
 
     fn show_error(&mut self, message: String, ctx: &egui::Context) {
         error!("pipeline error: {message}");
         self.state = OverlayState::Error(message);
+        self.capture_mouse_position();
         self.show_window(ctx);
     }
 
     fn show_window(&mut self, ctx: &egui::Context) {
+        if let Some(cursor) = self.spawn_position {
+            // Center the window on the cursor position.
+            let win_size = ctx
+                .input(|i| i.viewport().inner_rect)
+                .map(|r| r.size())
+                .unwrap_or(egui::vec2(480.0, 120.0));
+            let mut x = cursor.x - win_size.x / 2.0;
+            let mut y = cursor.y - win_size.y / 2.0;
+
+            // Clamp to screen bounds so the overlay stays fully visible.
+            if let Some(monitor) = ctx.input(|i| i.viewport().monitor_size) {
+                x = x.clamp(0.0, (monitor.x - win_size.x).max(0.0));
+                y = y.clamp(0.0, (monitor.y - win_size.y).max(0.0));
+            }
+
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
+        }
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         self.has_been_focused = false;
