@@ -116,18 +116,13 @@ impl OverlayApp {
         self.show_window(ctx);
     }
 
-    /// Reposition the window so it is centered on `spawn_position`, clamped to screen.
+    /// Reposition the window so it is centered on `spawn_position`.
+    /// No monitor clamping — cursor coordinates are absolute across all monitors,
+    /// and the OS will keep the window within visible bounds.
     fn reposition_window(&self, ctx: &egui::Context, win_size: egui::Vec2) {
         if let Some(cursor) = self.spawn_position {
-            let mut x = cursor.x - win_size.x / 2.0;
-            let mut y = cursor.y - win_size.y / 2.0;
-
-            // Clamp to screen bounds so the overlay stays fully visible.
-            if let Some(monitor) = ctx.input(|i| i.viewport().monitor_size) {
-                x = x.clamp(0.0, (monitor.x - win_size.x).max(0.0));
-                y = y.clamp(0.0, (monitor.y - win_size.y).max(0.0));
-            }
-
+            let x = cursor.x - win_size.x / 2.0;
+            let y = cursor.y - win_size.y / 2.0;
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
         }
     }
