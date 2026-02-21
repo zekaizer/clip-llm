@@ -5,18 +5,15 @@ use tracing::debug;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_C, VK_CONTROL,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
-};
+use windows_sys::Win32::Foundation::POINT;
+use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
+use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 use super::Platform;
 use crate::PlatformError;
 
 /// Delay between key events (ms).
 const KEY_EVENT_DELAY_MS: u64 = 50;
-
-/// Interval for event loop sleep (ms).
-const EVENT_LOOP_INTERVAL: Duration = Duration::from_millis(50);
 
 pub struct WindowsPlatform;
 
@@ -55,20 +52,17 @@ impl Platform for WindowsPlatform {
         // No special permission required on Windows.
         Ok(())
     }
-}
 
-/// Pump Win32 message loop to deliver hotkey events, then call `tick`.
-pub(super) fn run_event_loop_impl(tick: &mut dyn FnMut()) -> ! {
-    loop {
-        unsafe {
-            let mut msg: MSG = std::mem::zeroed();
-            while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
+    fn mouse_position(&self) -> Option<(f64, f64)> {
+        let mut pt = POINT { x: 0, y: 0 };
+        if unsafe { GetCursorPos(&mut pt) } == 0 {
+            return None;
         }
-        tick();
-        thread::sleep(EVENT_LOOP_INTERVAL);
+        // GetCursorPos returns physical pixels in DPI-aware processes.
+        // Convert to logical points for egui OuterPosition.
+        let dpi = unsafe { GetDpiForSystem() } as f64;
+        let scale = dpi / 96.0;
+        Some((pt.x as f64 / scale, pt.y as f64 / scale))
     }
 }
 

@@ -46,6 +46,15 @@ impl Platform for MacOsPlatform {
         Ok(())
     }
 
+    fn mouse_position(&self) -> Option<(f64, f64)> {
+        // CGEvent.location() returns Quartz logical points (top-left origin).
+        // This matches egui's OuterPosition coordinate system directly.
+        let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState).ok()?;
+        let event = CGEvent::new(source).ok()?;
+        let pos = event.location();
+        Some((pos.x, pos.y))
+    }
+
     /// Check if the process has Accessibility permission.
     /// Returns `AccessibilityDenied` if not granted.
     fn check_accessibility(&self) -> Result<(), PlatformError> {
