@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod clipboard;
+pub mod hotkey;
 pub mod platform;
 
 use thiserror::Error;
@@ -40,4 +41,28 @@ pub enum ClipboardError {
 
     #[error("copy simulation failed: {0}")]
     CopyFailed(#[from] PlatformError),
+}
+
+#[derive(Debug, Error)]
+pub enum HotkeyError {
+    #[error("failed to initialize hotkey manager: {0}")]
+    InitFailed(String),
+
+    #[error("failed to register hotkey: {0}")]
+    RegisterFailed(String),
+}
+
+#[derive(Debug, Error)]
+pub enum AppError {
+    #[error(transparent)]
+    Platform(#[from] PlatformError),
+
+    #[error(transparent)]
+    Clipboard(#[from] ClipboardError),
+
+    #[error(transparent)]
+    Api(#[from] ApiError),
+
+    #[error(transparent)]
+    Hotkey(#[from] HotkeyError),
 }
