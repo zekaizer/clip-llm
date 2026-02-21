@@ -21,21 +21,24 @@ impl ClipboardManager {
         Ok(Self { board })
     }
 
-    /// Read text from clipboard. If empty, simulate copy via platform and poll for change.
-    pub fn read_text(&mut self, platform: &dyn Platform) -> Result<String, ClipboardError> {
-        // Try reading current clipboard content.
-        let current = self
-            .board
-            .get_text()
-            .unwrap_or_default();
-
-        if !current.is_empty() {
-            info!("clipboard already has text ({} chars)", current.len());
-            return Ok(current);
+    /// Read current clipboard text directly. Returns error if clipboard is empty.
+    pub fn read_clipboard(&mut self) -> Result<String, ClipboardError> {
+        let text = self.board.get_text().unwrap_or_default();
+        if text.is_empty() {
+            return Err(ClipboardError::NoTextInClipboard);
         }
+        info!("read clipboard ({} chars)", text.len());
+        Ok(text)
+    }
 
-        // Clipboard empty — simulate copy and poll for new content.
-        info!("clipboard empty, simulating copy");
+    /// Simulate copy via platform, then poll clipboard for new content.
+    /// Clears clipboard first so we can detect when new content arrives.
+    pub fn copy_and_read(&mut self, platform: &dyn Platform) -> Result<String, ClipboardError> {
+        info!("simulating copy to capture selection");
+        // Wait for user to release modifier keys (Ctrl+Shift) after double-tap,
+        // otherwise simulate_copy sends Cmd+Ctrl+Shift+C instead of Cmd+C.
+        thread::sleep(Duration::from_millis(200));
+        let _ = self.board.clear();
         platform.simulate_copy()?;
 
         let deadline = Instant::now() + Duration::from_secs(CLIPBOARD_POLL_TIMEOUT_SECS);
@@ -44,13 +47,10 @@ impl ClipboardManager {
         loop {
             thread::sleep(interval);
 
-            let text = self
-                .board
-                .get_text()
-                .unwrap_or_default();
+            let text = self.board.get_text().unwrap_or_default();
 
             if !text.is_empty() {
-                debug!("clipboard changed after copy simulation ({} chars)", text.len());
+                debug!("clipboard has text after copy simulation ({} chars)", text.len());
                 return Ok(text);
             }
 
@@ -82,14 +82,20 @@ mod tests {
 
     struct MockPlatform {
         copy_result: Result<(), PlatformError>,
+        /// If set, simulate_copy writes this text to clipboard.
+        copy_text: Option<String>,
     }
 
     impl Platform for MockPlatform {
         fn simulate_copy(&self) -> Result<(), PlatformError> {
             self.copy_result
                 .as_ref()
-                .map(|_| ())
-                .map_err(|e| PlatformError::CopyFailed(e.to_string()))
+                .map_err(|e| PlatformError::CopyFailed(e.to_string()))?;
+            if let Some(text) = &self.copy_text {
+                let mut board = Clipboard::new().unwrap();
+                board.set_text(text).unwrap();
+            }
+            Ok(())
         }
 
         fn check_accessibility(&self) -> Result<(), PlatformError> {
@@ -98,43 +104,65 @@ mod tests {
     }
 
     #[test]
-    fn write_then_read() {
+    fn read_clipboard_returns_text() {
         let _lock = CLIPBOARD_LOCK.lock().unwrap();
         let mut mgr = ClipboardManager::new().unwrap();
-        let mock = MockPlatform {
-            copy_result: Ok(()),
-        };
-
         mgr.write_text("test clipboard content").unwrap();
-        let text = mgr.read_text(&mock).unwrap();
+        let text = mgr.read_clipboard().unwrap();
         assert_eq!(text, "test clipboard content");
     }
 
     #[test]
-    fn write_empty_then_fallback_timeout() {
+    fn read_clipboard_empty_returns_error() {
+        let _lock = CLIPBOARD_LOCK.lock().unwrap();
+        let mut mgr = ClipboardManager::new().unwrap();
+        let _ = mgr.board.clear();
+        let result = mgr.read_clipboard();
+        assert!(matches!(result, Err(ClipboardError::NoTextInClipboard)));
+    }
+
+    #[test]
+    fn copy_and_read_captures_selection() {
+        let _lock = CLIPBOARD_LOCK.lock().unwrap();
+        let mut mgr = ClipboardManager::new().unwrap();
+        let mock = MockPlatform {
+            copy_result: Ok(()),
+            copy_text: Some("selected text".into()),
+        };
+
+        // Pre-existing clipboard content should be replaced by copy simulation.
+        mgr.write_text("old content").unwrap();
+        let text = mgr.copy_and_read(&mock).unwrap();
+        assert_eq!(text, "selected text");
+    }
+
+    #[test]
+    fn copy_and_read_empty_times_out() {
         let _lock = CLIPBOARD_LOCK.lock().unwrap();
         let mut mgr = ClipboardManager::new().unwrap();
         let _ = mgr.board.clear();
 
         let mock = MockPlatform {
             copy_result: Ok(()),
+            copy_text: None,
         };
 
-        let result = mgr.read_text(&mock);
+        let result = mgr.copy_and_read(&mock);
         assert!(matches!(result, Err(ClipboardError::NoTextAfterCopy)));
     }
 
     #[test]
-    fn fallback_copy_simulation_fails() {
+    fn copy_and_read_simulation_fails() {
         let _lock = CLIPBOARD_LOCK.lock().unwrap();
         let mut mgr = ClipboardManager::new().unwrap();
         let _ = mgr.board.clear();
 
         let mock = MockPlatform {
             copy_result: Err(PlatformError::CopyFailed("test error".into())),
+            copy_text: None,
         };
 
-        let result = mgr.read_text(&mock);
+        let result = mgr.copy_and_read(&mock);
         assert!(matches!(result, Err(ClipboardError::CopyFailed(_))));
     }
 
@@ -142,13 +170,10 @@ mod tests {
     fn write_overwrites_previous() {
         let _lock = CLIPBOARD_LOCK.lock().unwrap();
         let mut mgr = ClipboardManager::new().unwrap();
-        let mock = MockPlatform {
-            copy_result: Ok(()),
-        };
 
         mgr.write_text("first").unwrap();
         mgr.write_text("second").unwrap();
-        let text = mgr.read_text(&mock).unwrap();
+        let text = mgr.read_clipboard().unwrap();
         assert_eq!(text, "second");
     }
 }

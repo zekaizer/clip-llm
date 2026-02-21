@@ -33,6 +33,9 @@ pub enum ClipboardError {
     #[error("clipboard access failed: {0}")]
     AccessFailed(String),
 
+    #[error("no text in clipboard")]
+    NoTextInClipboard,
+
     #[error("no text in clipboard after copy simulation")]
     NoTextAfterCopy,
 
