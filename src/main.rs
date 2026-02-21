@@ -95,9 +95,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .with_inner_size([400.0, 120.0])
         .with_visible(false)
         .with_decorations(false)
+        .with_resizable(false)
         .with_always_on_top()
-        .with_transparent(true)
-        .with_resizable(false);
+        .with_transparent(true);
 
     let native_options = eframe::NativeOptions {
         viewport,
