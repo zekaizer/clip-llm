@@ -1,16 +1,18 @@
 #![deny(unused_must_use)]
 
+use std::sync::mpsc;
+
+use eframe::egui;
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
-use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
-use tracing::{debug, error, info, warn};
+use global_hotkey::GlobalHotKeyManager;
+use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 
 use clip_llm::api::client::LlmClient;
-use clip_llm::api::response::strip_think_blocks;
 use clip_llm::clipboard::ClipboardManager;
-use clip_llm::hotkey::{HotkeyDetector, TapAction};
-use clip_llm::platform::{self, NativePlatform, Platform};
-use clip_llm::{AppError, HotkeyError};
+use clip_llm::ui::OverlayApp;
+use clip_llm::worker::{spawn_worker, WorkerCommand, WorkerResponse};
+use clip_llm::HotkeyError;
 
 fn main() {
     tracing_subscriber::fmt()
@@ -28,11 +30,15 @@ fn main() {
     }
 }
 
-fn run() -> Result<(), AppError> {
-    let plat = NativePlatform;
-    plat.check_accessibility()?;
-    platform::init();
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // Check platform permissions before anything else.
+    {
+        use clip_llm::platform::{NativePlatform, Platform};
+        let plat = NativePlatform;
+        plat.check_accessibility()?;
+    }
 
+    // GlobalHotKeyManager must be created on the main thread and kept alive.
     let manager = GlobalHotKeyManager::new()
         .map_err(|e| HotkeyError::InitFailed(e.to_string()))?;
 
@@ -44,78 +50,37 @@ fn run() -> Result<(), AppError> {
 
     info!("registered hotkey: Ctrl+Shift+C (single-tap: clipboard, double-tap: copy selection)");
 
-    let mut detector = HotkeyDetector::new();
-    let mut clipboard = ClipboardManager::new()?;
+    // Set up channels between main thread and worker.
+    let (cmd_tx, cmd_rx) = mpsc::sync_channel::<WorkerCommand>(4);
+    let (resp_tx, resp_rx) = mpsc::sync_channel::<WorkerResponse>(4);
+
     let llm = LlmClient::new()?;
-    let receiver = GlobalHotKeyEvent::receiver();
+    let clipboard = ClipboardManager::new()?;
 
-    info!("entering event loop");
-    platform::run_event_loop(|| {
-        while let Ok(event) = receiver.try_recv() {
-            if event.state != HotKeyState::Pressed {
-                continue;
-            }
+    // Spawn the async worker thread.
+    let _worker = spawn_worker(cmd_rx, resp_tx, llm);
 
-            match detector.on_press() {
-                TapAction::Pending => {}
-                TapAction::DoubleTap => {
-                    info!("double-tap triggered, copying selection...");
-                    if let Err(e) = handle_copy_pipeline(&mut clipboard, &plat, &llm) {
-                        error!("pipeline error: {e}");
-                    }
-                }
-            }
-        }
+    info!("starting eframe overlay");
 
-        // Check if a single-tap has timed out.
-        if detector.check_timeout() {
-            info!("single-tap triggered, using clipboard content...");
-            if let Err(e) = handle_clipboard_pipeline(&mut clipboard, &llm) {
-                error!("pipeline error: {e}");
-            }
-        }
-    });
-}
+    let viewport = egui::ViewportBuilder::default()
+        .with_title("clip-llm")
+        .with_inner_size([400.0, 120.0])
+        .with_visible(false)
+        .with_decorations(false)
+        .with_always_on_top()
+        .with_transparent(true)
+        .with_resizable(false);
 
-/// Single-tap: read existing clipboard content and send to LLM.
-fn handle_clipboard_pipeline(
-    clipboard: &mut ClipboardManager,
-    llm: &LlmClient,
-) -> Result<(), AppError> {
-    let input = clipboard.read_clipboard()?;
-    process_llm(clipboard, llm, &input)
-}
+    let native_options = eframe::NativeOptions {
+        viewport,
+        ..Default::default()
+    };
 
-/// Double-tap: copy current selection, then send to LLM.
-fn handle_copy_pipeline(
-    clipboard: &mut ClipboardManager,
-    platform: &dyn Platform,
-    llm: &LlmClient,
-) -> Result<(), AppError> {
-    let input = clipboard.copy_and_read(platform)?;
-    process_llm(clipboard, llm, &input)
-}
+    eframe::run_native(
+        "clip-llm",
+        native_options,
+        Box::new(move |_cc| Ok(Box::new(OverlayApp::new(cmd_tx, resp_rx, clipboard)))),
+    )?;
 
-/// Shared LLM processing: send input, strip think blocks, write response to clipboard.
-fn process_llm(
-    clipboard: &mut ClipboardManager,
-    llm: &LlmClient,
-    input: &str,
-) -> Result<(), AppError> {
-    info!("input: {} chars", input.len());
-    debug!("input text: {input}");
-
-    let raw_response = llm.complete(input)?;
-    debug!("raw response: {raw_response}");
-    let response = strip_think_blocks(&raw_response);
-    debug!("stripped response: {response}");
-
-    if response.is_empty() {
-        warn!("response empty after stripping think blocks");
-        return Ok(());
-    }
-
-    clipboard.write_text(&response)?;
-    info!("pipeline complete, response: {} chars", response.len());
     Ok(())
 }
