@@ -1,7 +1,7 @@
 mod overlay;
 
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -13,9 +13,6 @@ use crate::clipboard::ClipboardManager;
 use crate::hotkey::{HotkeyDetector, TapAction};
 use crate::platform::NativePlatform;
 use crate::worker::{WorkerCommand, WorkerResponse};
-
-/// How long to show the result/error overlay before auto-closing.
-const AUTO_CLOSE_SECS: f64 = 5.0;
 
 /// Polling interval when overlay is hidden (for hotkey detection).
 const IDLE_POLL_MS: u64 = 100;
@@ -35,7 +32,9 @@ pub struct OverlayApp {
     clipboard: ClipboardManager,
     platform: NativePlatform,
     detector: HotkeyDetector,
-    result_shown_at: Option<Instant>,
+    /// True once the window has received focus after show_window.
+    /// Only check for focus loss after this becomes true.
+    has_been_focused: bool,
 }
 
 impl OverlayApp {
@@ -51,7 +50,7 @@ impl OverlayApp {
             clipboard,
             platform: NativePlatform,
             detector: HotkeyDetector::new(),
-            result_shown_at: None,
+            has_been_focused: false,
         }
     }
 
@@ -93,25 +92,23 @@ impl OverlayApp {
         info!("starting translation ({} chars)", text.len());
         let _ = self.cmd_tx.send(WorkerCommand::Translate { text });
         self.state = OverlayState::Processing;
-        self.result_shown_at = None;
         self.show_window(ctx);
     }
 
     fn show_error(&mut self, message: String, ctx: &egui::Context) {
         error!("pipeline error: {message}");
         self.state = OverlayState::Error(message);
-        self.result_shown_at = Some(Instant::now());
         self.show_window(ctx);
     }
 
-    fn show_window(&self, ctx: &egui::Context) {
+    fn show_window(&mut self, ctx: &egui::Context) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        self.has_been_focused = false;
     }
 
     fn hide_window(&mut self, ctx: &egui::Context) {
         self.state = OverlayState::Hidden;
-        self.result_shown_at = None;
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
     }
 
@@ -125,12 +122,10 @@ impl OverlayApp {
                         info!("translation complete ({} chars), copied to clipboard", result.len());
                         self.state = OverlayState::Result(result);
                     }
-                    self.result_shown_at = Some(Instant::now());
                 }
                 WorkerResponse::Error { message } => {
                     error!("worker error: {message}");
                     self.state = OverlayState::Error(message);
-                    self.result_shown_at = Some(Instant::now());
                 }
             }
             // Ensure window is visible for result/error.
@@ -138,11 +133,16 @@ impl OverlayApp {
         }
     }
 
-    fn check_auto_close(&mut self, ctx: &egui::Context) {
-        if let Some(shown_at) = self.result_shown_at {
-            if shown_at.elapsed().as_secs_f64() >= AUTO_CLOSE_SECS {
-                self.hide_window(ctx);
-            }
+    fn check_focus_lost(&mut self, ctx: &egui::Context) {
+        if matches!(self.state, OverlayState::Hidden) {
+            return;
+        }
+        let focused = ctx.input(|i| i.viewport().focused);
+        if focused == Some(true) {
+            self.has_been_focused = true;
+        } else if focused == Some(false) && self.has_been_focused {
+            // Only close after we've confirmed the window had focus at least once.
+            self.hide_window(ctx);
         }
     }
 }
@@ -177,7 +177,7 @@ impl eframe::App for OverlayApp {
             }
         }
 
-        self.check_auto_close(ctx);
+        self.check_focus_lost(ctx);
 
         // Schedule next repaint.
         match &self.state {
