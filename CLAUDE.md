@@ -35,7 +35,7 @@ Cross-compile to Windows (from macOS): `cargo build --release --target x86_64-pc
 
 ## Architecture
 
-The project follows a 7-phase incremental plan defined in [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md).
+The project follows a 7-phase incremental plan defined in [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md). Progress is tracked in [README.md](README.md#roadmap).
 
 ### Structure
 
