@@ -3,6 +3,7 @@ use eframe::egui;
 use super::OverlayState;
 
 const OVERLAY_WIDTH: f32 = 360.0;
+const MAX_RESULT_HEIGHT: f32 = 400.0;
 
 /// Action requested by the overlay UI.
 pub enum OverlayAction {
@@ -11,18 +12,28 @@ pub enum OverlayAction {
     Cancel,
 }
 
-/// Render the overlay panel. Returns the action requested by user interaction.
-pub fn render(state: &OverlayState, ctx: &egui::Context) -> OverlayAction {
+pub struct OverlayOutput {
+    pub action: OverlayAction,
+    /// Desired viewport size based on rendered content.
+    pub desired_size: Option<egui::Vec2>,
+}
+
+/// Render the overlay panel. Returns action and desired viewport size.
+pub fn render(state: &OverlayState, ctx: &egui::Context) -> OverlayOutput {
     if matches!(state, OverlayState::Hidden) {
-        return OverlayAction::None;
+        return OverlayOutput {
+            action: OverlayAction::None,
+            desired_size: None,
+        };
     }
 
     let mut action = OverlayAction::None;
 
+    let margin = egui::Margin::symmetric(16, 12);
     let frame = egui::Frame::new()
         .fill(egui::Color32::from_rgba_unmultiplied(30, 30, 30, 230))
         .corner_radius(12)
-        .inner_margin(egui::Margin::symmetric(16, 12))
+        .inner_margin(margin)
         .shadow(egui::Shadow {
             offset: [0, 4],
             blur: 16,
@@ -30,7 +41,7 @@ pub fn render(state: &OverlayState, ctx: &egui::Context) -> OverlayAction {
             color: egui::Color32::from_black_alpha(100),
         });
 
-    egui::Area::new("overlay".into())
+    let area_resp = egui::Area::new("overlay".into())
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
             frame.show(ui, |ui| {
@@ -47,16 +58,13 @@ pub fn render(state: &OverlayState, ctx: &egui::Context) -> OverlayAction {
                             );
                         });
                         ui.add_space(4.0);
-                        if ui
-                            .small_button("Cancel")
-                            .clicked()
-                        {
+                        if ui.small_button("Cancel").clicked() {
                             action = OverlayAction::Cancel;
                         }
                     }
                     OverlayState::Result(text) => {
                         egui::ScrollArea::vertical()
-                            .max_height(300.0)
+                            .max_height(MAX_RESULT_HEIGHT)
                             .show(ui, |ui| {
                                 ui.label(
                                     egui::RichText::new(text)
@@ -88,5 +96,13 @@ pub fn render(state: &OverlayState, ctx: &egui::Context) -> OverlayAction {
         action = OverlayAction::Close;
     }
 
-    action
+    // Calculate desired viewport size from the rendered area + padding for shadow.
+    let content_size = area_resp.response.rect.size();
+    let padding = egui::vec2(40.0, 40.0); // extra space for shadow
+    let desired = content_size + padding;
+
+    OverlayOutput {
+        action,
+        desired_size: Some(desired),
+    }
 }

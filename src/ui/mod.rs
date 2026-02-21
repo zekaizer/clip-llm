@@ -159,8 +159,14 @@ impl eframe::App for OverlayApp {
         self.poll_responses(ctx);
         self.poll_hotkeys(ctx);
 
-        let action = overlay::render(&self.state, ctx);
-        match action {
+        let output = overlay::render(&self.state, ctx);
+
+        // Resize viewport to fit content.
+        if let Some(desired) = output.desired_size {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(desired));
+        }
+
+        match output.action {
             overlay::OverlayAction::None => {}
             overlay::OverlayAction::Close => {
                 self.hide_window(ctx);
