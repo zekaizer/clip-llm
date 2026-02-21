@@ -1,6 +1,6 @@
 use eframe::egui;
 
-use super::OverlayState;
+use super::state_machine::OverlayState;
 use crate::ProcessMode;
 
 const OVERLAY_WIDTH: f32 = 480.0;

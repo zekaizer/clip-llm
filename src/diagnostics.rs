@@ -16,7 +16,6 @@ use eframe::egui;
 use serde::Serialize;
 use tracing::{debug, info, warn};
 
-use crate::worker::WorkerCommand;
 use crate::ProcessMode;
 
 const RING_CAPACITY: usize = 120; // ~2 seconds at 60 fps
@@ -292,7 +291,7 @@ struct Scenario {
     switch_to: Option<ProcessMode>,
 }
 
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 enum RunnerPhase {
     /// Waiting for initial startup delay.
     StartupDelay,
@@ -388,12 +387,8 @@ impl DiagScenarioRunner {
     }
 
     /// Called every frame. Drives the scenario state machine.
-    /// Returns an optional action for the OverlayApp to execute.
-    pub fn tick(
-        &mut self,
-        overlay_state: &'static str,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<WorkerCommand>,
-    ) -> ScenarioAction {
+    /// Returns an action for the OverlayApp adapter to execute via StateMachine.
+    pub fn tick(&mut self, overlay_state: &str) -> ScenarioAction {
         if self.phase == RunnerPhase::Done {
             return ScenarioAction::None;
         }
@@ -408,13 +403,10 @@ impl DiagScenarioRunner {
                 // Inject next scenario.
                 if let Some(scenario) = self.scenarios.front() {
                     info!("diag: injecting scenario '{}'", scenario.name);
-                    let _ = cmd_tx.send(WorkerCommand::Process {
-                        text: scenario.input.to_string(),
-                        mode: scenario.mode,
-                    });
                     self.phase = RunnerPhase::WaitingForResult;
                     return ScenarioAction::ShowOverlay {
                         mode: scenario.mode,
+                        text: scenario.input.to_string(),
                     };
                 } else {
                     self.phase = RunnerPhase::Finishing;
@@ -476,9 +468,13 @@ impl DiagScenarioRunner {
 }
 
 /// Action the scenario runner requests from the OverlayApp.
+#[derive(Debug)]
 pub enum ScenarioAction {
     None,
-    ShowOverlay { mode: ProcessMode },
+    ShowOverlay {
+        mode: ProcessMode,
+        text: String,
+    },
     SwitchMode(ProcessMode),
     HideOverlay,
     /// All scenarios complete — app should exit.
@@ -519,4 +515,163 @@ pub fn mock_response(input: &str) -> Result<String, String> {
         lines.join("\n")
     };
     Ok(response)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Advance the runner by N frames, all returning None.
+    fn advance(runner: &mut DiagScenarioRunner, n: u32, state: &str) {
+        for _ in 0..n {
+            assert!(matches!(runner.tick(state), ScenarioAction::None));
+        }
+    }
+
+    #[test]
+    fn startup_delay_returns_none() {
+        let mut runner = DiagScenarioRunner::new();
+        // All frames during startup delay should return None.
+        for _ in 0..STARTUP_DELAY {
+            assert!(matches!(runner.tick("Hidden"), ScenarioAction::None));
+        }
+    }
+
+    #[test]
+    fn first_scenario_after_delay() {
+        let mut runner = DiagScenarioRunner::new();
+        advance(&mut runner, STARTUP_DELAY, "Hidden");
+
+        match runner.tick("Hidden") {
+            ScenarioAction::ShowOverlay { mode, text } => {
+                assert_eq!(mode, ProcessMode::Translate);
+                assert_eq!(text, "Hello");
+            }
+            other => panic!("expected ShowOverlay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn result_triggers_wait_to_hide() {
+        let mut runner = DiagScenarioRunner::new();
+        advance(&mut runner, STARTUP_DELAY, "Hidden");
+
+        // First scenario injection.
+        let action = runner.tick("Hidden");
+        assert!(matches!(action, ScenarioAction::ShowOverlay { .. }));
+
+        // Simulate worker completing — overlay shows "Result".
+        // Runner should transition to WaitingToHide phase.
+        assert!(matches!(runner.tick("Result"), ScenarioAction::None));
+        assert_eq!(runner.phase, RunnerPhase::WaitingToHide);
+    }
+
+    #[test]
+    fn mode_switch_scenario_flow() {
+        let mut runner = DiagScenarioRunner::new();
+        advance(&mut runner, STARTUP_DELAY, "Hidden");
+
+        // Consume first two scenarios (short_text, long_text).
+        // Scenario 1: short_text
+        runner.tick("Hidden"); // ShowOverlay
+        runner.tick("Result"); // -> WaitingToHide
+        advance(&mut runner, RESULT_DISPLAY, "Result"); // display delay
+        runner.tick("Result"); // HideOverlay
+        advance(&mut runner, BETWEEN_DELAY, "Hidden"); // between delay
+
+        // Scenario 2: long_text
+        runner.tick("Hidden"); // ShowOverlay
+        runner.tick("Result"); // -> WaitingToHide
+        advance(&mut runner, RESULT_DISPLAY, "Result");
+        runner.tick("Result"); // HideOverlay
+        advance(&mut runner, BETWEEN_DELAY, "Hidden");
+
+        // Scenario 3: mode_switch — should trigger SwitchMode after result.
+        let action = runner.tick("Hidden");
+        assert!(matches!(action, ScenarioAction::ShowOverlay { .. }));
+
+        // Result arrives — runner should return SwitchMode.
+        match runner.tick("Result") {
+            ScenarioAction::SwitchMode(mode) => {
+                assert_eq!(mode, ProcessMode::Correct);
+            }
+            other => panic!("expected SwitchMode, got {other:?}"),
+        }
+
+        // After switch, wait for new result.
+        assert!(matches!(runner.tick("Processing"), ScenarioAction::None));
+
+        // New result arrives.
+        assert!(matches!(runner.tick("Result"), ScenarioAction::None));
+        assert_eq!(runner.phase, RunnerPhase::WaitingToHide);
+    }
+
+    #[test]
+    fn hide_after_display_delay() {
+        let mut runner = DiagScenarioRunner::new();
+        advance(&mut runner, STARTUP_DELAY, "Hidden");
+
+        runner.tick("Hidden"); // ShowOverlay
+        runner.tick("Result"); // -> WaitingToHide
+
+        // Wait through display delay.
+        advance(&mut runner, RESULT_DISPLAY, "Result");
+
+        // Next tick should hide.
+        assert!(matches!(runner.tick("Result"), ScenarioAction::HideOverlay));
+    }
+
+    #[test]
+    fn quit_after_all_scenarios() {
+        let mut runner = DiagScenarioRunner::new();
+        let scenario_count = runner.scenarios.len();
+        advance(&mut runner, STARTUP_DELAY, "Hidden");
+
+        // Scenarios: short_text, long_text, mode_switch, error_display,
+        //            korean_text, correct_mode, long_single_line
+        // mode_switch (index 2) returns SwitchMode on first Result.
+        // error_display (index 3) produces Error state.
+        for i in 0..scenario_count {
+            let action = runner.tick("Hidden"); // ShowOverlay
+            assert!(matches!(action, ScenarioAction::ShowOverlay { .. }),
+                "scenario {i}: expected ShowOverlay, got {action:?}");
+
+            // error_display scenario produces Error, rest produce Result.
+            let result_state = if i == 3 { "Error" } else { "Result" };
+
+            let action = runner.tick(result_state);
+            if matches!(action, ScenarioAction::SwitchMode(_)) {
+                // mode_switch: wait for re-processing, then new result.
+                runner.tick("Processing");
+                runner.tick("Result");
+                // After switch result, should be in WaitingToHide.
+                advance(&mut runner, RESULT_DISPLAY, "Result");
+                runner.tick("Result"); // HideOverlay
+            } else {
+                advance(&mut runner, RESULT_DISPLAY, result_state);
+                runner.tick(result_state); // HideOverlay
+            }
+            advance(&mut runner, BETWEEN_DELAY, "Hidden");
+        }
+
+        // One more tick to transition from WaitingToInject (empty) to Finishing.
+        assert!(matches!(runner.tick("Hidden"), ScenarioAction::None));
+        assert_eq!(runner.phase, RunnerPhase::Finishing);
+
+        advance(&mut runner, QUIT_DELAY, "Hidden");
+        assert!(matches!(runner.tick("Hidden"), ScenarioAction::Quit));
+    }
+
+    #[test]
+    fn done_returns_none() {
+        let mut runner = DiagScenarioRunner::new();
+        runner.phase = RunnerPhase::Done;
+
+        assert!(matches!(runner.tick("Hidden"), ScenarioAction::None));
+        assert!(matches!(runner.tick("Result"), ScenarioAction::None));
+    }
 }

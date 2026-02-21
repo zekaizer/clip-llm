@@ -80,7 +80,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Command channel uses tokio::sync::mpsc so worker can .recv().await
     // without blocking the single-threaded tokio runtime.
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerCommand>();
-    let (resp_tx, resp_rx) = mpsc::sync_channel::<WorkerResponse>(4);
+    let (resp_tx, resp_rx) = mpsc::channel::<WorkerResponse>();
 
     let llm = LlmClient::new()?;
     let clipboard = ClipboardManager::new()?;
