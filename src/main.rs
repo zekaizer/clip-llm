@@ -30,6 +30,43 @@ fn main() {
     }
 }
 
+/// Load a system CJK font so Korean text renders correctly.
+fn configure_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+
+    // Try common CJK font paths across platforms.
+    let candidates: &[&str] = &[
+        // macOS
+        "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+        "/System/Library/Fonts/Supplemental/AppleGothic.ttf",
+        // Windows
+        "C:\\Windows\\Fonts\\malgun.ttf",
+    ];
+
+    for path in candidates {
+        if let Ok(data) = std::fs::read(path) {
+            fonts.font_data.insert(
+                "system_cjk".to_owned(),
+                egui::FontData::from_owned(data).into(),
+            );
+            fonts
+                .families
+                .get_mut(&egui::FontFamily::Proportional)
+                .unwrap()
+                .push("system_cjk".to_owned());
+            fonts
+                .families
+                .get_mut(&egui::FontFamily::Monospace)
+                .unwrap()
+                .push("system_cjk".to_owned());
+            info!("loaded CJK font from {path}");
+            break;
+        }
+    }
+
+    ctx.set_fonts(fonts);
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Check platform permissions before anything else.
     {
@@ -81,7 +118,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     eframe::run_native(
         "clip-llm",
         native_options,
-        Box::new(move |_cc| Ok(Box::new(OverlayApp::new(cmd_tx, resp_rx, clipboard)))),
+        Box::new(move |cc| {
+            configure_fonts(&cc.egui_ctx);
+            Ok(Box::new(OverlayApp::new(cmd_tx, resp_rx, clipboard)))
+        }),
     )?;
 
     Ok(())
