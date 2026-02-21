@@ -1,6 +1,7 @@
 #![deny(unused_must_use)]
 
 pub mod api;
+pub mod clipboard;
 pub mod platform;
 
 use thiserror::Error;
@@ -24,4 +25,19 @@ pub enum ApiError {
 
     #[error("empty response from model")]
     EmptyResponse,
+}
+
+#[derive(Debug, Error)]
+pub enum ClipboardError {
+    #[error("clipboard access failed: {0}")]
+    AccessFailed(String),
+
+    #[error("no text in clipboard after copy simulation")]
+    NoTextAfterCopy,
+
+    #[error("clipboard write failed: {0}")]
+    WriteFailed(String),
+
+    #[error("copy simulation failed: {0}")]
+    CopyFailed(#[from] PlatformError),
 }
