@@ -350,6 +350,30 @@ impl DiagScenarioRunner {
                 mode: ProcessMode::Translate,
                 switch_to: Some(ProcessMode::Correct),
             },
+            Scenario {
+                name: "error_display",
+                input: "__ERROR__",
+                mode: ProcessMode::Translate,
+                switch_to: None,
+            },
+            Scenario {
+                name: "korean_text",
+                input: "안녕하세요. 이것은 한국어 텍스트 렌더링을 테스트하기 위한 시나리오입니다.",
+                mode: ProcessMode::Translate,
+                switch_to: None,
+            },
+            Scenario {
+                name: "correct_mode",
+                input: "This sentense has speling erors that need correcting.",
+                mode: ProcessMode::Correct,
+                switch_to: None,
+            },
+            Scenario {
+                name: "long_single_line",
+                input: "A",
+                mode: ProcessMode::Translate,
+                switch_to: None,
+            },
         ]);
 
         Self {
@@ -463,19 +487,32 @@ pub enum ScenarioAction {
 
 /// Generate a mock LLM response based on the input text.
 /// Used when `DIAG_MOCK=1` is set.
-pub fn mock_response(input: &str) -> String {
-    if input.len() < 20 {
-        // Short input -> short response.
+/// Returns `Err` for inputs starting with `__ERROR__`.
+pub fn mock_response(input: &str) -> Result<String, String> {
+    if input.starts_with("__ERROR__") {
+        return Err("Connection refused: vLLM server not reachable at localhost:8000".into());
+    }
+
+    let response = if input == "A" {
+        // Single-line but long enough to test text wrapping.
+        "[mock] This is a single long line that should wrap within the overlay width to verify \
+         that text wrapping works correctly when the result is just one continuous sentence \
+         without any explicit line breaks in the content."
+            .to_string()
+    } else if input.len() < 20 {
         format!("[mock] Translated: {input}")
     } else {
-        // Long input -> long response that exceeds MAX_RESULT_HEIGHT.
         let mut lines = Vec::new();
-        lines.push(format!("[mock] Translated output for: {}...", &input[..20.min(input.len())]));
+        lines.push(format!(
+            "[mock] Translated output for: {}...",
+            &input[..20.min(input.len())]
+        ));
         for i in 1..=15 {
             lines.push(format!(
                 "Line {i}: This is a mock translation line to test scroll behavior and viewport sizing."
             ));
         }
         lines.join("\n")
-    }
+    };
+    Ok(response)
 }

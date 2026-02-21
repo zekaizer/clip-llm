@@ -49,9 +49,17 @@ pub fn spawn_worker(
                         // Mock mode: return canned responses without LLM call.
                         #[cfg(feature = "diagnostics")]
                         if std::env::var("DIAG_MOCK").is_ok() {
-                            let mock = crate::diagnostics::mock_response(&text);
-                            info!("worker: mock {} ({} chars)", mode.label(), mock.len());
-                            let _ = resp_tx.send(WorkerResponse::Complete { result: mock });
+                            let resp = match crate::diagnostics::mock_response(&text) {
+                                Ok(mock) => {
+                                    info!("worker: mock {} ({} chars)", mode.label(), mock.len());
+                                    WorkerResponse::Complete { result: mock }
+                                }
+                                Err(msg) => {
+                                    info!("worker: mock error: {msg}");
+                                    WorkerResponse::Error { message: msg }
+                                }
+                            };
+                            let _ = resp_tx.send(resp);
                             continue;
                         }
 
