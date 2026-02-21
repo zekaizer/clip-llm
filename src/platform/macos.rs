@@ -6,6 +6,7 @@ use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode,
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+use core_graphics::geometry::{CGPoint, CGRect};
 use tracing::{debug, info, warn};
 
 use super::Platform;
@@ -70,6 +71,37 @@ pub fn configure_window_for_spaces() -> bool {
 
         debug!("configured NSWindow collection behavior for Spaces");
         true
+    }
+}
+
+extern "C" {
+    fn CGGetDisplaysWithPoint(
+        point: CGPoint,
+        max_displays: u32,
+        displays: *mut u32,
+        matching_display_count: *mut u32,
+    ) -> i32;
+    fn CGDisplayBounds(display: u32) -> CGRect;
+}
+
+/// Get the display bounds (Quartz coordinates) of the screen containing the given point.
+/// Returns (origin_x, origin_y, width, height).
+pub fn display_bounds_at_point(x: f64, y: f64) -> Option<(f64, f64, f64, f64)> {
+    let point = CGPoint::new(x, y);
+    let mut display: u32 = 0;
+    let mut count: u32 = 0;
+    unsafe {
+        let err = CGGetDisplaysWithPoint(point, 1, &mut display, &mut count);
+        if err != 0 || count == 0 {
+            return None;
+        }
+        let bounds = CGDisplayBounds(display);
+        Some((
+            bounds.origin.x,
+            bounds.origin.y,
+            bounds.size.width,
+            bounds.size.height,
+        ))
     }
 }
 

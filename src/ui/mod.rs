@@ -116,13 +116,23 @@ impl OverlayApp {
         self.show_window(ctx);
     }
 
-    /// Reposition the window so it is centered on `spawn_position`.
-    /// No monitor clamping — cursor coordinates are absolute across all monitors,
-    /// and the OS will keep the window within visible bounds.
+    /// Reposition the window so it is centered on `spawn_position`,
+    /// clamped to the display containing the cursor.
     fn reposition_window(&self, ctx: &egui::Context, win_size: egui::Vec2) {
         if let Some(cursor) = self.spawn_position {
-            let x = cursor.x - win_size.x / 2.0;
-            let y = cursor.y - win_size.y / 2.0;
+            let mut x = cursor.x - win_size.x / 2.0;
+            let mut y = cursor.y - win_size.y / 2.0;
+
+            #[cfg(target_os = "macos")]
+            if let Some((ox, oy, w, h)) = crate::platform::macos::display_bounds_at_point(
+                cursor.x as f64,
+                cursor.y as f64,
+            ) {
+                let (ox, oy, w, h) = (ox as f32, oy as f32, w as f32, h as f32);
+                x = x.clamp(ox, (ox + w - win_size.x).max(ox));
+                y = y.clamp(oy, (oy + h - win_size.y).max(oy));
+            }
+
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
         }
     }
