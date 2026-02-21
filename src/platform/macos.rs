@@ -55,6 +55,7 @@ unsafe fn get_app_window() -> *mut c_void {
 /// Configure the NSWindow for overlay use:
 /// - Moves to active Space and can appear over fullscreen apps.
 /// - Disables native macOS window shadow (we draw our own via egui Frame).
+///
 /// Returns true if successfully configured.
 pub fn configure_window_for_spaces() -> bool {
     type MsgSendUlong = unsafe extern "C" fn(*mut c_void, *mut c_void, c_ulong);

@@ -2,6 +2,8 @@
 
 pub mod api;
 pub mod clipboard;
+#[cfg(feature = "diagnostics")]
+pub mod diagnostics;
 pub mod hotkey;
 pub mod platform;
 pub mod ui;

@@ -16,6 +16,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu"] }
 tokio = { version = "1", features = ["rt", "macros", "sync"] }
 zstd = "0.13"
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
+chrono = { version = "0.4", optional = true, default-features = false, features = ["clock"] }
+
+[features]
+diagnostics = ["image", "chrono"]
 
 [build-dependencies]
 zstd = "0.13"
