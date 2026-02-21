@@ -2,7 +2,8 @@
 
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
+use tracing_subscriber::EnvFilter;
 
 use clip_llm::api::client::LlmClient;
 use clip_llm::api::response::strip_think_blocks;
@@ -12,7 +13,13 @@ use clip_llm::platform::{self, NativePlatform, Platform};
 use clip_llm::{AppError, HotkeyError};
 
 fn main() {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("clip_llm=info")),
+        )
+        .init();
+    debug!("debug logging enabled");
     info!("clip-llm starting");
 
     if let Err(e) = run() {
