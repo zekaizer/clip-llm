@@ -21,7 +21,8 @@ pub struct OverlayOutput {
     pub action: OverlayAction,
     /// Desired viewport size based on rendered content.
     pub desired_size: Option<egui::Vec2>,
-    /// Raw content size before shadow padding (for diagnostics).
+    /// Raw content size before shadow padding (used by diagnostics).
+    #[cfg_attr(not(feature = "diagnostics"), allow(dead_code))]
     pub content_size: Option<egui::Vec2>,
 }
 

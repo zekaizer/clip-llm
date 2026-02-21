@@ -4,6 +4,10 @@
 //! Automatically captures screenshots + frame data on every state transition.
 //! Use `DIAG_MOCK=1` to bypass the LLM server with canned responses.
 
+// DiagCollector::new() and DiagScenarioRunner::new() have side effects
+// (dir creation, scenario setup) that make Default impls misleading.
+#![allow(clippy::new_without_default)]
+
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
