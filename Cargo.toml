@@ -6,17 +6,19 @@ edition = "2021"
 [dependencies]
 global-hotkey = "0.6"
 arboard = "3"
-reqwest = { version = "0.12", features = ["rustls-tls", "blocking", "json"], default-features = false }
+reqwest = { version = "0.12", features = ["rustls-tls", "json"], default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 regex = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu"] }
+tokio = { version = "1", features = ["rt", "macros", "sync"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.25"
 core-foundation = "0.10"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }

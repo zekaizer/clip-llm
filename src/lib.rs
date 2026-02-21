@@ -4,6 +4,8 @@ pub mod api;
 pub mod clipboard;
 pub mod hotkey;
 pub mod platform;
+pub mod ui;
+pub mod worker;
 
 use thiserror::Error;
 
@@ -26,6 +28,9 @@ pub enum ApiError {
 
     #[error("empty response from model")]
     EmptyResponse,
+
+    #[error("request cancelled")]
+    Cancelled,
 }
 
 #[derive(Debug, Error)]

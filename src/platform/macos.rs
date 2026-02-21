@@ -16,35 +16,9 @@ const KEY_C: CGKeyCode = 0x08;
 /// Delay between key-down and key-up events (ms).
 const KEY_EVENT_DELAY_MS: u64 = 50;
 
-/// Timeout for ReceiveNextEvent in seconds.
-const EVENT_TIMEOUT_SECS: f64 = 0.05;
-
 #[link(name = "AppKit", kind = "framework")]
 extern "C" {
     fn AXIsProcessTrusted() -> bool;
-}
-
-#[link(name = "Carbon", kind = "framework")]
-extern "C" {
-    fn GetApplicationEventTarget() -> *mut std::ffi::c_void;
-    fn ReceiveNextEvent(
-        num_types: u32,
-        list: *const std::ffi::c_void,
-        timeout: f64,
-        pull: u8,
-        event: *mut *mut std::ffi::c_void,
-    ) -> i32;
-    fn SendEventToEventTarget(
-        event: *mut std::ffi::c_void,
-        target: *mut std::ffi::c_void,
-    ) -> i32;
-    fn ReleaseEvent(event: *mut std::ffi::c_void);
-}
-
-extern "C" {
-    fn objc_getClass(name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
-    fn sel_registerName(name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
-    fn objc_msgSend(receiver: *mut std::ffi::c_void, sel: *mut std::ffi::c_void, ...) -> *mut std::ffi::c_void;
 }
 
 pub struct MacOsPlatform;
@@ -72,6 +46,15 @@ impl Platform for MacOsPlatform {
         Ok(())
     }
 
+    fn mouse_position(&self) -> Option<(f64, f64)> {
+        // CGEvent.location() returns Quartz logical points (top-left origin).
+        // This matches egui's OuterPosition coordinate system directly.
+        let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState).ok()?;
+        let event = CGEvent::new(source).ok()?;
+        let pos = event.location();
+        Some((pos.x, pos.y))
+    }
+
     /// Check if the process has Accessibility permission.
     /// Returns `AccessibilityDenied` if not granted.
     fn check_accessibility(&self) -> Result<(), PlatformError> {
@@ -82,43 +65,5 @@ impl Platform for MacOsPlatform {
         } else {
             Err(PlatformError::AccessibilityDenied)
         }
-    }
-}
-
-/// Initialize NSApplication so Carbon hotkey events are delivered in CLI binaries.
-pub(super) fn init_impl() {
-    unsafe {
-        let cls = objc_getClass(c"NSApplication".as_ptr());
-        let shared_app_sel = sel_registerName(c"sharedApplication".as_ptr());
-        let app = objc_msgSend(cls, shared_app_sel);
-
-        // setActivationPolicy: NSApplicationActivationPolicyProhibited (2)
-        // Prevents Dock icon while still receiving Carbon events.
-        let set_policy_sel = sel_registerName(c"setActivationPolicy:".as_ptr());
-        objc_msgSend(app, set_policy_sel, 2i64);
-    }
-    info!("NSApplication initialized for Carbon event delivery");
-}
-
-/// Dispatch Carbon events via ReceiveNextEvent, then call `tick`.
-/// This replaces CFRunLoop which cannot dispatch Carbon Application Events
-/// that global-hotkey registers via RegisterEventHotKey.
-pub(super) fn run_event_loop_impl(tick: &mut dyn FnMut()) -> ! {
-    loop {
-        unsafe {
-            let mut event = std::ptr::null_mut();
-            let status = ReceiveNextEvent(
-                0,
-                std::ptr::null(),
-                EVENT_TIMEOUT_SECS,
-                1, // pull = true (remove from queue)
-                &mut event,
-            );
-            if status == 0 {
-                SendEventToEventTarget(event, GetApplicationEventTarget());
-                ReleaseEvent(event);
-            }
-        }
-        tick();
     }
 }

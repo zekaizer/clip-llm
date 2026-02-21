@@ -1,7 +1,8 @@
 use std::env;
+use std::sync::Arc;
 use std::time::Duration;
 
-use reqwest::blocking::Client;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
@@ -54,12 +55,15 @@ pub(crate) struct ResponseMessage {
 
 // -- Client --
 
-pub struct LlmClient {
+struct LlmClientInner {
     client: Client,
     endpoint: String,
     model: String,
     api_key: Option<String>,
 }
+
+#[derive(Clone)]
+pub struct LlmClient(Arc<LlmClientInner>);
 
 #[cfg(test)]
 mod tests {
@@ -101,19 +105,20 @@ impl LlmClient {
         let client = Client::builder()
             .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
             .build()?;
-        Ok(Self {
+        Ok(Self(Arc::new(LlmClientInner {
             client,
             endpoint,
             model,
             api_key,
-        })
+        })))
     }
 
     /// Send user text to the vLLM server and return the raw response content.
     /// Think-block stripping is handled separately by `response::strip_think_blocks`.
-    pub fn complete(&self, user_text: &str) -> Result<String, ApiError> {
+    pub async fn complete(&self, user_text: &str) -> Result<String, ApiError> {
+        let inner = &self.0;
         let body = ChatRequest {
-            model: &self.model,
+            model: &inner.model,
             messages: vec![
                 Message {
                     role: "system",
@@ -128,18 +133,18 @@ impl LlmClient {
             max_tokens: MAX_TOKENS,
         };
 
-        info!("sending request to {}", self.endpoint);
-        debug!("model={}, temperature={}, max_tokens={}", self.model, TEMPERATURE, MAX_TOKENS);
+        info!("sending request to {}", inner.endpoint);
+        debug!("model={}, temperature={}, max_tokens={}", inner.model, TEMPERATURE, MAX_TOKENS);
         debug!("request body: {}", serde_json::to_string(&body).unwrap_or_default());
 
-        let mut req = self.client.post(&self.endpoint).json(&body);
-        if let Some(key) = &self.api_key {
+        let mut req = inner.client.post(&inner.endpoint).json(&body);
+        if let Some(key) = &inner.api_key {
             req = req.bearer_auth(key);
         }
 
-        let resp = req.send()?.error_for_status()?;
+        let resp = req.send().await?.error_for_status()?;
 
-        let chat: ChatResponse = resp.json()?;
+        let chat: ChatResponse = resp.json().await?;
 
         let content = chat
             .choices

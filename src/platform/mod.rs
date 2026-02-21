@@ -5,6 +5,9 @@ pub trait Platform {
 
     /// Check and prompt for required OS permissions (e.g. macOS Accessibility).
     fn check_accessibility(&self) -> Result<(), crate::PlatformError>;
+
+    /// Get the current mouse cursor position in screen coordinates (egui logical points).
+    fn mouse_position(&self) -> Option<(f64, f64)>;
 }
 
 #[cfg(target_os = "macos")]
@@ -16,24 +19,3 @@ pub use macos::MacOsPlatform as NativePlatform;
 mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::WindowsPlatform as NativePlatform;
-
-/// Platform-specific initialization. Must be called before hotkey registration.
-#[cfg(target_os = "macos")]
-pub fn init() {
-    macos::init_impl();
-}
-
-#[cfg(target_os = "windows")]
-pub fn init() {}
-
-/// Run the platform event loop. Calls `tick` on each iteration.
-/// This function never returns under normal operation.
-#[cfg(target_os = "macos")]
-pub fn run_event_loop(mut tick: impl FnMut()) -> ! {
-    macos::run_event_loop_impl(&mut tick)
-}
-
-#[cfg(target_os = "windows")]
-pub fn run_event_loop(mut tick: impl FnMut()) -> ! {
-    windows::run_event_loop_impl(&mut tick)
-}
