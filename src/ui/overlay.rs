@@ -99,6 +99,7 @@ pub fn render(
                         if !streaming_text.is_empty() {
                             ui.add_space(4.0);
                             egui::ScrollArea::vertical()
+                                .id_salt(("streaming", mode))
                                 .max_height(MAX_RESULT_HEIGHT)
                                 .auto_shrink([false, true])
                                 .stick_to_bottom(true)
@@ -130,6 +131,7 @@ pub fn render(
                     }
                     OverlayState::Result(text) => {
                         egui::ScrollArea::vertical()
+                            .id_salt(("result", mode))
                             .max_height(MAX_RESULT_HEIGHT)
                             .auto_shrink([false, true])
                             .scroll_bar_visibility(
