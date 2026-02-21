@@ -14,7 +14,7 @@ System-wide LLM clipboard assistant. Captures text via global hotkey, sends it t
 ## Roadmap
 
 - [x] Phase 1 — Basic Pipeline
-- [x] Phase 2 — Async API + SSE Streaming (partial: no SSE streaming yet)
+- [x] Phase 2 — Async API + SSE Streaming
 - [ ] Phase 3 — Status Feedback + System Tray
 - [ ] Phase 4 — Config File + Multiple Templates
 - [ ] Phase 5 — Template Cycle Selection UI
