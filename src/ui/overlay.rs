@@ -4,7 +4,9 @@ use super::OverlayState;
 use crate::ProcessMode;
 
 const OVERLAY_WIDTH: f32 = 480.0;
-const MAX_RESULT_HEIGHT: f32 = 400.0;
+const MAX_RESULT_HEIGHT: f32 = 260.0;
+/// Space around the frame for shadow rendering.
+const SHADOW_PAD: f32 = 20.0;
 
 /// Action requested by the overlay UI.
 pub enum OverlayAction {
@@ -44,12 +46,35 @@ pub fn render(state: &OverlayState, mode: ProcessMode, ctx: &egui::Context) -> O
             color: egui::Color32::from_black_alpha(100),
         });
 
+    // --- egui Area sizing fix ---
+    // egui::Area stores the previous frame's content min_size and uses it as
+    // the next frame's max_rect.  Two things conspire to keep the overlay tiny:
+    //
+    //  1. With constrain=true (default), the *initial* sizing pass caps the
+    //     Area to the viewport, which starts at the small initial window size.
+    //  2. When transitioning from a short state (Processing) to a tall one
+    //     (Result), the Area's max_rect is still sized for the short state,
+    //     starving the ScrollArea of vertical space.
+    //
+    // Fix (a): constrain(false) — lets the initial sizing pass use a large
+    //          default size instead of the viewport.
+    // Fix (b): set_min_height inside the Frame for Result state — inflates
+    //          min_size so the *next* frame's max_rect is tall enough for the
+    //          ScrollArea to reach MAX_RESULT_HEIGHT.
+
+    // Offset the frame so shadow renders evenly on all sides.
     let area_resp = egui::Area::new("overlay".into())
-        .fixed_pos(egui::pos2(0.0, 0.0))
+        .fixed_pos(egui::pos2(SHADOW_PAD, SHADOW_PAD))
+        .constrain(false) // Fix (a): see above
         .sense(egui::Sense::drag())
         .show(ctx, |ui| {
             frame.show(ui, |ui| {
                 ui.set_width(OVERLAY_WIDTH);
+
+                // Fix (b): see "egui Area sizing fix" comment above.
+                if matches!(state, OverlayState::Result(_)) {
+                    ui.set_min_height(MAX_RESULT_HEIGHT + 40.0);
+                }
 
                 render_tab_bar(ui, mode, &mut action);
                 ui.add_space(8.0);
@@ -79,7 +104,7 @@ pub fn render(state: &OverlayState, mode: ProcessMode, ctx: &egui::Context) -> O
                     OverlayState::Result(text) => {
                         egui::ScrollArea::vertical()
                             .max_height(MAX_RESULT_HEIGHT)
-                            .auto_shrink(true)
+                            .auto_shrink([false, true])
                             .scroll_bar_visibility(
                                 egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
                             )
@@ -113,10 +138,9 @@ pub fn render(state: &OverlayState, mode: ProcessMode, ctx: &egui::Context) -> O
         action = OverlayAction::Close;
     }
 
-    // Calculate desired viewport size from the rendered area + padding for shadow.
+    // Viewport = content + shadow padding on all sides.
     let content_size = area_resp.response.rect.size();
-    let padding = egui::vec2(40.0, 40.0); // extra space for shadow
-    let desired = content_size + padding;
+    let desired = content_size + egui::vec2(SHADOW_PAD * 2.0, SHADOW_PAD * 2.0);
 
     OverlayOutput {
         action,

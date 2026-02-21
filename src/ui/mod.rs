@@ -188,7 +188,7 @@ impl OverlayApp {
             let win_size = ctx
                 .input(|i| i.viewport().inner_rect)
                 .map(|r| r.size())
-                .unwrap_or(egui::vec2(480.0, 120.0));
+                .unwrap_or(egui::vec2(400.0, 120.0));
             self.reposition_window(ctx, win_size);
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -245,14 +245,21 @@ impl eframe::App for OverlayApp {
             ..egui::Visuals::dark()
         });
 
+        // Ensure window is hidden when state is Hidden.
+        // Fixes macOS startup where with_visible(false) doesn't fully suppress the window.
+        if matches!(self.state, OverlayState::Hidden) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+
         self.poll_responses(ctx);
         self.poll_hotkeys(ctx);
 
         let output = overlay::render(&self.state, self.mode, ctx);
 
-        // Resize viewport to fit content and re-center on spawn position.
+        // Resize viewport to fit rendered content.
         if let Some(desired) = output.desired_size {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(desired));
+
             if !matches!(self.state, OverlayState::Hidden) && !self.user_repositioned {
                 self.reposition_window(ctx, desired);
             }
