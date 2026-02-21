@@ -48,7 +48,7 @@ Platform trait covers:
 - `check_accessibility()` — macOS: prompt for Accessibility permission, Windows: no-op
 
 Platform-independent values handled outside the trait:
-- Hotkey modifier: `cfg`-based constant (`Cmd` on macOS, `Ctrl` on Windows)
+- Hotkey: `Ctrl+Shift+C` double-tap (same on both platforms)
 - Config directory: `dirs::config_dir()` (cross-platform)
 
 ### Event Loop
@@ -79,7 +79,8 @@ Hardcoded single prompt template. macOS + Windows. Console log for status. Block
    - `cfg(target_os)` compile-time selection
 
 2. **Global hotkey registration**
-   - Register a configurable hotkey (default: `Cmd+Shift+J` on macOS, `Ctrl+Shift+J` on Windows)
+   - Register `Ctrl+Shift+C` via `global-hotkey` (same on both platforms)
+   - Double-tap detection: first press starts timer (500ms), second press within timeout triggers action
    - macOS: requires Accessibility permission (detect and prompt)
    - Windows: no special permission required
 
@@ -217,7 +218,7 @@ Alt+Tab style template switcher.
 
 ### Features
 1. **Modifier-hold + repeat key cycling**
-   - Hold modifier keys (`Cmd+Shift` on macOS, `Ctrl+Shift` on Windows), press trigger key (`J`) repeatedly to cycle through templates
+   - Hold `Ctrl+Shift`, press `C` repeatedly to cycle through templates
    - Cycle follows `order` field from config
    - Wraps around at end of list
 

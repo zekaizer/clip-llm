@@ -45,7 +45,7 @@ The project follows a 7-phase incremental plan defined in [docs/REQUIREMENTS.md]
 
 ### Phases
 
-1. **Phase 1 — Basic Pipeline**: Platform abstraction + global hotkey (`Cmd+Shift+J`/`Ctrl+Shift+J`) → clipboard read (with copy simulation fallback) → blocking HTTP to vLLM → strip `<think>` blocks → clipboard write.
+1. **Phase 1 — Basic Pipeline**: Platform abstraction + global hotkey (`Ctrl+Shift+C` double-tap) → clipboard read (with copy simulation fallback) → blocking HTTP to vLLM → strip `<think>` blocks → clipboard write.
 2. **Phase 2 — Async + SSE**: `tokio` runtime on separate thread, SSE streaming, request cancellation.
 3. **Phase 3 — Feedback**: Toast notifications, system tray, auto-retry on 5xx.
 4. **Phase 4 — Config + Templates**: TOML config, multiple prompt templates.

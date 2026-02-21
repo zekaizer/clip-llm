@@ -4,7 +4,7 @@ System-wide LLM clipboard assistant. Captures text via global hotkey, sends it t
 
 ## Features
 
-- Global hotkey trigger (`Cmd+Shift+J` / `Ctrl+Shift+J`)
+- Global hotkey trigger (`Ctrl+Shift+C` double-tap)
 - Clipboard read with auto-copy fallback
 - OpenAI-compatible API integration (vLLM)
 - `<think>` block stripping
