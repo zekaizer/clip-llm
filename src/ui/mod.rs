@@ -10,7 +10,7 @@ use eframe::egui;
 use tracing::{debug, error, info};
 
 use crate::clipboard::ClipboardManager;
-use crate::hotkey::TapAction;
+use crate::hotkey::{TapAction, TapEvent};
 use crate::platform::{NativePlatform, Platform};
 use crate::worker::{WorkerCommand, WorkerResponse};
 
@@ -30,8 +30,8 @@ pub struct OverlayApp {
     spawn_position: Option<egui::Pos2>,
     /// Whether the initial Visible(false) command has been sent at startup.
     initial_hide_done: bool,
-    /// Tap actions from coordinator thread (hotkey detection runs off-UI).
-    tap_rx: mpsc::Receiver<TapAction>,
+    /// Tap events from coordinator thread (hotkey detection runs off-UI).
+    tap_rx: mpsc::Receiver<TapEvent>,
     /// Cached desired_size to avoid redundant send_viewport_cmd calls.
     last_desired_size: Option<egui::Vec2>,
     #[cfg(feature = "diagnostics")]
@@ -50,7 +50,7 @@ impl OverlayApp {
         cmd_tx: tokio_mpsc::UnboundedSender<WorkerCommand>,
         resp_rx: mpsc::Receiver<WorkerResponse>,
         clipboard: ClipboardManager,
-        tap_rx: mpsc::Receiver<TapAction>,
+        tap_rx: mpsc::Receiver<TapEvent>,
         diag_action_rx: mpsc::Receiver<crate::diagnostics::ScenarioAction>,
         diag_state_tx: mpsc::Sender<&'static str>,
     ) -> Self {
@@ -78,7 +78,7 @@ impl OverlayApp {
         cmd_tx: tokio_mpsc::UnboundedSender<WorkerCommand>,
         resp_rx: mpsc::Receiver<WorkerResponse>,
         clipboard: ClipboardManager,
-        tap_rx: mpsc::Receiver<TapAction>,
+        tap_rx: mpsc::Receiver<TapEvent>,
     ) -> Self {
         Self {
             sm: StateMachine::new(crate::ProcessMode::default()),
@@ -134,7 +134,10 @@ impl OverlayApp {
                     }
                 }
                 UiEffect::ShowWindow => self.show_window(ctx),
-                UiEffect::HideWindow => self.hide_window(ctx),
+                UiEffect::HideWindow => {
+                    self.hide_window(ctx);
+                    self.spawn_position = None;
+                }
                 UiEffect::CaptureMousePosition => self.capture_mouse_position(),
                 UiEffect::ResetAreas => {
                     #[cfg(feature = "diagnostics")]
@@ -155,8 +158,15 @@ impl OverlayApp {
     // -- Tap action handling (from coordinator thread) --
 
     fn poll_tap_actions(&mut self, ctx: &egui::Context) {
-        while let Ok(action) = self.tap_rx.try_recv() {
-            match action {
+        while let Ok(tap_event) = self.tap_rx.try_recv() {
+            // Set spawn_position from coordinator's first-press capture.
+            // This runs before sm.handle() so CaptureMousePosition effect
+            // (which skips if already set) preserves the first-press position.
+            if let Some((x, y)) = tap_event.mouse_pos {
+                self.spawn_position = Some(egui::pos2(x as f32, y as f32));
+            }
+
+            match tap_event.action {
                 TapAction::SingleTap => {
                     info!("single-tap triggered, using clipboard content...");
                     let event = match self.clipboard.read_content() {
@@ -254,48 +264,61 @@ impl OverlayApp {
     // -- Window management (platform / egui dependent) --
 
     fn capture_mouse_position(&mut self) {
+        // Skip if already set for this show cycle (e.g., from coordinator
+        // first-press capture via TapEvent). Cleared on HideWindow.
+        if self.spawn_position.is_some() {
+            return;
+        }
         self.spawn_position = self
             .platform
             .mouse_position()
             .map(|(x, y)| egui::pos2(x as f32, y as f32));
     }
 
-    /// Reposition the window so it is centered on `spawn_position`,
-    /// clamped to the display containing the cursor.
+    /// Calculate centered-and-clamped window position for `spawn_position`.
+    /// Returns top-left corner in screen coordinates (Quartz on macOS, logical on Windows).
+    fn calculate_centered_position(&self, win_size: egui::Vec2) -> Option<egui::Pos2> {
+        let cursor = self.spawn_position?;
+        let mut x = cursor.x - win_size.x / 2.0;
+        let mut y = cursor.y - win_size.y / 2.0;
+
+        if let Some((ox, oy, w, h)) =
+            self.platform.display_bounds_at_point(cursor.x as f64, cursor.y as f64)
+        {
+            let (ox, oy, w, h) = (ox as f32, oy as f32, w as f32, h as f32);
+            x = x.clamp(ox, (ox + w - win_size.x).max(ox));
+            y = y.clamp(oy, (oy + h - win_size.y).max(oy));
+        }
+
+        Some(egui::pos2(x, y))
+    }
+
+    /// Reposition the window via async ViewportCommand.
+    /// Used for size-change repositioning while the overlay is already visible.
     fn reposition_window(&self, ctx: &egui::Context, win_size: egui::Vec2) {
-        if let Some(cursor) = self.spawn_position {
-            let mut x = cursor.x - win_size.x / 2.0;
-            let mut y = cursor.y - win_size.y / 2.0;
-
-            if let Some((ox, oy, w, h)) =
-                self.platform.display_bounds_at_point(cursor.x as f64, cursor.y as f64)
-            {
-                let (ox, oy, w, h) = (ox as f32, oy as f32, w as f32, h as f32);
-                x = x.clamp(ox, (ox + w - win_size.x).max(ox));
-                y = y.clamp(oy, (oy + h - win_size.y).max(oy));
-            }
-
-            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
+        if let Some(pos) = self.calculate_centered_position(win_size) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
         }
     }
 
     #[allow(unused_variables)]
     fn show_window(&self, ctx: &egui::Context) {
-        // Pre-position before making visible to avoid flash at old location.
-        // spawn_position is already set by CaptureMousePosition effect.
-        if let Some(size_hint) = self.last_desired_size {
-            self.reposition_window(ctx, size_hint);
-        }
+        // Calculate centered position for native (synchronous) pre-positioning.
+        // Native calls set the window position BEFORE making it visible,
+        // eliminating the one-frame flash at the wrong location.
+        let pos = self.last_desired_size
+            .and_then(|s| self.calculate_centered_position(s))
+            .map(|p| (p.x, p.y));
 
         #[cfg(target_os = "macos")]
         {
             crate::platform::macos::configure_window_for_spaces();
-            crate::platform::macos::show_and_focus_window();
+            crate::platform::macos::show_and_focus_window(pos);
         }
 
         #[cfg(target_os = "windows")]
         {
-            crate::platform::windows::show_and_focus_window();
+            crate::platform::windows::show_and_focus_window(pos);
             // Sync winit internal state so later Visible(false) properly calls SW_HIDE.
             // Native ShowWindowAsync bypasses winit, leaving it thinking the window
             // is still hidden — without this, hide_window() becomes a no-op.
@@ -304,6 +327,9 @@ impl OverlayApp {
 
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
+            if let Some((x, y)) = pos {
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
+            }
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
@@ -367,9 +393,9 @@ impl eframe::App for OverlayApp {
             {
                 self.reposition_window(ctx, desired);
             }
-        } else {
-            self.last_desired_size = None;
         }
+        // When desired_size is None (Hidden state), preserve last_desired_size
+        // so show_window() can use it as a pre-positioning hint.
 
         // Handle overlay UI actions.
         let event = match output.action {

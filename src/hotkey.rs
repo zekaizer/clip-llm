@@ -16,6 +16,14 @@ pub enum TapAction {
     DoubleTap,
 }
 
+/// Tap action with mouse position captured at first key press.
+#[derive(Debug, Clone, Copy)]
+pub struct TapEvent {
+    pub action: TapAction,
+    /// Mouse position (logical points) at the moment of the first key press.
+    pub mouse_pos: Option<(f64, f64)>,
+}
+
 /// Detects single-tap vs double-tap of a hotkey.
 ///
 /// - `on_press()` returns `Pending` on first tap, `DoubleTap` on second tap within timeout.

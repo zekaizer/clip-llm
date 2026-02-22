@@ -113,23 +113,28 @@ impl Platform for WindowsPlatform {
 ///
 /// Called from coordinator / diagnostics threads before sending actions to UI.
 pub fn show_no_activate() {
+    use windows_sys::Win32::Foundation::RECT;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, SetWindowPos, ShowWindowAsync, HWND_TOP, SW_SHOWNA, SWP_NOACTIVATE,
-        SWP_NOSIZE, SWP_NOZORDER,
+        FindWindowW, GetWindowRect, SetWindowPos, ShowWindowAsync, HWND_TOP, SW_SHOWNA,
+        SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
     };
     let title: Vec<u16> = "clip-llm\0".encode_utf16().collect();
     let hwnd = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
     if !hwnd.is_null() {
         unsafe {
-            // Move to cursor position before showing to prevent flash at old location.
-            // Exact centering happens later in show_window() → reposition_window().
+            // Center window on cursor before showing to prevent flash.
+            // Both GetCursorPos and GetWindowRect return physical pixels,
+            // so no DPI conversion is needed for the centering offset.
             let mut pt = POINT { x: 0, y: 0 };
-            if GetCursorPos(&mut pt) != 0 {
+            let mut rect: RECT = std::mem::zeroed();
+            if GetCursorPos(&mut pt) != 0 && GetWindowRect(hwnd, &mut rect) != 0 {
+                let w = rect.right - rect.left;
+                let h = rect.bottom - rect.top;
                 SetWindowPos(
                     hwnd,
                     HWND_TOP,
-                    pt.x,
-                    pt.y,
+                    pt.x - w / 2,
+                    pt.y - h / 2,
                     0,
                     0,
                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
@@ -142,16 +147,34 @@ pub fn show_no_activate() {
 
 /// Show and focus the clip-llm window from any thread.
 ///
+/// If `position` is provided (logical points), the window is moved there
+/// **synchronously** via `SetWindowPos` before becoming visible. This
+/// eliminates the one-frame flash at the wrong location.
+///
 /// Uses `ShowWindowAsync` (PostMessage-based, cross-thread safe) + `SetForegroundWindow`.
 /// Called from `show_window()` in the UI after clipboard content is ready.
-pub fn show_and_focus_window() {
+pub fn show_and_focus_window(position: Option<(f32, f32)>) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, SetForegroundWindow, ShowWindowAsync, SW_SHOW,
+        FindWindowW, SetForegroundWindow, SetWindowPos, ShowWindowAsync, HWND_TOP, SW_SHOW,
+        SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
     };
     let title: Vec<u16> = "clip-llm\0".encode_utf16().collect();
     let hwnd = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
     if !hwnd.is_null() {
         unsafe {
+            if let Some((x, y)) = position {
+                let dpi = GetDpiForSystem() as f64;
+                let scale = dpi / 96.0;
+                SetWindowPos(
+                    hwnd,
+                    HWND_TOP,
+                    (x as f64 * scale) as i32,
+                    (y as f64 * scale) as i32,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
             ShowWindowAsync(hwnd, SW_SHOW);
             SetForegroundWindow(hwnd);
         }

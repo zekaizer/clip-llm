@@ -10,7 +10,7 @@ use tracing_subscriber::EnvFilter;
 
 use clip_llm::api::client::LlmClient;
 use clip_llm::clipboard::ClipboardManager;
-use clip_llm::hotkey::TapAction;
+use clip_llm::hotkey::TapEvent;
 use clip_llm::ui::OverlayApp;
 use clip_llm::worker::{spawn_worker, WorkerCommand, WorkerResponse};
 use clip_llm::HotkeyError;
@@ -200,10 +200,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let pre_show = clip_llm::platform::pre_show_callback();
 
             // Coordinator thread: event-driven hotkey detection (off-UI).
-            let (tap_tx, tap_rx) = mpsc::channel::<TapAction>();
+            let (tap_tx, tap_rx) = mpsc::channel::<TapEvent>();
             let ctx_for_coord = cc.egui_ctx.clone();
+            let mouse_pos_fn: Box<dyn Fn() -> Option<(f64, f64)> + Send> = {
+                use clip_llm::platform::{NativePlatform, Platform};
+                Box::new(|| NativePlatform.mouse_position())
+            };
             std::thread::spawn(move || {
-                clip_llm::coordinator::run(hotkey_rx, tap_tx, ctx_for_coord, pre_show);
+                clip_llm::coordinator::run(
+                    hotkey_rx,
+                    tap_tx,
+                    ctx_for_coord,
+                    pre_show,
+                    mouse_pos_fn,
+                );
             });
 
             // Diagnostics: spawn scenario runner thread (off-UI, like coordinator).
