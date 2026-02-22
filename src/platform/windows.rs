@@ -4,6 +4,7 @@ use std::time::Duration;
 use tracing::debug;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_C, VK_CONTROL,
+    VK_SHIFT,
 };
 use windows_sys::Win32::Foundation::POINT;
 use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
@@ -23,6 +24,12 @@ impl Platform for WindowsPlatform {
         debug!("posting Ctrl+C key events via SendInput");
 
         let inputs = [
+            // Release any held modifier keys from the hotkey (Ctrl+Shift+C).
+            // SendInput merges with physical key state — if Shift is still
+            // held, the OS would see Ctrl+Shift+C instead of Ctrl+C.
+            make_key_input(VK_SHIFT, KEYEVENTF_KEYUP),
+            make_key_input(VK_CONTROL, KEYEVENTF_KEYUP),
+            // Clean Ctrl+C
             make_key_input(VK_CONTROL, 0),
             make_key_input(VK_C, 0),
             make_key_input(VK_C, KEYEVENTF_KEYUP),
