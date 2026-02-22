@@ -161,13 +161,16 @@ impl StateMachine {
     }
 
     /// Modes available for the current content.
-    /// Image-only content restricts to Summarize only.
+    /// - No content: no modes available (tabs disabled).
+    /// - Image-only: Summarize only.
+    /// - Text (with or without images): all modes.
     pub fn available_modes(&self) -> &[ProcessMode] {
         match &self.original_content {
+            None => &[],
             Some(content) if content.text.is_none() && content.has_images() => {
                 &[ProcessMode::Summarize]
             }
-            _ => ProcessMode::ALL,
+            Some(_) => ProcessMode::ALL,
         }
     }
 
@@ -307,8 +310,10 @@ impl StateMachine {
         if self.mode == new_mode {
             return vec![];
         }
-        // Block switch to unavailable modes (e.g. image-only → Translate).
-        if !self.available_modes().contains(&new_mode) {
+        // Block switch to unavailable modes when content is loaded
+        // (e.g. image-only → Translate). When no content is loaded (Hidden),
+        // allow free mode switching to set the default for the next trigger.
+        if self.original_content.is_some() && !self.available_modes().contains(&new_mode) {
             return vec![];
         }
         self.mode = new_mode;
@@ -1105,6 +1110,13 @@ mod tests {
         let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Translate));
         assert!(effects.is_empty());
         assert_eq!(sm.mode(), ProcessMode::Summarize);
+    }
+
+    #[test]
+    fn no_content_available_modes_empty() {
+        let sm = new_sm();
+        // No content loaded — all tabs should be disabled.
+        assert!(sm.available_modes().is_empty());
     }
 
     // === Clipboard error edge cases ===

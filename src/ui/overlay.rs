@@ -190,8 +190,8 @@ fn render_tab_bar(
 ) {
     ui.horizontal(|ui| {
         for &mode in ProcessMode::ALL {
-            let is_selected = mode == current;
             let is_available = available_modes.contains(&mode);
+            let is_selected = mode == current && is_available;
 
             let text = egui::RichText::new(mode.label())
                 .size(13.0)
