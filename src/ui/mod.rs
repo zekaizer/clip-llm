@@ -304,12 +304,15 @@ impl OverlayApp {
 
     #[allow(unused_variables)]
     fn show_window(&self, ctx: &egui::Context) {
-        // Calculate centered position for native (synchronous) pre-positioning.
-        // Native calls set the window position BEFORE making it visible,
-        // eliminating the one-frame flash at the wrong location.
-        let pos = self.last_desired_size
-            .and_then(|s| self.calculate_centered_position(s))
-            .map(|p| (p.x, p.y));
+        // Skip repositioning if user has manually dragged the window;
+        // only reposition on initial show (before any drag).
+        let pos = if self.sm.user_repositioned() {
+            None
+        } else {
+            self.last_desired_size
+                .and_then(|s| self.calculate_centered_position(s))
+                .map(|p| (p.x, p.y))
+        };
 
         #[cfg(target_os = "macos")]
         {
