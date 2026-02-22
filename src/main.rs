@@ -109,6 +109,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         native_options,
         Box::new(move |cc| {
             configure_fonts(&cc.egui_ctx);
+            // Transparent background for the overlay viewport (one-time setup).
+            cc.egui_ctx.set_visuals(egui::Visuals {
+                window_fill: egui::Color32::TRANSPARENT,
+                panel_fill: egui::Color32::TRANSPARENT,
+                window_stroke: egui::Stroke::NONE,
+                window_shadow: egui::Shadow::NONE,
+                window_corner_radius: egui::CornerRadius::same(12),
+                ..egui::Visuals::dark()
+            });
             Ok(Box::new(OverlayApp::new(cmd_tx, resp_rx, clipboard)))
         }),
     )?;

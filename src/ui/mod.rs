@@ -239,16 +239,6 @@ impl OverlayApp {
 
 impl eframe::App for OverlayApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Transparent background for the entire viewport.
-        ctx.set_visuals(egui::Visuals {
-            window_fill: egui::Color32::TRANSPARENT,
-            panel_fill: egui::Color32::TRANSPARENT,
-            window_stroke: egui::Stroke::NONE,
-            window_shadow: egui::Shadow::NONE,
-            window_corner_radius: egui::CornerRadius::same(12),
-            ..egui::Visuals::dark()
-        });
-
         // Ensure window is hidden when state is Hidden.
         // Fixes macOS startup where with_visible(false) doesn't fully suppress the window.
         if matches!(self.sm.state(), OverlayState::Hidden) {
