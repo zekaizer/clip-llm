@@ -208,6 +208,10 @@ mod tests {
         fn mouse_position(&self) -> Option<(f64, f64)> {
             None
         }
+
+        fn display_bounds_at_point(&self, _x: f64, _y: f64) -> Option<(f64, f64, f64, f64)> {
+            None
+        }
     }
 
     #[test]

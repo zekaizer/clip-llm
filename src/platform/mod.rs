@@ -8,6 +8,10 @@ pub trait Platform {
 
     /// Get the current mouse cursor position in screen coordinates (egui logical points).
     fn mouse_position(&self) -> Option<(f64, f64)>;
+
+    /// Get the display work area (logical points) of the monitor containing the given point.
+    /// Returns (origin_x, origin_y, width, height). Work area excludes taskbar/dock.
+    fn display_bounds_at_point(&self, x: f64, y: f64) -> Option<(f64, f64, f64, f64)>;
 }
 
 #[cfg(target_os = "macos")]

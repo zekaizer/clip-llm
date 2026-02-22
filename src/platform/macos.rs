@@ -233,6 +233,10 @@ impl Platform for MacOsPlatform {
         Some((pos.x, pos.y))
     }
 
+    fn display_bounds_at_point(&self, x: f64, y: f64) -> Option<(f64, f64, f64, f64)> {
+        display_bounds_at_point(x, y)
+    }
+
     /// Check if the process has Accessibility permission.
     /// Returns `AccessibilityDenied` if not granted.
     fn check_accessibility(&self) -> Result<(), PlatformError> {

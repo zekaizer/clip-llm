@@ -267,11 +267,9 @@ impl OverlayApp {
             let mut x = cursor.x - win_size.x / 2.0;
             let mut y = cursor.y - win_size.y / 2.0;
 
-            #[cfg(target_os = "macos")]
-            if let Some((ox, oy, w, h)) = crate::platform::macos::display_bounds_at_point(
-                cursor.x as f64,
-                cursor.y as f64,
-            ) {
+            if let Some((ox, oy, w, h)) =
+                self.platform.display_bounds_at_point(cursor.x as f64, cursor.y as f64)
+            {
                 let (ox, oy, w, h) = (ox as f32, oy as f32, w as f32, h as f32);
                 x = x.clamp(ox, (ox + w - win_size.x).max(ox));
                 y = y.clamp(oy, (oy + h - win_size.y).max(oy));
@@ -283,6 +281,12 @@ impl OverlayApp {
 
     #[allow(unused_variables)]
     fn show_window(&self, ctx: &egui::Context) {
+        // Pre-position before making visible to avoid flash at old location.
+        // spawn_position is already set by CaptureMousePosition effect.
+        if let Some(size_hint) = self.last_desired_size {
+            self.reposition_window(ctx, size_hint);
+        }
+
         #[cfg(target_os = "macos")]
         {
             crate::platform::macos::configure_window_for_spaces();

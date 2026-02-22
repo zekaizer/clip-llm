@@ -73,6 +73,36 @@ impl Platform for WindowsPlatform {
         let scale = dpi / 96.0;
         Some((pt.x as f64 / scale, pt.y as f64 / scale))
     }
+
+    fn display_bounds_at_point(&self, x: f64, y: f64) -> Option<(f64, f64, f64, f64)> {
+        use windows_sys::Win32::Graphics::Gdi::{
+            GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        };
+        let dpi = unsafe { GetDpiForSystem() } as f64;
+        let scale = dpi / 96.0;
+        // Convert logical points to physical pixels for MonitorFromPoint.
+        let pt = POINT {
+            x: (x * scale) as i32,
+            y: (y * scale) as i32,
+        };
+        let hmon = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
+        if hmon.is_null() {
+            return None;
+        }
+        let mut info: MONITORINFO = unsafe { std::mem::zeroed() };
+        info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if unsafe { GetMonitorInfoW(hmon, &mut info) } == 0 {
+            return None;
+        }
+        // rcWork = work area (excludes taskbar). Convert back to logical points.
+        let rc = info.rcWork;
+        Some((
+            rc.left as f64 / scale,
+            rc.top as f64 / scale,
+            (rc.right - rc.left) as f64 / scale,
+            (rc.bottom - rc.top) as f64 / scale,
+        ))
+    }
 }
 
 /// Show the clip-llm window without activating or stealing focus.
@@ -83,11 +113,28 @@ impl Platform for WindowsPlatform {
 ///
 /// Called from coordinator / diagnostics threads before sending actions to UI.
 pub fn show_no_activate() {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindowAsync, SW_SHOWNA};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, SetWindowPos, ShowWindowAsync, HWND_TOP, SW_SHOWNA, SWP_NOACTIVATE,
+        SWP_NOSIZE, SWP_NOZORDER,
+    };
     let title: Vec<u16> = "clip-llm\0".encode_utf16().collect();
     let hwnd = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
     if !hwnd.is_null() {
         unsafe {
+            // Move to cursor position before showing to prevent flash at old location.
+            // Exact centering happens later in show_window() → reposition_window().
+            let mut pt = POINT { x: 0, y: 0 };
+            if GetCursorPos(&mut pt) != 0 {
+                SetWindowPos(
+                    hwnd,
+                    HWND_TOP,
+                    pt.x,
+                    pt.y,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
             ShowWindowAsync(hwnd, SW_SHOWNA);
         }
     }
