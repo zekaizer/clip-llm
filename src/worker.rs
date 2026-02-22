@@ -4,6 +4,8 @@ use std::thread;
 use tokio::sync::mpsc as tokio_mpsc;
 use tracing::{debug, error, info};
 
+use std::env;
+
 use crate::api::client::{LlmClient, SseEvent, SseParser};
 use crate::api::response::{strip_think_blocks, ThinkBlockFilter};
 use crate::{ClipboardContent, ProcessMode};
@@ -106,16 +108,59 @@ pub fn spawn_worker(
                             continue;
                         }
 
-                        info!(
-                            "worker: starting stream {} ({} chars, {} images)",
-                            mode.label(),
-                            text_for_log.len(),
-                            content.images.len(),
-                        );
+                        let streaming = env::var("CLIP_LLM_NO_STREAM").is_err();
+
+                        if streaming {
+                            info!(
+                                "worker: starting stream {} ({} chars, {} images)",
+                                mode.label(),
+                                text_for_log.len(),
+                                content.images.len(),
+                            );
+                        } else {
+                            info!(
+                                "worker: starting {} ({} chars, {} images, no-stream)",
+                                mode.label(),
+                                text_for_log.len(),
+                                content.images.len(),
+                            );
+                        }
 
                         tokio::spawn(async move {
-                            // 1. Initiate streaming connection.
                             let mut c_rx = c_rx;
+
+                            if !streaming {
+                                // Non-streaming: single request/response.
+                                let result = tokio::select! {
+                                    r = llm.complete(&content, mode) => r,
+                                    _ = &mut c_rx => {
+                                        debug!("worker: request cancelled during connect");
+                                        return;
+                                    }
+                                };
+                                let r = match result {
+                                    Ok(raw) => {
+                                        let text = strip_think_blocks(&raw);
+                                        if text.is_empty() {
+                                            WorkerResponse::Error {
+                                                message: "empty response after stripping think blocks".into(),
+                                                request_id,
+                                            }
+                                        } else {
+                                            info!("worker: {} complete ({} chars)", mode.label(), text.len());
+                                            WorkerResponse::Complete { result: text, request_id }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("worker: LLM error: {e}");
+                                        WorkerResponse::Error { message: e.to_string(), request_id }
+                                    }
+                                };
+                                let _ = resp_tx.send(r);
+                                return;
+                            }
+
+                            // Streaming path.
                             let resp = tokio::select! {
                                 r = llm.complete_stream(&content, mode) => r,
                                 _ = &mut c_rx => {
@@ -136,7 +181,6 @@ pub fn spawn_worker(
                                 }
                             };
 
-                            // 2. Read chunks and parse SSE events.
                             let mut parser = SseParser::new();
                             let mut filter = ThinkBlockFilter::new();
                             let mut full_content = String::new();
@@ -195,7 +239,6 @@ pub fn spawn_worker(
                                         }
                                     }
                                     Ok(None) => {
-                                        // Stream ended without [DONE].
                                         let result = strip_think_blocks(&full_content);
                                         let r = if result.is_empty() {
                                             WorkerResponse::Error {
