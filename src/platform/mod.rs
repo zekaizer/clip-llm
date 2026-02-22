@@ -20,6 +20,22 @@ pub(crate) mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::WindowsPlatform as NativePlatform;
 
+/// Initialize the system tray icon with a Quit menu.
+/// On Windows, creates a tray icon and sets up event handling.
+/// On macOS, no-op (tray support planned for future).
+pub fn init_tray(_ctx: &eframe::egui::Context) {
+    #[cfg(target_os = "windows")]
+    windows::init_tray(_ctx);
+}
+
+/// Poll system tray events (e.g. Quit menu click).
+/// On Windows, checks for pending tray menu events.
+/// On macOS, no-op.
+pub fn poll_tray_quit(_ctx: &eframe::egui::Context) {
+    #[cfg(target_os = "windows")]
+    windows::poll_tray_quit(_ctx);
+}
+
 /// Returns a platform-specific callback for pre-show hooks (coordinator / diagnostics threads).
 ///
 /// On Windows, hidden windows (SW_HIDE) do not receive WM_PAINT, so eframe `update()`

@@ -404,6 +404,9 @@ impl eframe::App for OverlayApp {
             self.diag.flush_pending_if_stale();
         }
 
+        // Poll system tray "Quit" menu event.
+        crate::platform::poll_tray_quit(ctx);
+
         // Focus-loss auto-hide (skip during diagnostics).
         #[cfg(feature = "diagnostics")]
         let skip_focus_check = true;

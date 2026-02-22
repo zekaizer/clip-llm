@@ -148,7 +148,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .with_decorations(false)
         .with_resizable(false)
         .with_always_on_top()
-        .with_transparent(true);
+        .with_transparent(true)
+        .with_taskbar(false);
 
     let native_options = eframe::NativeOptions {
         viewport,
@@ -189,6 +190,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
                 let _ = hotkey_tx.send(event);
             }));
+
+            // System tray icon (Windows: replaces taskbar icon).
+            clip_llm::platform::init_tray(&cc.egui_ctx);
 
             // Platform-specific pre-show callback for coordinator thread.
             // On Windows, shows window natively before sending TapAction so that

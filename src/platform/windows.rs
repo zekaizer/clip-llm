@@ -1,7 +1,9 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use tracing::debug;
+use eframe::egui;
+use tracing::{debug, info, warn};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_C, VK_CONTROL,
     VK_SHIFT,
@@ -106,6 +108,74 @@ pub fn show_and_focus_window() {
             ShowWindowAsync(hwnd, SW_SHOW);
             SetForegroundWindow(hwnd);
         }
+    }
+}
+
+// -- System tray --
+
+static TRAY_QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Decode the embedded tray icon PNG into an RGBA `tray_icon::Icon`.
+fn load_tray_icon() -> tray_icon::Icon {
+    let png_bytes = include_bytes!("../../assets/tray-icon-32.png");
+    let decoder = png::Decoder::new(png_bytes.as_slice());
+    let mut reader = decoder.read_info().expect("invalid tray icon PNG");
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).expect("failed to decode tray icon");
+    buf.truncate(info.buffer_size());
+    tray_icon::Icon::from_rgba(buf, info.width, info.height).expect("invalid RGBA icon data")
+}
+
+/// Create the system tray icon with a Quit menu item.
+///
+/// The `TrayIcon` is intentionally leaked (process-lifetime resource) so that
+/// `OverlayApp` does not need to hold it.
+pub fn init_tray(ctx: &egui::Context) {
+    use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+    use tray_icon::TrayIconBuilder;
+
+    let quit_item = MenuItem::new("Quit", true, None);
+    let quit_id = quit_item.id().clone();
+    let menu = Menu::with_items(&[&quit_item]).expect("failed to create tray menu");
+    let icon = load_tray_icon();
+
+    let tray = TrayIconBuilder::new()
+        .with_menu(Box::new(menu))
+        .with_tooltip("clip-llm")
+        .with_icon(icon)
+        .build();
+
+    match tray {
+        Ok(tray) => {
+            // Leak: tray icon lives for the entire process lifetime.
+            std::mem::forget(tray);
+
+            // set_event_handler intercepts all events — MenuEvent::receiver()
+            // channel stays empty. Compare quit ID inside the handler and
+            // signal via AtomicBool so poll_tray_quit() can act in update().
+            let quit_id_for_handler = quit_id.clone();
+            let ctx = ctx.clone();
+            MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+                if event.id() == &quit_id_for_handler {
+                    TRAY_QUIT_REQUESTED.store(true, Ordering::SeqCst);
+                }
+                show_no_activate();
+                ctx.request_repaint();
+            }));
+
+            info!("system tray icon created");
+        }
+        Err(e) => {
+            warn!("failed to create tray icon: {e}");
+        }
+    }
+}
+
+/// Poll for tray quit flag. Sends `ViewportCommand::Close` when set.
+pub fn poll_tray_quit(ctx: &egui::Context) {
+    if TRAY_QUIT_REQUESTED.swap(false, Ordering::SeqCst) {
+        info!("quit requested from tray menu");
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 }
 
