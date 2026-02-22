@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod clipboard;
+pub use clipboard::ClipboardContent;
 #[cfg(feature = "diagnostics")]
 pub mod diagnostics;
 pub mod hotkey;
@@ -149,6 +150,9 @@ pub enum ClipboardError {
 
     #[error("clipboard write failed: {0}")]
     WriteFailed(String),
+
+    #[error("image encoding failed: {0}")]
+    ImageEncodeFailed(String),
 
     #[error("copy simulation failed: {0}")]
     CopyFailed(#[from] PlatformError),

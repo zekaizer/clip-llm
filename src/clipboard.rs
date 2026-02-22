@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -9,6 +10,50 @@ use crate::ClipboardError;
 
 const CLIPBOARD_POLL_INTERVAL_MS: u64 = 50;
 const CLIPBOARD_POLL_TIMEOUT_SECS: u64 = 2;
+
+/// Clipboard content: text, images, or both.
+#[derive(Debug, Clone)]
+pub struct ClipboardContent {
+    pub text: Option<String>,
+    /// PNG-encoded images. Vec for future multi-image support;
+    /// currently arboard provides at most one.
+    pub images: Vec<Arc<Vec<u8>>>,
+}
+
+impl ClipboardContent {
+    /// Create text-only content (no images).
+    pub fn text_only(text: String) -> Self {
+        Self {
+            text: Some(text),
+            images: vec![],
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.text.is_none() && self.images.is_empty()
+    }
+
+    pub fn has_images(&self) -> bool {
+        !self.images.is_empty()
+    }
+}
+
+/// Encode raw RGBA pixel data to PNG.
+fn rgba_to_png(bytes: &[u8], width: u32, height: u32) -> Result<Vec<u8>, ClipboardError> {
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|e| ClipboardError::ImageEncodeFailed(e.to_string()))?;
+        writer
+            .write_image_data(bytes)
+            .map_err(|e| ClipboardError::ImageEncodeFailed(e.to_string()))?;
+    }
+    Ok(out)
+}
 
 pub struct ClipboardManager {
     board: Clipboard,
@@ -60,6 +105,35 @@ impl ClipboardManager {
                 return Err(ClipboardError::NoTextAfterCopy);
             }
         }
+    }
+
+    /// Read current clipboard content (text + images).
+    /// Returns error if clipboard is completely empty.
+    pub fn read_content(&mut self) -> Result<ClipboardContent, ClipboardError> {
+        let text = self.board.get_text().ok().filter(|s| !s.is_empty());
+
+        let images = match self.board.get_image() {
+            Ok(img) => {
+                let png = rgba_to_png(
+                    img.bytes.as_ref(),
+                    img.width as u32,
+                    img.height as u32,
+                )?;
+                info!("read clipboard image ({}x{}, {} bytes PNG)", img.width, img.height, png.len());
+                vec![Arc::new(png)]
+            }
+            Err(_) => vec![],
+        };
+
+        let content = ClipboardContent { text, images };
+        if content.is_empty() {
+            return Err(ClipboardError::NoTextInClipboard);
+        }
+
+        if let Some(ref t) = content.text {
+            info!("read clipboard text ({} chars)", t.len());
+        }
+        Ok(content)
     }
 
     /// Write text to clipboard.
@@ -181,5 +255,57 @@ mod tests {
         mgr.write_text("second").unwrap();
         let text = mgr.read_clipboard().unwrap();
         assert_eq!(text, "second");
+    }
+
+    // -- ClipboardContent unit tests --
+
+    #[test]
+    fn clipboard_content_is_empty() {
+        let content = ClipboardContent {
+            text: None,
+            images: vec![],
+        };
+        assert!(content.is_empty());
+        assert!(!content.has_images());
+    }
+
+    #[test]
+    fn clipboard_content_text_only() {
+        let content = ClipboardContent::text_only("hello".into());
+        assert!(!content.is_empty());
+        assert!(!content.has_images());
+        assert_eq!(content.text.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn clipboard_content_image_only() {
+        let content = ClipboardContent {
+            text: None,
+            images: vec![Arc::new(vec![0x89, 0x50, 0x4E, 0x47])],
+        };
+        assert!(!content.is_empty());
+        assert!(content.has_images());
+    }
+
+    // -- rgba_to_png tests --
+
+    #[test]
+    fn rgba_to_png_valid_data() {
+        // 2x2 RGBA pixels (16 bytes)
+        let pixels: Vec<u8> = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+        let png = rgba_to_png(&pixels, 2, 2).unwrap();
+
+        // PNG signature: 0x89 P N G
+        assert!(png.len() > 8);
+        assert_eq!(&png[..4], &[0x89, 0x50, 0x4E, 0x47]);
+    }
+
+    #[test]
+    fn rgba_to_png_invalid_dimensions() {
+        // 3 bytes is not enough for any valid RGBA image
+        let result = rgba_to_png(&[0, 0, 0], 2, 2);
+        assert!(matches!(result, Err(ClipboardError::ImageEncodeFailed(_))));
     }
 }
