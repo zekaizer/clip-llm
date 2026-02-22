@@ -37,11 +37,42 @@ pub struct OverlayApp {
     #[cfg(feature = "diagnostics")]
     diag: crate::diagnostics::DiagCollector,
     #[cfg(feature = "diagnostics")]
-    scenario_runner: crate::diagnostics::DiagScenarioRunner,
+    diag_action_rx: mpsc::Receiver<crate::diagnostics::ScenarioAction>,
+    #[cfg(feature = "diagnostics")]
+    diag_state_tx: mpsc::Sender<&'static str>,
     #[cfg(feature = "diagnostics")]
     prev_state_name: &'static str,
 }
 
+#[cfg(feature = "diagnostics")]
+impl OverlayApp {
+    pub fn new(
+        cmd_tx: tokio_mpsc::UnboundedSender<WorkerCommand>,
+        resp_rx: mpsc::Receiver<WorkerResponse>,
+        clipboard: ClipboardManager,
+        tap_rx: mpsc::Receiver<TapAction>,
+        diag_action_rx: mpsc::Receiver<crate::diagnostics::ScenarioAction>,
+        diag_state_tx: mpsc::Sender<&'static str>,
+    ) -> Self {
+        Self {
+            sm: StateMachine::new(crate::ProcessMode::default()),
+            cmd_tx,
+            resp_rx,
+            clipboard,
+            platform: NativePlatform,
+            spawn_position: None,
+            initial_hide_done: false,
+            tap_rx,
+            last_desired_size: None,
+            diag: crate::diagnostics::DiagCollector::new(),
+            diag_action_rx,
+            diag_state_tx,
+            prev_state_name: "Hidden",
+        }
+    }
+}
+
+#[cfg(not(feature = "diagnostics"))]
 impl OverlayApp {
     pub fn new(
         cmd_tx: tokio_mpsc::UnboundedSender<WorkerCommand>,
@@ -59,14 +90,11 @@ impl OverlayApp {
             initial_hide_done: false,
             tap_rx,
             last_desired_size: None,
-            #[cfg(feature = "diagnostics")]
-            diag: crate::diagnostics::DiagCollector::new(),
-            #[cfg(feature = "diagnostics")]
-            scenario_runner: crate::diagnostics::DiagScenarioRunner::new(),
-            #[cfg(feature = "diagnostics")]
-            prev_state_name: "Hidden",
         }
     }
+}
+
+impl OverlayApp {
 
     // -- Effect execution --
 
@@ -115,6 +143,8 @@ impl OverlayApp {
                         self.diag
                             .on_state_transition(self.prev_state_name, to);
                         self.prev_state_name = to;
+                        // Notify scenario runner thread of state change.
+                        let _ = self.diag_state_tx.send(to);
                     }
                     ctx.memory_mut(|m| m.reset_areas());
                 }
@@ -146,6 +176,36 @@ impl OverlayApp {
                     self.execute_effects(effects, ctx);
                 }
                 TapAction::Pending => {}
+            }
+        }
+    }
+
+    // -- Diagnostics scenario action handling (from runner thread) --
+
+    #[cfg(feature = "diagnostics")]
+    fn poll_diag_actions(&mut self, ctx: &egui::Context) {
+        while let Ok(action) = self.diag_action_rx.try_recv() {
+            match action {
+                crate::diagnostics::ScenarioAction::ShowOverlay { mode, text } => {
+                    self.sm.set_mode(mode);
+                    let effects = self.sm.handle(UiEvent::ContentReady(
+                        crate::ClipboardContent::text_only(text),
+                    ));
+                    self.execute_effects(effects, ctx);
+                }
+                crate::diagnostics::ScenarioAction::SwitchMode(mode) => {
+                    let effects = self.sm.handle(UiEvent::UserSwitchMode(mode));
+                    self.execute_effects(effects, ctx);
+                }
+                crate::diagnostics::ScenarioAction::HideOverlay => {
+                    let effects = self.sm.handle(UiEvent::UserClose);
+                    self.execute_effects(effects, ctx);
+                }
+                crate::diagnostics::ScenarioAction::Quit => {
+                    info!("diag: all scenarios finished, exiting");
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                crate::diagnostics::ScenarioAction::None => {}
             }
         }
     }
@@ -239,11 +299,7 @@ impl OverlayApp {
         }
     }
 
-    #[allow(unused_variables)]
     fn hide_window(&self, ctx: &egui::Context) {
-        // Diagnostics: keep window visible so update() keeps firing on Windows
-        // (WM_PAINT not delivered to hidden windows).
-        #[cfg(not(feature = "diagnostics"))]
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
     }
 }
@@ -252,15 +308,9 @@ impl eframe::App for OverlayApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Ensure window is hidden at startup.
         // Fixes macOS startup where with_visible(false) doesn't fully suppress the window.
-        // Diagnostics: skip hide so update() keeps firing on Windows (WM_PAINT issue).
-        #[cfg(not(feature = "diagnostics"))]
         if !self.initial_hide_done && matches!(self.sm.state(), OverlayState::Hidden) {
             debug!("update() first call — hiding window");
             self.hide_window(ctx);
-            self.initial_hide_done = true;
-        }
-        #[cfg(feature = "diagnostics")]
-        {
             self.initial_hide_done = true;
         }
 
@@ -270,33 +320,9 @@ impl eframe::App for OverlayApp {
         // Process tap actions from coordinator thread.
         self.poll_tap_actions(ctx);
 
-        // Diagnostics: drive scenario runner via state machine.
+        // Diagnostics: process scenario actions from runner thread.
         #[cfg(feature = "diagnostics")]
-        {
-            let state_name = self.sm.variant_name();
-            match self.scenario_runner.tick(state_name) {
-                crate::diagnostics::ScenarioAction::None => {}
-                crate::diagnostics::ScenarioAction::ShowOverlay { mode, text } => {
-                    self.sm.set_mode(mode);
-                    let effects = self.sm.handle(UiEvent::ContentReady(
-                        crate::ClipboardContent::text_only(text),
-                    ));
-                    self.execute_effects(effects, ctx);
-                }
-                crate::diagnostics::ScenarioAction::SwitchMode(mode) => {
-                    let effects = self.sm.handle(UiEvent::UserSwitchMode(mode));
-                    self.execute_effects(effects, ctx);
-                }
-                crate::diagnostics::ScenarioAction::HideOverlay => {
-                    let effects = self.sm.handle(UiEvent::UserClose);
-                    self.execute_effects(effects, ctx);
-                }
-                crate::diagnostics::ScenarioAction::Quit => {
-                    info!("diag: all scenarios finished, exiting");
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            }
-        }
+        self.poll_diag_actions(ctx);
 
         // Diagnostics: receive screenshot events.
         #[cfg(feature = "diagnostics")]
@@ -383,8 +409,11 @@ impl eframe::App for OverlayApp {
         }
 
         // Schedule next repaint.
+        // DiagCollector needs periodic tick_screenshot() and flush_pending_if_stale()
+        // calls when pending screenshots exist (visible states after transition).
+        // When hidden, update() stops (no WM_PAINT on Windows) — no tick needed.
         #[cfg(feature = "diagnostics")]
-        let force_poll = true; // diagnostics needs periodic tick() calls
+        let force_poll = true;
         #[cfg(not(feature = "diagnostics"))]
         let force_poll = false;
 
@@ -394,7 +423,7 @@ impl eframe::App for OverlayApp {
             }
             _ => {
                 // Hotkey polling is handled by coordinator thread — UI is event-driven only.
-                // Diagnostics needs periodic tick() calls for scenario runner.
+                // Diagnostics: DiagCollector needs periodic repaints for screenshot capture.
                 if force_poll {
                     ctx.request_repaint_after(Duration::from_millis(IDLE_POLL_MS));
                 }

@@ -202,7 +202,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 clip_llm::coordinator::run(hotkey_rx, tap_tx, ctx_for_coord, pre_show);
             });
 
-            Ok(Box::new(OverlayApp::new(cmd_tx, resp_rx, clipboard, tap_rx)))
+            // Diagnostics: spawn scenario runner thread (off-UI, like coordinator).
+            #[cfg(feature = "diagnostics")]
+            let (diag_action_rx, diag_state_tx) = {
+                let (action_tx, action_rx) = mpsc::channel();
+                let (state_tx, state_rx) = mpsc::channel();
+                let ctx_for_diag = cc.egui_ctx.clone();
+                let pre_show_diag = clip_llm::platform::pre_show_callback();
+                std::thread::spawn(move || {
+                    clip_llm::diagnostics::run_scenario_thread(
+                        state_rx, action_tx, ctx_for_diag, pre_show_diag,
+                    );
+                });
+                (action_rx, state_tx)
+            };
+
+            #[cfg(feature = "diagnostics")]
+            let app = OverlayApp::new(
+                cmd_tx, resp_rx, clipboard, tap_rx,
+                diag_action_rx, diag_state_tx,
+            );
+            #[cfg(not(feature = "diagnostics"))]
+            let app = OverlayApp::new(cmd_tx, resp_rx, clipboard, tap_rx);
+
+            Ok(Box::new(app))
         }),
     )?;
 
