@@ -34,6 +34,8 @@ pub struct OverlayApp {
     initial_hide_done: bool,
     /// Hotkey events forwarded from set_event_handler via channel.
     hotkey_rx: mpsc::Receiver<global_hotkey::GlobalHotKeyEvent>,
+    /// Cached desired_size to avoid redundant send_viewport_cmd calls.
+    last_desired_size: Option<egui::Vec2>,
     #[cfg(feature = "diagnostics")]
     diag: crate::diagnostics::DiagCollector,
     #[cfg(feature = "diagnostics")]
@@ -59,6 +61,7 @@ impl OverlayApp {
             spawn_position: None,
             initial_hide_done: false,
             hotkey_rx,
+            last_desired_size: None,
             #[cfg(feature = "diagnostics")]
             diag: crate::diagnostics::DiagCollector::new(),
             #[cfg(feature = "diagnostics")]
@@ -299,13 +302,22 @@ impl eframe::App for OverlayApp {
         // 5. Render overlay.
         let output = overlay::render(self.sm.state(), self.sm.mode(), self.sm.streaming_text(), ctx);
 
-        // 6. Resize viewport to fit rendered content.
+        // 6. Resize viewport to fit rendered content (only when size changes).
         if let Some(desired) = output.desired_size {
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(desired));
+            let size_changed = self.last_desired_size != Some(desired);
+            if size_changed {
+                self.last_desired_size = Some(desired);
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(desired));
+            }
 
-            if !matches!(self.sm.state(), OverlayState::Hidden) && !self.sm.user_repositioned() {
+            if size_changed
+                && !matches!(self.sm.state(), OverlayState::Hidden)
+                && !self.sm.user_repositioned()
+            {
                 self.reposition_window(ctx, desired);
             }
+        } else {
+            self.last_desired_size = None;
         }
 
         // 7. Handle overlay UI actions.
