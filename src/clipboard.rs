@@ -12,7 +12,7 @@ const CLIPBOARD_POLL_INTERVAL_MS: u64 = 50;
 const CLIPBOARD_POLL_TIMEOUT_SECS: u64 = 2;
 
 /// Clipboard content: text, images, or both.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClipboardContent {
     pub text: Option<String>,
     /// PNG-encoded images. Vec for future multi-image support;

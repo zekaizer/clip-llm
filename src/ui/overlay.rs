@@ -31,6 +31,7 @@ pub fn render(
     state: &OverlayState,
     mode: ProcessMode,
     streaming_text: &str,
+    available_modes: &[ProcessMode],
     ctx: &egui::Context,
 ) -> OverlayOutput {
     if matches!(state, OverlayState::Hidden) {
@@ -79,7 +80,7 @@ pub fn render(
             frame.show(ui, |ui| {
                 ui.set_width(OVERLAY_WIDTH);
 
-                render_tab_bar(ui, mode, &mut action);
+                render_tab_bar(ui, mode, available_modes, &mut action);
 
                 // Separator between tab bar and content.
                 ui.add_space(4.0);
@@ -181,13 +182,22 @@ pub fn render(
     }
 }
 
-fn render_tab_bar(ui: &mut egui::Ui, current: ProcessMode, action: &mut OverlayAction) {
+fn render_tab_bar(
+    ui: &mut egui::Ui,
+    current: ProcessMode,
+    available_modes: &[ProcessMode],
+    action: &mut OverlayAction,
+) {
     ui.horizontal(|ui| {
         for &mode in ProcessMode::ALL {
             let is_selected = mode == current;
+            let is_available = available_modes.contains(&mode);
+
             let text = egui::RichText::new(mode.label())
                 .size(13.0)
-                .color(if is_selected {
+                .color(if !is_available {
+                    egui::Color32::from_gray(50)
+                } else if is_selected {
                     egui::Color32::WHITE
                 } else {
                     egui::Color32::from_gray(100)
@@ -201,7 +211,7 @@ fn render_tab_bar(ui: &mut egui::Ui, current: ProcessMode, action: &mut OverlayA
                 })
                 .corner_radius(6.0);
 
-            if ui.add(button).clicked() && !is_selected {
+            if ui.add(button).clicked() && !is_selected && is_available {
                 *action = OverlayAction::SwitchMode(mode);
             }
         }

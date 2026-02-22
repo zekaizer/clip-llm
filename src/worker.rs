@@ -6,11 +6,11 @@ use tracing::{debug, error, info};
 
 use crate::api::client::{LlmClient, SseEvent, SseParser};
 use crate::api::response::{strip_think_blocks, ThinkBlockFilter};
-use crate::ProcessMode;
+use crate::{ClipboardContent, ProcessMode};
 
 pub enum WorkerCommand {
     Process {
-        text: String,
+        content: ClipboardContent,
         mode: ProcessMode,
         request_id: u64,
     },
@@ -44,7 +44,7 @@ pub fn spawn_worker(
 
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
-                    WorkerCommand::Process { text, mode, request_id } => {
+                    WorkerCommand::Process { content, mode, request_id } => {
                         // Cancel any in-flight request.
                         if let Some(tx) = cancel_tx.take() {
                             let _ = tx.send(());
@@ -57,13 +57,16 @@ pub fn spawn_worker(
                         let llm = llm.clone();
                         let resp_tx = resp_tx.clone();
 
+                        let text_for_log = content.text.as_deref().unwrap_or("");
+
                         // Mock mode: simulate streaming with canned responses.
                         #[cfg(feature = "diagnostics")]
                         if std::env::var("DIAG_MOCK").is_ok() {
-                            info!("worker: mock streaming {} ({} chars)", mode.label(), text.len());
+                            let mock_text = text_for_log.to_owned();
+                            info!("worker: mock streaming {} ({} chars)", mode.label(), mock_text.len());
                             tokio::spawn(async move {
                                 let mut c_rx = c_rx;
-                                match crate::diagnostics::mock_response(&text) {
+                                match crate::diagnostics::mock_response(&mock_text) {
                                     Ok(mock) => {
                                         let chunks: Vec<&str> =
                                             mock.split_inclusive(char::is_whitespace).collect();
@@ -100,13 +103,18 @@ pub fn spawn_worker(
                             continue;
                         }
 
-                        info!("worker: starting stream {} ({} chars)", mode.label(), text.len());
+                        info!(
+                            "worker: starting stream {} ({} chars, {} images)",
+                            mode.label(),
+                            text_for_log.len(),
+                            content.images.len(),
+                        );
 
                         tokio::spawn(async move {
                             // 1. Initiate streaming connection.
                             let mut c_rx = c_rx;
                             let resp = tokio::select! {
-                                r = llm.complete_stream(&text, mode) => r,
+                                r = llm.complete_stream(&content, mode) => r,
                                 _ = &mut c_rx => {
                                     debug!("worker: request cancelled during connect");
                                     return;
