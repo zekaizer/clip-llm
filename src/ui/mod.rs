@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::sync::mpsc as tokio_mpsc;
 
 use eframe::egui;
-use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
+use global_hotkey::HotKeyState;
 use tracing::{error, info};
 
 use crate::clipboard::ClipboardManager;
@@ -32,6 +32,8 @@ pub struct OverlayApp {
     spawn_position: Option<egui::Pos2>,
     /// Whether the initial Visible(false) command has been sent at startup.
     initial_hide_done: bool,
+    /// Hotkey events forwarded from set_event_handler via channel.
+    hotkey_rx: mpsc::Receiver<global_hotkey::GlobalHotKeyEvent>,
     #[cfg(feature = "diagnostics")]
     diag: crate::diagnostics::DiagCollector,
     #[cfg(feature = "diagnostics")]
@@ -45,6 +47,7 @@ impl OverlayApp {
         cmd_tx: tokio_mpsc::UnboundedSender<WorkerCommand>,
         resp_rx: mpsc::Receiver<WorkerResponse>,
         clipboard: ClipboardManager,
+        hotkey_rx: mpsc::Receiver<global_hotkey::GlobalHotKeyEvent>,
     ) -> Self {
         Self {
             sm: StateMachine::new(crate::ProcessMode::default()),
@@ -55,6 +58,7 @@ impl OverlayApp {
             detector: HotkeyDetector::new(),
             spawn_position: None,
             initial_hide_done: false,
+            hotkey_rx,
             #[cfg(feature = "diagnostics")]
             diag: crate::diagnostics::DiagCollector::new(),
             #[cfg(feature = "diagnostics")]
@@ -119,8 +123,7 @@ impl OverlayApp {
     // -- Hotkey handling --
 
     fn poll_hotkeys(&mut self, ctx: &egui::Context) {
-        let receiver = GlobalHotKeyEvent::receiver();
-        while let Ok(event) = receiver.try_recv() {
+        while let Ok(event) = self.hotkey_rx.try_recv() {
             if event.state != HotKeyState::Pressed {
                 continue;
             }
@@ -353,13 +356,21 @@ impl eframe::App for OverlayApp {
         }
 
         // 10. Schedule next repaint.
+        #[cfg(feature = "diagnostics")]
+        let force_poll = true; // diagnostics needs periodic tick() calls
+        #[cfg(not(feature = "diagnostics"))]
+        let force_poll = false;
+
         match self.sm.state() {
             OverlayState::Processing => {
                 ctx.request_repaint(); // spinner animation + streaming updates
             }
             _ => {
-                // Hidden, Result, Error: static content, poll for hotkeys only.
-                ctx.request_repaint_after(Duration::from_millis(IDLE_POLL_MS));
+                // Poll when single-tap timeout check is pending or diagnostics is active.
+                // Otherwise fully event-driven — hotkey handler wakes eframe.
+                if self.detector.is_pending() || force_poll {
+                    ctx.request_repaint_after(Duration::from_millis(IDLE_POLL_MS));
+                }
             }
         }
     }

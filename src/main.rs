@@ -4,7 +4,7 @@ use std::sync::mpsc;
 
 use eframe::egui;
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
-use global_hotkey::GlobalHotKeyManager;
+use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
 use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -118,7 +118,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 window_corner_radius: egui::CornerRadius::same(12),
                 ..egui::Visuals::dark()
             });
-            Ok(Box::new(OverlayApp::new(cmd_tx, resp_rx, clipboard)))
+            // Forward hotkey events via channel and wake eframe immediately.
+            // set_event_handler intercepts events from the global channel,
+            // so poll_hotkeys() reads from hotkey_rx instead of GlobalHotKeyEvent::receiver().
+            let (hotkey_tx, hotkey_rx) = mpsc::channel();
+            let ctx_for_hotkey = cc.egui_ctx.clone();
+            GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
+                let _ = hotkey_tx.send(event);
+                ctx_for_hotkey.request_repaint();
+            }));
+
+            Ok(Box::new(OverlayApp::new(cmd_tx, resp_rx, clipboard, hotkey_rx)))
         }),
     )?;
 
