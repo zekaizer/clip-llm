@@ -156,11 +156,8 @@ impl OverlayApp {
     }
 
     fn trigger_double_tap(&mut self, ctx: &egui::Context) {
-        // copy_and_read returns text only (copy simulation doesn't capture images).
         let event = match self.clipboard.copy_and_read(&self.platform) {
-            Ok(text) => {
-                UiEvent::ContentReady(crate::ClipboardContent::text_only(text))
-            }
+            Ok(content) => UiEvent::ContentReady(content),
             Err(e) => UiEvent::ClipboardWriteError(e.to_string()),
         };
         let effects = self.sm.handle(event);
