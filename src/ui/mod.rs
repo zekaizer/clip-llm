@@ -264,13 +264,13 @@ impl eframe::App for OverlayApp {
             self.initial_hide_done = true;
         }
 
-        // 1. Process worker responses.
+        // Process worker responses.
         self.poll_responses(ctx);
 
-        // 2. Process hotkeys.
+        // Process hotkeys.
         self.poll_hotkeys(ctx);
 
-        // 3. Diagnostics: drive scenario runner via state machine.
+        // Diagnostics: drive scenario runner via state machine.
         #[cfg(feature = "diagnostics")]
         {
             let state_name = self.sm.variant_name();
@@ -296,7 +296,7 @@ impl eframe::App for OverlayApp {
             }
         }
 
-        // 4. Diagnostics: receive screenshot events.
+        // Diagnostics: receive screenshot events.
         #[cfg(feature = "diagnostics")]
         ctx.input(|i| {
             for event in &i.events {
@@ -306,10 +306,10 @@ impl eframe::App for OverlayApp {
             }
         });
 
-        // 5. Render overlay.
+        // Render overlay.
         let output = overlay::render(self.sm.state(), self.sm.mode(), self.sm.streaming_text(), ctx);
 
-        // 6. Resize viewport to fit rendered content (only when size changes).
+        // Resize viewport to fit rendered content (only when size changes).
         if let Some(desired) = output.desired_size {
             let size_changed = self.last_desired_size != Some(desired);
             if size_changed {
@@ -327,7 +327,7 @@ impl eframe::App for OverlayApp {
             self.last_desired_size = None;
         }
 
-        // 7. Handle overlay UI actions.
+        // Handle overlay UI actions.
         let event = match output.action {
             overlay::OverlayAction::Close => Some(UiEvent::UserClose),
             overlay::OverlayAction::Cancel => Some(UiEvent::UserCancel),
@@ -344,7 +344,7 @@ impl eframe::App for OverlayApp {
             self.execute_effects(effects, ctx);
         }
 
-        // 8. Diagnostics: record frame data + flush stale screenshots.
+        // Diagnostics: record frame data + flush stale screenshots.
         #[cfg(feature = "diagnostics")]
         {
             use crate::diagnostics::FrameSnapshot;
@@ -364,7 +364,7 @@ impl eframe::App for OverlayApp {
             self.diag.flush_pending_if_stale();
         }
 
-        // 9. Focus-loss auto-hide (skip during diagnostics).
+        // Focus-loss auto-hide (skip during diagnostics).
         #[cfg(feature = "diagnostics")]
         let skip_focus_check = true;
         #[cfg(not(feature = "diagnostics"))]
@@ -374,7 +374,7 @@ impl eframe::App for OverlayApp {
             self.check_focus_lost(ctx);
         }
 
-        // 10. Schedule next repaint.
+        // Schedule next repaint.
         #[cfg(feature = "diagnostics")]
         let force_poll = true; // diagnostics needs periodic tick() calls
         #[cfg(not(feature = "diagnostics"))]
