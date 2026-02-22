@@ -135,6 +135,7 @@ impl OverlayApp {
                 }
                 UiEffect::ShowWindow => self.show_window(ctx),
                 UiEffect::HideWindow => {
+                    ctx.memory_mut(|m| m.reset_areas());
                     self.hide_window(ctx);
                     self.spawn_position = None;
                 }
