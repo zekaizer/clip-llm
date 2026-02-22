@@ -135,9 +135,10 @@ Replace blocking HTTP with async. Add SSE streaming support.
    - Cancel in-flight request on next hotkey press
 
 4. **Process mode switching**
-   - `ProcessMode` enum: `Translate` (default), `Correct`
+   - `ProcessMode` enum: `Translate` (default), `Correct`, `Summarize`
    - Extensible: add new modes by extending the enum + `ALL` array
    - Each mode has its own system prompt via `ProcessMode::system_prompt()`
+   - Image-only clipboard content auto-selects `Summarize` mode (vision API)
 
 5. **Mode tab bar in overlay**
    - Top of overlay shows tab bar with all modes from `ProcessMode::ALL`

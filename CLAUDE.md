@@ -52,8 +52,18 @@ The project follows a 7-phase incremental plan defined in [docs/REQUIREMENTS.md]
 ### Structure
 
 - `src/main.rs` — binary crate: event loop bootstrap, wiring only
-- `src/lib.rs` — library crate: all business logic, testable independently
+- `src/lib.rs` — library crate: type definitions (`ProcessMode`, errors), re-exports
+- `src/coordinator.rs` — hotkey event → tap detection → `TapEvent` dispatch (dedicated thread)
+- `src/hotkey.rs` — `HotkeyDetector` state machine, `TapAction`, `TapEvent`
+- `src/clipboard.rs` — `ClipboardManager` (read/write, copy simulation + poll)
+- `src/worker.rs` — async LLM request worker thread
+- `src/api/client.rs` — `LlmClient`, `SseParser`, vision probe
+- `src/api/response.rs` — `strip_think_blocks`, `ThinkBlockFilter` (streaming)
+- `src/ui/mod.rs` — `OverlayApp` (eframe::App adapter, effect execution, window management)
+- `src/ui/state_machine.rs` — pure state machine (`OverlayState`, `UiEvent`, `UiEffect`), unit-testable
+- `src/ui/overlay.rs` — egui rendering (`render()`, `render_tab_bar()`)
 - `src/platform/` — platform abstraction trait + `cfg(target_os)` implementations (macOS/Windows)
+- `src/diagnostics.rs` — scenario runner for automated visual testing (`--features diagnostics`)
 
 ### Phases
 
@@ -67,28 +77,38 @@ The project follows a 7-phase incremental plan defined in [docs/REQUIREMENTS.md]
 
 ## Key Crates
 
-| Crate | Purpose | Phase |
-|-------|---------|-------|
-| `global-hotkey` | System-wide hotkey registration | 1 |
-| `arboard` | Clipboard read/write | 1 |
-| `reqwest` (`rustls-tls`) | HTTP client (blocking→async) | 1→2 |
-| `serde`, `serde_json` | JSON serialization | 1 |
-| `thiserror` | Typed error definitions | 1 |
-| `regex` | Think-block stripping | 1 |
-| `tracing` | Structured logging | 1 |
-| `dirs` | Platform-specific config directories | 4+ |
-| `tokio` | Async runtime | 2+ |
-| `tray-icon` | System tray | 3+ |
-| `notify-rust` | Toast notifications | 3+ |
-| `toml` | Config file parsing | 4+ |
+| Crate | Purpose |
+|-------|---------|
+| `eframe` / `egui` / `egui-wgpu` / `wgpu` | UI framework + GPU rendering |
+| `winit` | Window management (macOS) |
+| `global-hotkey` | System-wide hotkey registration |
+| `arboard` | Clipboard read/write |
+| `reqwest` (`rustls-tls`) | Async HTTP client |
+| `tokio` | Async runtime (worker thread) |
+| `serde`, `serde_json` | JSON serialization |
+| `thiserror` | Typed error definitions |
+| `regex` | Think-block stripping |
+| `tracing` | Structured logging |
+| `tray-icon` | System tray (Windows) |
+| `png` | PNG encoding (clipboard images, tray icon) |
+| `zstd` | Font compression (build + runtime) |
+| `base64` | Image base64 encoding for vision API |
+| `core-graphics` | macOS: event simulation, display info |
+| `windows-sys` | Windows: Win32 API bindings |
 
 ## Event-Driven Architecture
 
+### Thread model
+
+- **Main thread**: eframe event loop (`OverlayApp::update()`), egui rendering.
+- **Coordinator thread**: blocks on `hotkey_rx.recv()`, runs `HotkeyDetector` tap detection, sends `TapEvent` to UI via channel + `ctx.request_repaint()`. Double-tap polling uses `recv_timeout(50ms)`.
+- **Worker thread**: tokio single-threaded runtime, processes `WorkerCommand` → LLM API → `WorkerResponse`.
+
+### Repaint model
+
 The UI uses an **event-driven** repaint model to minimize idle CPU/GPU usage:
 
-- **Hotkey wake-up**: `GlobalHotKeyEvent::set_event_handler` calls `ctx.request_repaint()` on hotkey press, waking eframe from `ControlFlow::Wait`.
-- **Hidden/Result/Error states**: No periodic `request_repaint_after()` — eframe sleeps until an external event arrives.
-- **Single-tap pending**: When a first hotkey tap is registered and awaiting potential double-tap (500ms window), `request_repaint_after(100ms)` polls for `check_timeout()`.
+- **Hidden/Result/Error states**: No periodic `request_repaint_after()` — eframe sleeps until an external event arrives (hotkey, worker response, tray menu).
 - **Processing state**: `request_repaint()` every frame for spinner animation and SSE streaming updates.
 - **Important**: Avoid calling `send_viewport_cmd()` in loops — it internally triggers `request_repaint()`, overriding any throttle.
 

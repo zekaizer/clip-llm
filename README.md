@@ -15,10 +15,21 @@ System-wide LLM clipboard assistant. Captures text via global hotkey, sends it t
 
 - [x] Phase 1 — Basic Pipeline
 - [x] Phase 2 — Async API + SSE Streaming
-- [ ] Phase 3 — Status Feedback + System Tray
+- [ ] Phase 3 — Status Feedback + System Tray (partial: Windows tray done, no macOS tray/toast/retry)
 - [ ] Phase 4 — Config File + Multiple Templates
 - [ ] Phase 5 — Template Cycle Selection UI
-- [x] Phase 6 — Windows Build & Distribution (partial: no CI/tests yet)
+- [x] Phase 6 — Windows Build & Distribution (partial: no CI/E2E tests)
 - [ ] Phase 7 — Extended Features
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CLIP_LLM_API_ENDPOINT` | `http://localhost:8000/v1` | LLM API base URL |
+| `CLIP_LLM_MODEL` | `MiniMaxAI/MiniMax-M2.5` | Model name for chat completions |
+| `CLIP_LLM_API_KEY` | *(none)* | Bearer token for API auth (optional) |
+| `CLIP_LLM_NO_STREAM` | *(unset)* | Disable SSE streaming when set |
+| `RUST_LOG` | `clip_llm=info` | Log level filter ([`tracing_subscriber::EnvFilter`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html)) |
+| `DIAG_MOCK` | *(unset)* | Use mock LLM responses (requires `--features diagnostics`) |
 
 See [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) for detailed specifications.
