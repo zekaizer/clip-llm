@@ -233,12 +233,19 @@ impl OverlayApp {
         }
     }
 
+    #[allow(unused_variables)]
     fn show_window(&self, ctx: &egui::Context) {
         #[cfg(target_os = "macos")]
-        crate::platform::macos::configure_window_for_spaces();
+        {
+            crate::platform::macos::configure_window_for_spaces();
+            crate::platform::macos::show_and_focus_window();
+        }
 
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        #[cfg(not(target_os = "macos"))]
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
     }
 
     fn hide_window(&self, ctx: &egui::Context) {

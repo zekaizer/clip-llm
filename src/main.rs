@@ -101,6 +101,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let native_options = eframe::NativeOptions {
         viewport,
+        // Accessory policy: no Dock icon, no Cmd+Tab, no "home Space".
+        // Prevents macOS from switching Spaces when the app shows a window.
+        #[cfg(target_os = "macos")]
+        event_loop_builder: Some(Box::new(|builder| {
+            use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+            builder.with_activation_policy(ActivationPolicy::Accessory);
+        })),
         ..Default::default()
     };
 
