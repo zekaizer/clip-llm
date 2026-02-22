@@ -30,6 +30,8 @@ pub struct OverlayApp {
     detector: HotkeyDetector,
     /// Mouse cursor position captured at hotkey trigger time.
     spawn_position: Option<egui::Pos2>,
+    /// Whether the initial Visible(false) command has been sent at startup.
+    initial_hide_done: bool,
     #[cfg(feature = "diagnostics")]
     diag: crate::diagnostics::DiagCollector,
     #[cfg(feature = "diagnostics")]
@@ -52,6 +54,7 @@ impl OverlayApp {
             platform: NativePlatform,
             detector: HotkeyDetector::new(),
             spawn_position: None,
+            initial_hide_done: false,
             #[cfg(feature = "diagnostics")]
             diag: crate::diagnostics::DiagCollector::new(),
             #[cfg(feature = "diagnostics")]
@@ -239,10 +242,13 @@ impl OverlayApp {
 
 impl eframe::App for OverlayApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Ensure window is hidden when state is Hidden.
+        // Ensure window is hidden at startup.
         // Fixes macOS startup where with_visible(false) doesn't fully suppress the window.
-        if matches!(self.sm.state(), OverlayState::Hidden) {
+        // Only sent once — send_viewport_cmd internally calls request_repaint(),
+        // which would override the 100ms throttle and cause a continuous repaint loop.
+        if !self.initial_hide_done && matches!(self.sm.state(), OverlayState::Hidden) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.initial_hide_done = true;
         }
 
         // 1. Process worker responses.
