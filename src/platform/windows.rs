@@ -66,6 +66,25 @@ impl Platform for WindowsPlatform {
     }
 }
 
+/// Show and focus the clip-llm window from any thread.
+///
+/// Uses `ShowWindowAsync` (PostMessage-based, cross-thread safe) + `SetForegroundWindow`.
+/// Called from the coordinator thread to make the window visible before sending
+/// a TapAction, ensuring `WM_PAINT` will be delivered so eframe `update()` fires.
+pub fn show_and_focus_window() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, SetForegroundWindow, ShowWindowAsync, SW_SHOW,
+    };
+    let title: Vec<u16> = "clip-llm\0".encode_utf16().collect();
+    let hwnd = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
+    if !hwnd.is_null() {
+        unsafe {
+            ShowWindowAsync(hwnd, SW_SHOW);
+            SetForegroundWindow(hwnd);
+        }
+    }
+}
+
 fn make_key_input(vk: u16, flags: u32) -> INPUT {
     INPUT {
         r#type: INPUT_KEYBOARD,
