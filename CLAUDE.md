@@ -82,6 +82,16 @@ The project follows a 7-phase incremental plan defined in [docs/REQUIREMENTS.md]
 | `notify-rust` | Toast notifications | 3+ |
 | `toml` | Config file parsing | 4+ |
 
+## Event-Driven Architecture
+
+The UI uses an **event-driven** repaint model to minimize idle CPU/GPU usage:
+
+- **Hotkey wake-up**: `GlobalHotKeyEvent::set_event_handler` calls `ctx.request_repaint()` on hotkey press, waking eframe from `ControlFlow::Wait`.
+- **Hidden/Result/Error states**: No periodic `request_repaint_after()` — eframe sleeps until an external event arrives.
+- **Single-tap pending**: When a first hotkey tap is registered and awaiting potential double-tap (500ms window), `request_repaint_after(100ms)` polls for `check_timeout()`.
+- **Processing state**: `request_repaint()` every frame for spinner animation and SSE streaming updates.
+- **Important**: Avoid calling `send_viewport_cmd()` in loops — it internally triggers `request_repaint()`, overriding any throttle.
+
 ## Known Issues / Improvement Needed
 
 - **macOS fullscreen overlay**: The overlay cannot appear over fullscreen apps (apps that create their own dedicated Space). `MoveToActiveSpace` + `FullScreenAuxiliary` + `CanJoinAllSpaces` + higher window levels (101) were all tried without success. DeepL achieves this — likely uses `NSPanel` or a private API. Needs further investigation.
