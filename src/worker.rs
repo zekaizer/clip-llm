@@ -40,6 +40,9 @@ pub fn spawn_worker(
             .expect("failed to create tokio runtime");
 
         rt.block_on(async move {
+            // Probe vision support eagerly so it doesn't delay the first user request.
+            llm.probe_vision().await;
+
             let mut cancel_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
 
             while let Some(cmd) = cmd_rx.recv().await {
