@@ -181,6 +181,33 @@ pub fn show_and_focus_window(position: Option<(f32, f32)>) {
     }
 }
 
+/// Move the clip-llm window off-screen instead of hiding it.
+///
+/// Bypasses eframe's `Visible(false)` which triggers `ControlFlow::Poll` and
+/// ~10% CPU spin (egui#5229). The window stays visible from winit's perspective,
+/// so `WM_PAINT` is still delivered and repaint entries are consumed normally,
+/// keeping `ControlFlow::Wait` (zero CPU).
+pub fn move_window_offscreen() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, SetWindowPos, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+    };
+    let title: Vec<u16> = "clip-llm\0".encode_utf16().collect();
+    let hwnd = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
+    if !hwnd.is_null() {
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                -32000,
+                -32000,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+}
+
 // -- System tray --
 
 static TRAY_QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);

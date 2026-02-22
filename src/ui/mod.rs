@@ -323,9 +323,9 @@ impl OverlayApp {
         #[cfg(target_os = "windows")]
         {
             crate::platform::windows::show_and_focus_window(pos);
-            // Sync winit internal state so later Visible(false) properly calls SW_HIDE.
-            // Native ShowWindowAsync bypasses winit, leaving it thinking the window
-            // is still hidden — without this, hide_window() becomes a no-op.
+            // Sync winit to visible=true. hide_window() bypasses winit (hides at
+            // OS level only via ShowWindowAsync), so winit needs Visible(true) here
+            // to maintain ControlFlow::Wait and avoid the CPU spin bug (egui#5229).
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         }
 
@@ -339,7 +339,15 @@ impl OverlayApp {
         }
     }
 
+    #[allow(unused_variables)]
     fn hide_window(&self, ctx: &egui::Context) {
+        // On Windows, move off-screen instead of Visible(false) to avoid
+        // ControlFlow::Poll CPU spin (egui#5229). Window stays visible
+        // from winit's perspective, keeping ControlFlow::Wait.
+        #[cfg(target_os = "windows")]
+        crate::platform::windows::move_window_offscreen();
+
+        #[cfg(not(target_os = "windows"))]
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
     }
 }
@@ -347,9 +355,18 @@ impl OverlayApp {
 impl eframe::App for OverlayApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Ensure window is hidden at startup.
-        // Fixes macOS startup where with_visible(false) doesn't fully suppress the window.
         if !self.initial_hide_done && matches!(self.sm.state(), OverlayState::Hidden) {
             debug!("update() first call — hiding window");
+            // On Windows, flip winit to visible=true while keeping window off-screen.
+            // Builder's with_visible(false) sets winit visible=false → ControlFlow::Poll.
+            // Visible(true) + off-screen avoids the CPU spin bug (egui#5229).
+            #[cfg(target_os = "windows")]
+            {
+                crate::platform::windows::move_window_offscreen();
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            }
+            // On macOS, with_visible(false) doesn't fully suppress the window.
+            #[cfg(not(target_os = "windows"))]
             self.hide_window(ctx);
             self.initial_hide_done = true;
         }
