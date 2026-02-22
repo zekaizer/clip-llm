@@ -1,15 +1,16 @@
 #![deny(unused_must_use)]
 
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 
 use eframe::egui;
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use clip_llm::api::client::LlmClient;
 use clip_llm::clipboard::ClipboardManager;
+use clip_llm::hotkey::TapEvent;
 use clip_llm::ui::OverlayApp;
 use clip_llm::worker::{spawn_worker, WorkerCommand, WorkerResponse};
 use clip_llm::HotkeyError;
@@ -56,6 +57,56 @@ fn configure_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+/// Select the best wgpu adapter: prefer hardware GPU, fall back to software (WARP on Windows).
+fn select_wgpu_adapter(
+    adapters: &[wgpu::Adapter],
+    _surface: Option<&wgpu::Surface<'_>>,
+) -> Result<wgpu::Adapter, String> {
+    for (i, a) in adapters.iter().enumerate() {
+        let info = a.get_info();
+        info!(
+            "wgpu adapter[{i}]: {} ({:?}, {:?})",
+            info.name, info.device_type, info.backend
+        );
+    }
+
+    let hw = adapters
+        .iter()
+        .find(|a| a.get_info().device_type == wgpu::DeviceType::DiscreteGpu)
+        .or_else(|| {
+            adapters
+                .iter()
+                .find(|a| a.get_info().device_type == wgpu::DeviceType::IntegratedGpu)
+        })
+        .or_else(|| {
+            adapters
+                .iter()
+                .find(|a| a.get_info().device_type != wgpu::DeviceType::Cpu)
+        });
+
+    let selected = if let Some(a) = hw {
+        a.clone()
+    } else {
+        let sw = adapters
+            .first()
+            .cloned()
+            .ok_or_else(|| "no wgpu adapter found".to_string())?;
+        let info = sw.get_info();
+        warn!(
+            "no hardware GPU — falling back to software adapter: {} ({:?})",
+            info.name, info.backend
+        );
+        sw
+    };
+
+    let info = selected.get_info();
+    info!(
+        "wgpu selected: {} ({:?}, {:?})",
+        info.name, info.device_type, info.backend
+    );
+    Ok(selected)
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Check platform permissions before anything else.
     {
@@ -97,10 +148,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .with_decorations(false)
         .with_resizable(false)
         .with_always_on_top()
-        .with_transparent(true);
+        .with_transparent(true)
+        .with_taskbar(false);
 
     let native_options = eframe::NativeOptions {
         viewport,
+        wgpu_options: egui_wgpu::WgpuConfiguration {
+            wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew {
+                native_adapter_selector: Some(Arc::new(select_wgpu_adapter)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
         // Accessory policy: no Dock icon, no Cmd+Tab, no "home Space".
         // Prevents macOS from switching Spaces when the app shows a window.
         #[cfg(target_os = "macos")]
@@ -125,17 +184,62 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 window_corner_radius: egui::CornerRadius::same(12),
                 ..egui::Visuals::dark()
             });
-            // Forward hotkey events via channel and wake eframe immediately.
-            // set_event_handler intercepts events from the global channel,
-            // so poll_hotkeys() reads from hotkey_rx instead of GlobalHotKeyEvent::receiver().
+            // Forward hotkey events to coordinator thread (no request_repaint here —
+            // coordinator handles wake-up after detecting tap action).
             let (hotkey_tx, hotkey_rx) = mpsc::channel();
-            let ctx_for_hotkey = cc.egui_ctx.clone();
             GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
                 let _ = hotkey_tx.send(event);
-                ctx_for_hotkey.request_repaint();
             }));
 
-            Ok(Box::new(OverlayApp::new(cmd_tx, resp_rx, clipboard, hotkey_rx)))
+            // System tray icon (Windows: replaces taskbar icon).
+            clip_llm::platform::init_tray(&cc.egui_ctx);
+
+            // Platform-specific pre-show callback for coordinator thread.
+            // On Windows, shows window natively before sending TapAction so that
+            // WM_PAINT is delivered and eframe update() fires.
+            let pre_show = clip_llm::platform::pre_show_callback();
+
+            // Coordinator thread: event-driven hotkey detection (off-UI).
+            let (tap_tx, tap_rx) = mpsc::channel::<TapEvent>();
+            let ctx_for_coord = cc.egui_ctx.clone();
+            let mouse_pos_fn: Box<dyn Fn() -> Option<(f64, f64)> + Send> = {
+                use clip_llm::platform::{NativePlatform, Platform};
+                Box::new(|| NativePlatform.mouse_position())
+            };
+            std::thread::spawn(move || {
+                clip_llm::coordinator::run(
+                    hotkey_rx,
+                    tap_tx,
+                    ctx_for_coord,
+                    pre_show,
+                    mouse_pos_fn,
+                );
+            });
+
+            // Diagnostics: spawn scenario runner thread (off-UI, like coordinator).
+            #[cfg(feature = "diagnostics")]
+            let (diag_action_rx, diag_state_tx) = {
+                let (action_tx, action_rx) = mpsc::channel();
+                let (state_tx, state_rx) = mpsc::channel();
+                let ctx_for_diag = cc.egui_ctx.clone();
+                let pre_show_diag = clip_llm::platform::pre_show_callback();
+                std::thread::spawn(move || {
+                    clip_llm::diagnostics::run_scenario_thread(
+                        state_rx, action_tx, ctx_for_diag, pre_show_diag,
+                    );
+                });
+                (action_rx, state_tx)
+            };
+
+            #[cfg(feature = "diagnostics")]
+            let app = OverlayApp::new(
+                cmd_tx, resp_rx, clipboard, tap_rx,
+                diag_action_rx, diag_state_tx,
+            );
+            #[cfg(not(feature = "diagnostics"))]
+            let app = OverlayApp::new(cmd_tx, resp_rx, clipboard, tap_rx);
+
+            Ok(Box::new(app))
         }),
     )?;
 

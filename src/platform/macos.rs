@@ -92,11 +92,14 @@ pub fn configure_window_for_spaces() -> bool {
 
 /// Show the NSWindow and activate the app so it receives focus properly.
 ///
+/// If `position` is provided (Quartz coordinates: top-left origin), the window
+/// is moved there **synchronously** via `setFrameTopLeftPoint:` before becoming
+/// visible. This eliminates the one-frame flash at the wrong location that
+/// occurs when using async `ViewportCommand::OuterPosition`.
+///
 /// For Accessory-policy apps, `activateIgnoringOtherApps:` is safe because
 /// Accessory apps have no "home Space" — macOS will not switch Spaces.
-/// We use `orderFront:` first (instead of `makeKeyAndOrderFront:` via winit)
-/// to ensure the window is visible before activation.
-pub fn show_and_focus_window() {
+pub fn show_and_focus_window(position: Option<(f32, f32)>) {
     type MsgSendBool = unsafe extern "C" fn(*mut c_void, *mut c_void, bool);
     let msg_send_bool: MsgSendBool = unsafe { std::mem::transmute(objc_msgSend as *const ()) };
 
@@ -105,6 +108,21 @@ pub fn show_and_focus_window() {
         if window.is_null() {
             return;
         }
+
+        // Synchronous pre-positioning: convert Quartz (top-left origin) to
+        // Cocoa screen coordinates (bottom-left origin) and set before showing.
+        if let Some((x, y)) = position {
+            let screen_height = CGDisplayBounds(CGMainDisplayID()).size.height;
+            let cocoa_point = CGPoint::new(x as f64, screen_height - y as f64);
+            type MsgSendPoint = unsafe extern "C" fn(*mut c_void, *mut c_void, CGPoint);
+            let msg_send_point: MsgSendPoint = std::mem::transmute(objc_msgSend as *const ());
+            msg_send_point(
+                window,
+                sel_registerName(c"setFrameTopLeftPoint:".as_ptr()),
+                cocoa_point,
+            );
+        }
+
         let nil: *mut c_void = std::ptr::null_mut();
         type MsgSendPtr = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void);
         let msg_send_ptr: MsgSendPtr = std::mem::transmute(objc_msgSend as *const ());
@@ -125,6 +143,7 @@ pub fn show_and_focus_window() {
 
 
 extern "C" {
+    fn CGMainDisplayID() -> u32;
     fn CGGetDisplaysWithPoint(
         point: CGPoint,
         max_displays: u32,
@@ -231,6 +250,10 @@ impl Platform for MacOsPlatform {
         let event = CGEvent::new(source).ok()?;
         let pos = event.location();
         Some((pos.x, pos.y))
+    }
+
+    fn display_bounds_at_point(&self, x: f64, y: f64) -> Option<(f64, f64, f64, f64)> {
+        display_bounds_at_point(x, y)
     }
 
     /// Check if the process has Accessibility permission.

@@ -10,8 +10,18 @@ const DOUBLE_TAP_TIMEOUT: Duration = Duration::from_millis(500);
 pub enum TapAction {
     /// First tap registered, waiting for potential second tap.
     Pending,
+    /// Single-tap confirmed after timeout elapsed without a second tap.
+    SingleTap,
     /// Double-tap confirmed within the timeout window.
     DoubleTap,
+}
+
+/// Tap action with mouse position captured at first key press.
+#[derive(Debug, Clone, Copy)]
+pub struct TapEvent {
+    pub action: TapAction,
+    /// Mouse position (logical points) at the moment of the first key press.
+    pub mouse_pos: Option<(f64, f64)>,
 }
 
 /// Detects single-tap vs double-tap of a hotkey.

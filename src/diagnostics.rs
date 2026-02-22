@@ -10,7 +10,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -491,6 +491,61 @@ pub enum ScenarioAction {
     HideOverlay,
     /// All scenarios complete — app should exit.
     Quit,
+}
+
+// ---------------------------------------------------------------------------
+// Scenario runner thread
+// ---------------------------------------------------------------------------
+
+/// Run the scenario runner on the current thread (blocking).
+///
+/// Observes overlay state via `state_rx` and sends `ScenarioAction` back to
+/// the UI thread via `action_tx`. When a scenario needs the window visible
+/// (ShowOverlay), calls `pre_show` first — on Windows this ensures `WM_PAINT`
+/// is delivered so eframe `update()` fires.
+///
+/// Timing is `Instant`-based (frame-independent). The loop polls `state_rx`
+/// with 100ms timeout to drive `tick()` periodically even without state changes.
+pub fn run_scenario_thread(
+    state_rx: mpsc::Receiver<&'static str>,
+    action_tx: mpsc::Sender<ScenarioAction>,
+    ctx: egui::Context,
+    pre_show: Box<dyn Fn() + Send>,
+) {
+    let mut runner = DiagScenarioRunner::new();
+    let mut current_state: &str = "Hidden";
+
+    info!("diagnostics scenario thread started");
+
+    loop {
+        // Poll for state updates, timeout for periodic ticking.
+        match state_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(state) => current_state = state,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+
+        let action = runner.tick(current_state);
+        match action {
+            ScenarioAction::None => continue,
+            ScenarioAction::Quit => {
+                let _ = action_tx.send(action);
+                ctx.request_repaint();
+                break;
+            }
+            ScenarioAction::ShowOverlay { .. } => {
+                pre_show();
+                let _ = action_tx.send(action);
+                ctx.request_repaint();
+            }
+            action => {
+                let _ = action_tx.send(action);
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    info!("diagnostics scenario thread exiting");
 }
 
 // ---------------------------------------------------------------------------

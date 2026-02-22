@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod clipboard;
+pub mod coordinator;
 pub use clipboard::ClipboardContent;
 #[cfg(feature = "diagnostics")]
 pub mod diagnostics;

@@ -14,10 +14,13 @@ regex = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu"] }
+egui-wgpu = "0.31"
+wgpu = "24"
 tokio = { version = "1", features = ["rt", "macros", "sync"] }
 zstd = "0.13"
 png = "0.17"
 base64 = "0.22"
+tray-icon = "0.19"
 image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
 chrono = { version = "0.4", optional = true, default-features = false, features = ["clock"] }
 
@@ -33,4 +36,4 @@ core-foundation = "0.10"
 winit = { version = "0.30", default-features = false }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
