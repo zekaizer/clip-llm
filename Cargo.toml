@@ -14,6 +14,8 @@ regex = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu"] }
+egui-wgpu = "0.31"
+wgpu = "24"
 tokio = { version = "1", features = ["rt", "macros", "sync"] }
 zstd = "0.13"
 png = "0.17"

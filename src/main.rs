@@ -1,11 +1,11 @@
 #![deny(unused_must_use)]
 
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 
 use eframe::egui;
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use clip_llm::api::client::LlmClient;
@@ -56,6 +56,56 @@ fn configure_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+/// Select the best wgpu adapter: prefer hardware GPU, fall back to software (WARP on Windows).
+fn select_wgpu_adapter(
+    adapters: &[wgpu::Adapter],
+    _surface: Option<&wgpu::Surface<'_>>,
+) -> Result<wgpu::Adapter, String> {
+    for (i, a) in adapters.iter().enumerate() {
+        let info = a.get_info();
+        info!(
+            "wgpu adapter[{i}]: {} ({:?}, {:?})",
+            info.name, info.device_type, info.backend
+        );
+    }
+
+    let hw = adapters
+        .iter()
+        .find(|a| a.get_info().device_type == wgpu::DeviceType::DiscreteGpu)
+        .or_else(|| {
+            adapters
+                .iter()
+                .find(|a| a.get_info().device_type == wgpu::DeviceType::IntegratedGpu)
+        })
+        .or_else(|| {
+            adapters
+                .iter()
+                .find(|a| a.get_info().device_type != wgpu::DeviceType::Cpu)
+        });
+
+    let selected = if let Some(a) = hw {
+        a.clone()
+    } else {
+        let sw = adapters
+            .first()
+            .cloned()
+            .ok_or_else(|| "no wgpu adapter found".to_string())?;
+        let info = sw.get_info();
+        warn!(
+            "no hardware GPU — falling back to software adapter: {} ({:?})",
+            info.name, info.backend
+        );
+        sw
+    };
+
+    let info = selected.get_info();
+    info!(
+        "wgpu selected: {} ({:?}, {:?})",
+        info.name, info.device_type, info.backend
+    );
+    Ok(selected)
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Check platform permissions before anything else.
     {
@@ -101,6 +151,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let native_options = eframe::NativeOptions {
         viewport,
+        wgpu_options: egui_wgpu::WgpuConfiguration {
+            wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew {
+                native_adapter_selector: Some(Arc::new(select_wgpu_adapter)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
         // Accessory policy: no Dock icon, no Cmd+Tab, no "home Space".
         // Prevents macOS from switching Spaces when the app shows a window.
         #[cfg(target_os = "macos")]
