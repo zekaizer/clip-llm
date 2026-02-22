@@ -4,9 +4,10 @@ use std::time::Duration;
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
+use tokio::sync::OnceCell;
+use tracing::{debug, info, warn};
 
-use crate::{ApiError, ProcessMode};
+use crate::{ApiError, ClipboardContent, ProcessMode};
 
 // Defaults — overridable via environment variables.
 const DEFAULT_API_ENDPOINT: &str = "http://localhost:8000/v1";
@@ -31,7 +32,33 @@ struct ChatRequest<'a> {
 #[derive(Serialize)]
 struct Message<'a> {
     role: &'a str,
-    content: &'a str,
+    content: MessageContent<'a>,
+}
+
+/// Polymorphic message content: plain string or multimodal parts array.
+/// `#[serde(untagged)]` serializes Text as `"string"` and Parts as `[{...}]`.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(Debug, PartialEq))]
+#[serde(untagged)]
+enum MessageContent<'a> {
+    Text(&'a str),
+    Parts(Vec<ContentPart>),
+}
+
+#[derive(Serialize)]
+#[cfg_attr(test, derive(Debug, PartialEq))]
+#[serde(tag = "type")]
+enum ContentPart {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: ImageUrl },
+}
+
+#[derive(Serialize)]
+#[cfg_attr(test, derive(Debug, PartialEq))]
+struct ImageUrl {
+    url: String,
 }
 
 // -- Response types --
@@ -140,7 +167,11 @@ struct LlmClientInner {
     endpoint: String,
     model: String,
     api_key: Option<String>,
+    supports_vision: OnceCell<bool>,
 }
+
+/// Minimal 1x1 transparent PNG for vision probe (67 bytes).
+const PROBE_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 
 #[derive(Clone)]
 pub struct LlmClient(Arc<LlmClientInner>);
@@ -240,6 +271,99 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], SseEvent::Content(s) if s == "x"));
     }
+
+    // --- MessageContent serialization tests ---
+
+    #[test]
+    fn message_content_text_serializes_as_string() {
+        let mc = MessageContent::Text("hello");
+        let json = serde_json::to_value(&mc).unwrap();
+        assert_eq!(json, serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn message_content_parts_serializes_as_array() {
+        let mc = MessageContent::Parts(vec![
+            ContentPart::Text {
+                text: "describe".to_owned(),
+            },
+            ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: "data:image/png;base64,abc".to_owned(),
+                },
+            },
+        ]);
+        let json = serde_json::to_value(&mc).unwrap();
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[0]["text"], "describe");
+        assert_eq!(arr[1]["type"], "image_url");
+        assert_eq!(arr[1]["image_url"]["url"], "data:image/png;base64,abc");
+    }
+
+    // --- build_user_content tests ---
+
+    #[test]
+    fn build_user_content_text_only() {
+        let content = ClipboardContent::text_only("hello".into());
+        let mc = LlmClient::build_user_content(&content, ProcessMode::Summarize, true);
+        assert_eq!(mc, MessageContent::Text("hello"));
+    }
+
+    #[test]
+    fn build_user_content_with_image_summarize() {
+        let content = ClipboardContent {
+            text: Some("caption".into()),
+            images: vec![Arc::new(vec![0x89, 0x50])],
+        };
+        let mc = LlmClient::build_user_content(&content, ProcessMode::Summarize, true);
+        match mc {
+            MessageContent::Parts(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert!(matches!(&parts[0], ContentPart::Text { text } if text == "caption"));
+                assert!(matches!(&parts[1], ContentPart::ImageUrl { .. }));
+            }
+            _ => panic!("expected Parts"),
+        }
+    }
+
+    #[test]
+    fn build_user_content_with_image_translate_ignores_image() {
+        let content = ClipboardContent {
+            text: Some("hello".into()),
+            images: vec![Arc::new(vec![0x89])],
+        };
+        let mc = LlmClient::build_user_content(&content, ProcessMode::Translate, true);
+        assert_eq!(mc, MessageContent::Text("hello"));
+    }
+
+    #[test]
+    fn build_user_content_no_vision_ignores_image() {
+        let content = ClipboardContent {
+            text: Some("hello".into()),
+            images: vec![Arc::new(vec![0x89])],
+        };
+        let mc = LlmClient::build_user_content(&content, ProcessMode::Summarize, false);
+        assert_eq!(mc, MessageContent::Text("hello"));
+    }
+
+    #[test]
+    fn build_user_content_image_only_no_text_part() {
+        let content = ClipboardContent {
+            text: None,
+            images: vec![Arc::new(vec![0x89, 0x50])],
+        };
+        let mc = LlmClient::build_user_content(&content, ProcessMode::Summarize, true);
+        match mc {
+            MessageContent::Parts(parts) => {
+                // Only image part, no text part since text is None.
+                assert_eq!(parts.len(), 1);
+                assert!(matches!(&parts[0], ContentPart::ImageUrl { .. }));
+            }
+            _ => panic!("expected Parts"),
+        }
+    }
 }
 
 impl LlmClient {
@@ -266,24 +390,112 @@ impl LlmClient {
             endpoint,
             model,
             api_key,
+            supports_vision: OnceCell::new(),
         })))
     }
 
-    /// Send user text to the vLLM server and return the raw response content.
-    /// Think-block stripping is handled separately by `response::strip_think_blocks`.
-    pub async fn complete(&self, user_text: &str, mode: ProcessMode) -> Result<String, ApiError> {
+    /// Probe whether the model supports vision by sending a tiny image request.
+    /// Result is cached in `OnceCell`. Network/server errors skip caching (retry next time).
+    pub async fn probe_vision(&self) -> bool {
         let inner = &self.0;
+        if let Some(&cached) = inner.supports_vision.get() {
+            return cached;
+        }
+
+        let data_uri = format!("data:image/png;base64,{PROBE_PNG_BASE64}");
+        let body = ChatRequest {
+            model: &inner.model,
+            messages: vec![Message {
+                role: "user",
+                content: MessageContent::Parts(vec![
+                    ContentPart::Text {
+                        text: "Describe this image in one word.".to_owned(),
+                    },
+                    ContentPart::ImageUrl {
+                        image_url: ImageUrl { url: data_uri },
+                    },
+                ]),
+            }],
+            temperature: 0.0,
+            max_tokens: 1,
+            stream: None,
+        };
+
+        info!("probing model vision support...");
+        let mut req = inner.client.post(&inner.endpoint).json(&body);
+        if let Some(key) = &inner.api_key {
+            req = req.bearer_auth(key);
+        }
+
+        match req.send().await {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                let supported = (200..300).contains(&status);
+                info!("model vision support: {supported} (HTTP {status})");
+                let _ = inner.supports_vision.set(supported);
+                supported
+            }
+            Err(e) => {
+                warn!("vision probe failed (will retry): {e}");
+                false
+            }
+        }
+    }
+
+    /// Build user message content: multimodal parts if images should be included,
+    /// otherwise plain text.
+    fn build_user_content<'a>(
+        content: &'a ClipboardContent,
+        mode: ProcessMode,
+        vision: bool,
+    ) -> MessageContent<'a> {
+        let use_images =
+            mode == ProcessMode::Summarize && vision && content.has_images();
+
+        let text = content.text.as_deref().unwrap_or("");
+
+        if !use_images {
+            return MessageContent::Text(text);
+        }
+
+        let mut parts = Vec::with_capacity(1 + content.images.len());
+        if !text.is_empty() {
+            parts.push(ContentPart::Text {
+                text: text.to_owned(),
+            });
+        }
+        for png_bytes in &content.images {
+            use base64::Engine;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(png_bytes.as_ref());
+            parts.push(ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: format!("data:image/png;base64,{b64}"),
+                },
+            });
+        }
+        MessageContent::Parts(parts)
+    }
+
+    /// Send content to the vLLM server and return the raw response content.
+    /// Think-block stripping is handled separately by `response::strip_think_blocks`.
+    pub async fn complete(
+        &self,
+        content: &ClipboardContent,
+        mode: ProcessMode,
+    ) -> Result<String, ApiError> {
+        let inner = &self.0;
+        let vision = self.probe_vision().await;
         let sys_prompt = mode.system_prompt();
         let body = ChatRequest {
             model: &inner.model,
             messages: vec![
                 Message {
                     role: "system",
-                    content: &sys_prompt,
+                    content: MessageContent::Text(&sys_prompt),
                 },
                 Message {
                     role: "user",
-                    content: user_text,
+                    content: Self::build_user_content(content, mode, vision),
                 },
             ],
             temperature: TEMPERATURE,
@@ -304,7 +516,7 @@ impl LlmClient {
 
         let chat: ChatResponse = resp.json().await?;
 
-        let content = chat
+        let resp_content = chat
             .choices
             .into_iter()
             .next()
@@ -312,34 +524,35 @@ impl LlmClient {
             .message
             .content;
 
-        if content.is_empty() {
+        if resp_content.is_empty() {
             return Err(ApiError::EmptyResponse);
         }
 
-        info!("received response ({} chars)", content.len());
-        debug!("response content: {content}");
-        Ok(content)
+        info!("received response ({} chars)", resp_content.len());
+        debug!("response content: {resp_content}");
+        Ok(resp_content)
     }
 
     /// Start a streaming request. Returns the raw `reqwest::Response` whose body
     /// the caller reads via `chunk()` and feeds into [`SseParser`].
     pub async fn complete_stream(
         &self,
-        user_text: &str,
+        content: &ClipboardContent,
         mode: ProcessMode,
     ) -> Result<reqwest::Response, ApiError> {
         let inner = &self.0;
+        let vision = self.probe_vision().await;
         let sys_prompt = mode.system_prompt();
         let body = ChatRequest {
             model: &inner.model,
             messages: vec![
                 Message {
                     role: "system",
-                    content: &sys_prompt,
+                    content: MessageContent::Text(&sys_prompt),
                 },
                 Message {
                     role: "user",
-                    content: user_text,
+                    content: Self::build_user_content(content, mode, vision),
                 },
             ],
             temperature: TEMPERATURE,

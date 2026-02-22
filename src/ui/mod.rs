@@ -77,13 +77,15 @@ impl OverlayApp {
         for effect in effects {
             match effect {
                 UiEffect::SendProcess {
-                    text,
+                    content,
                     mode,
                     request_id,
                 } => {
-                    info!("starting {} ({} chars)", mode.label(), text.len());
+                    let text_len = content.text.as_ref().map_or(0, |t| t.len());
+                    let img_count = content.images.len();
+                    info!("starting {} ({} chars, {} images)", mode.label(), text_len, img_count);
                     let _ = self.cmd_tx.send(WorkerCommand::Process {
-                        text,
+                        content,
                         mode,
                         request_id,
                     });
@@ -145,8 +147,8 @@ impl OverlayApp {
     }
 
     fn trigger_single_tap(&mut self, ctx: &egui::Context) {
-        let event = match self.clipboard.read_clipboard() {
-            Ok(text) => UiEvent::TextReady(text),
+        let event = match self.clipboard.read_content() {
+            Ok(content) => UiEvent::ContentReady(content),
             Err(e) => UiEvent::ClipboardWriteError(e.to_string()),
         };
         let effects = self.sm.handle(event);
@@ -155,7 +157,7 @@ impl OverlayApp {
 
     fn trigger_double_tap(&mut self, ctx: &egui::Context) {
         let event = match self.clipboard.copy_and_read(&self.platform) {
-            Ok(text) => UiEvent::TextReady(text),
+            Ok(content) => UiEvent::ContentReady(content),
             Err(e) => UiEvent::ClipboardWriteError(e.to_string()),
         };
         let effects = self.sm.handle(event);
@@ -278,7 +280,9 @@ impl eframe::App for OverlayApp {
                 crate::diagnostics::ScenarioAction::None => {}
                 crate::diagnostics::ScenarioAction::ShowOverlay { mode, text } => {
                     self.sm.set_mode(mode);
-                    let effects = self.sm.handle(UiEvent::TextReady(text));
+                    let effects = self.sm.handle(UiEvent::ContentReady(
+                        crate::ClipboardContent::text_only(text),
+                    ));
                     self.execute_effects(effects, ctx);
                 }
                 crate::diagnostics::ScenarioAction::SwitchMode(mode) => {
@@ -307,7 +311,13 @@ impl eframe::App for OverlayApp {
         });
 
         // Render overlay.
-        let output = overlay::render(self.sm.state(), self.sm.mode(), self.sm.streaming_text(), ctx);
+        let output = overlay::render(
+            self.sm.state(),
+            self.sm.mode(),
+            self.sm.streaming_text(),
+            self.sm.available_modes(),
+            ctx,
+        );
 
         // Resize viewport to fit rendered content (only when size changes).
         if let Some(desired) = output.desired_size {

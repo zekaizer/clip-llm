@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::ProcessMode;
+use crate::{ClipboardContent, ProcessMode};
 
 // ---------------------------------------------------------------------------
 // OverlayState
@@ -42,8 +42,8 @@ impl OverlayState {
 /// Events fed into the state machine by the adapter layer.
 #[derive(Debug, Clone)]
 pub enum UiEvent {
-    /// Clipboard text ready for processing.
-    TextReady(String),
+    /// Clipboard content ready for processing.
+    ContentReady(ClipboardContent),
     /// Worker completed successfully.
     WorkerResult { text: String, request_id: u64 },
     /// Worker reported an error.
@@ -68,7 +68,7 @@ pub enum UiEvent {
 #[derive(Debug, Clone, PartialEq)]
 pub enum UiEffect {
     SendProcess {
-        text: String,
+        content: ClipboardContent,
         mode: ProcessMode,
         request_id: u64,
     },
@@ -88,8 +88,8 @@ pub enum UiEffect {
 pub struct StateMachine {
     state: OverlayState,
     mode: ProcessMode,
-    /// Original input text, retained for re-processing on mode switch.
-    original_text: Option<String>,
+    /// Original input content, retained for re-processing on mode switch.
+    original_content: Option<ClipboardContent>,
     /// Monotonically increasing counter for request identification.
     next_request_id: u64,
     /// The request_id of the currently active request.
@@ -98,7 +98,7 @@ pub struct StateMachine {
     user_repositioned: bool,
     /// True once the window has received focus after show_window.
     has_been_focused: bool,
-    /// Per-mode result cache, valid only for the current original_text.
+    /// Per-mode result cache, valid only for the current original content.
     mode_cache: HashMap<ProcessMode, String>,
     /// Accumulated visible streaming text (displayed during Processing).
     streaming_text: String,
@@ -109,7 +109,7 @@ impl StateMachine {
         Self {
             state: OverlayState::Hidden,
             mode,
-            original_text: None,
+            original_content: None,
             next_request_id: 0,
             current_request_id: 0,
             user_repositioned: false,
@@ -160,16 +160,30 @@ impl StateMachine {
         self.mode = mode;
     }
 
+    /// Modes available for the current content.
+    /// - No content: no modes available (tabs disabled).
+    /// - Image-only: Summarize only.
+    /// - Text (with or without images): all modes.
+    pub fn available_modes(&self) -> &[ProcessMode] {
+        match &self.original_content {
+            None => &[],
+            Some(content) if content.text.is_none() && content.has_images() => {
+                &[ProcessMode::Summarize]
+            }
+            Some(_) => ProcessMode::ALL,
+        }
+    }
+
     #[cfg(test)]
     pub fn original_text(&self) -> Option<&str> {
-        self.original_text.as_deref()
+        self.original_content.as_ref().and_then(|c| c.text.as_deref())
     }
 
     // -- Core event handler --
 
     pub fn handle(&mut self, event: UiEvent) -> Vec<UiEffect> {
         let effects = match event {
-            UiEvent::TextReady(text) => self.on_text_ready(text),
+            UiEvent::ContentReady(content) => self.on_content_ready(content),
             UiEvent::WorkerResult { text, request_id } => {
                 self.on_worker_result(text, request_id)
             }
@@ -197,9 +211,15 @@ impl StateMachine {
 
     // -- Private transition handlers --
 
-    fn on_text_ready(&mut self, text: String) -> Vec<UiEffect> {
+    fn on_content_ready(&mut self, content: ClipboardContent) -> Vec<UiEffect> {
         let old_state = self.state.clone();
-        self.original_text = Some(text.clone());
+
+        // Image-only content: auto-switch to Summarize.
+        if content.text.is_none() && content.has_images() {
+            self.mode = ProcessMode::Summarize;
+        }
+
+        self.original_content = Some(content.clone());
         self.mode_cache.clear();
         self.streaming_text.clear();
         self.next_request_id += 1;
@@ -211,7 +231,7 @@ impl StateMachine {
         let mut effects = vec![
             UiEffect::CaptureMousePosition,
             UiEffect::SendProcess {
-                text,
+                content,
                 mode: self.mode,
                 request_id: self.current_request_id,
             },
@@ -267,7 +287,7 @@ impl StateMachine {
             return vec![];
         }
         self.state = OverlayState::Hidden;
-        self.original_text = None;
+        self.original_content = None;
         self.mode_cache.clear();
         self.streaming_text.clear();
         self.has_been_focused = false;
@@ -279,7 +299,7 @@ impl StateMachine {
             return vec![];
         }
         self.state = OverlayState::Hidden;
-        self.original_text = None;
+        self.original_content = None;
         self.mode_cache.clear();
         self.streaming_text.clear();
         self.has_been_focused = false;
@@ -288,6 +308,12 @@ impl StateMachine {
 
     fn on_switch_mode(&mut self, new_mode: ProcessMode) -> Vec<UiEffect> {
         if self.mode == new_mode {
+            return vec![];
+        }
+        // Block switch to unavailable modes when content is loaded
+        // (e.g. image-only → Translate). When no content is loaded (Hidden),
+        // allow free mode switching to set the default for the next trigger.
+        if self.original_content.is_some() && !self.available_modes().contains(&new_mode) {
             return vec![];
         }
         self.mode = new_mode;
@@ -303,20 +329,22 @@ impl StateMachine {
                         UiEffect::WriteClipboard(cached),
                         UiEffect::ResetAreas,
                     ]
-                } else {
+                } else if let Some(content) = self.original_content.clone() {
                     // Cache miss: cancel current, re-send with new mode.
                     self.streaming_text.clear();
                     self.next_request_id += 1;
                     self.current_request_id = self.next_request_id;
-                    let mut effects = vec![UiEffect::SendCancel];
-                    if let Some(text) = self.original_text.clone() {
-                        effects.push(UiEffect::SendProcess {
-                            text,
+                    vec![
+                        UiEffect::SendCancel,
+                        UiEffect::SendProcess {
+                            content,
                             mode: self.mode,
                             request_id: self.current_request_id,
-                        });
-                    }
-                    effects
+                        },
+                    ]
+                } else {
+                    // Defensive: no content to reprocess — just cancel.
+                    vec![UiEffect::SendCancel]
                 }
             }
             OverlayState::Result(_) | OverlayState::Error(_) => {
@@ -327,21 +355,22 @@ impl StateMachine {
                         UiEffect::WriteClipboard(cached),
                         UiEffect::ResetAreas,
                     ]
-                } else {
+                } else if let Some(content) = self.original_content.clone() {
                     // Cache miss: re-process with new mode.
                     self.next_request_id += 1;
                     self.current_request_id = self.next_request_id;
                     self.state = OverlayState::Processing;
-                    let mut effects = Vec::new();
-                    if let Some(text) = self.original_text.clone() {
-                        effects.push(UiEffect::SendProcess {
-                            text,
+                    vec![
+                        UiEffect::SendProcess {
+                            content,
                             mode: self.mode,
                             request_id: self.current_request_id,
-                        });
-                    }
-                    effects.push(UiEffect::ResetAreas);
-                    effects
+                        },
+                        UiEffect::ResetAreas,
+                    ]
+                } else {
+                    // No content to reprocess (e.g. error from clipboard read failure).
+                    vec![]
                 }
             }
             OverlayState::Hidden => vec![],
@@ -353,7 +382,7 @@ impl StateMachine {
             return vec![];
         }
         self.state = OverlayState::Hidden;
-        self.original_text = None;
+        self.original_content = None;
         self.mode_cache.clear();
         self.streaming_text.clear();
         self.has_been_focused = false;
@@ -363,17 +392,20 @@ impl StateMachine {
     fn on_clipboard_write_error(&mut self, msg: String) -> Vec<UiEffect> {
         // Must NOT emit WriteClipboard to avoid infinite recursion.
         self.state = OverlayState::Error(msg);
+        // Reset focus tracking so the newly shown error window doesn't
+        // immediately auto-hide from a stale has_been_focused flag.
+        self.has_been_focused = false;
         vec![UiEffect::ResetAreas, UiEffect::ShowWindow]
     }
 
     fn check_invariants(&self) {
         debug_assert!(
-            !matches!(self.state, OverlayState::Processing) || self.original_text.is_some(),
-            "invariant violated: Processing state requires original_text"
+            !matches!(self.state, OverlayState::Processing) || self.original_content.is_some(),
+            "invariant violated: Processing state requires original_content"
         );
         debug_assert!(
-            !matches!(self.state, OverlayState::Hidden) || self.original_text.is_none(),
-            "invariant violated: Hidden state should have no original_text"
+            !matches!(self.state, OverlayState::Hidden) || self.original_content.is_none(),
+            "invariant violated: Hidden state should have no original_content"
         );
     }
 }
@@ -390,9 +422,9 @@ mod tests {
         StateMachine::new(ProcessMode::Translate)
     }
 
-    /// Helper: feed TextReady and return the effects.
+    /// Helper: feed ContentReady with text-only content and return the effects.
     fn start_processing(sm: &mut StateMachine, text: &str) -> Vec<UiEffect> {
-        sm.handle(UiEvent::TextReady(text.to_string()))
+        sm.handle(UiEvent::ContentReady(ClipboardContent::text_only(text.to_string())))
     }
 
     /// Helper: get the request_id from the last SendProcess effect.
@@ -896,8 +928,8 @@ mod tests {
         });
         // Cache now has Translate → "translated"
 
-        // New text arrives → cache cleared, re-processes
-        let effects = sm.handle(UiEvent::TextReady("world".into()));
+        // New content arrives → cache cleared, re-processes
+        let effects = sm.handle(UiEvent::ContentReady(ClipboardContent::text_only("world".into())));
         assert_eq!(*sm.state(), OverlayState::Processing);
         assert!(effects.iter().any(|e| matches!(e, UiEffect::SendProcess { .. })));
     }
@@ -917,7 +949,7 @@ mod tests {
         assert_eq!(*sm.state(), OverlayState::Hidden);
 
         // Re-enter with same text: should go to Processing (not cached)
-        let effects = sm.handle(UiEvent::TextReady("hello".into()));
+        let effects = sm.handle(UiEvent::ContentReady(ClipboardContent::text_only("hello".into())));
         assert_eq!(*sm.state(), OverlayState::Processing);
         assert!(effects.iter().any(|e| matches!(e, UiEffect::SendProcess { .. })));
     }
@@ -1010,5 +1042,121 @@ mod tests {
         start_processing(&mut sm, "new input");
 
         assert_eq!(sm.streaming_text(), "");
+    }
+
+    // === Image content tests ===
+
+    fn image_only_content() -> ClipboardContent {
+        ClipboardContent {
+            text: None,
+            images: vec![std::sync::Arc::new(vec![0x89, 0x50, 0x4E, 0x47])],
+        }
+    }
+
+    fn text_and_image_content() -> ClipboardContent {
+        ClipboardContent {
+            text: Some("caption".into()),
+            images: vec![std::sync::Arc::new(vec![0x89, 0x50, 0x4E, 0x47])],
+        }
+    }
+
+    #[test]
+    fn image_only_auto_switches_to_summarize() {
+        let mut sm = new_sm(); // starts in Translate mode
+        assert_eq!(sm.mode(), ProcessMode::Translate);
+
+        let effects = sm.handle(UiEvent::ContentReady(image_only_content()));
+
+        assert_eq!(sm.mode(), ProcessMode::Summarize);
+        assert_eq!(*sm.state(), OverlayState::Processing);
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            UiEffect::SendProcess { mode: ProcessMode::Summarize, .. }
+        )));
+    }
+
+    #[test]
+    fn image_only_available_modes_only_summarize() {
+        let mut sm = new_sm();
+        sm.handle(UiEvent::ContentReady(image_only_content()));
+
+        assert_eq!(sm.available_modes(), &[ProcessMode::Summarize]);
+    }
+
+    #[test]
+    fn text_and_image_keeps_mode() {
+        let mut sm = new_sm(); // Translate mode
+        sm.handle(UiEvent::ContentReady(text_and_image_content()));
+
+        assert_eq!(sm.mode(), ProcessMode::Translate);
+        assert_eq!(sm.available_modes(), ProcessMode::ALL);
+    }
+
+    #[test]
+    fn text_only_available_modes_all() {
+        let mut sm = new_sm();
+        start_processing(&mut sm, "hello");
+
+        assert_eq!(sm.available_modes(), ProcessMode::ALL);
+    }
+
+    #[test]
+    fn mode_switch_blocked_when_image_only() {
+        let mut sm = new_sm();
+        sm.handle(UiEvent::ContentReady(image_only_content()));
+        assert_eq!(sm.mode(), ProcessMode::Summarize);
+
+        // Try switching to Translate — should be blocked.
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Translate));
+        assert!(effects.is_empty());
+        assert_eq!(sm.mode(), ProcessMode::Summarize);
+    }
+
+    #[test]
+    fn no_content_available_modes_empty() {
+        let sm = new_sm();
+        // No content loaded — all tabs should be disabled.
+        assert!(sm.available_modes().is_empty());
+    }
+
+    // === Clipboard error edge cases ===
+
+    #[test]
+    fn clipboard_error_from_hidden_then_mode_switch_no_panic() {
+        let mut sm = new_sm();
+        assert_eq!(*sm.state(), OverlayState::Hidden);
+
+        // Clipboard read fails (e.g. copy_and_read timeout) → Error with no original_content.
+        let effects = sm.handle(UiEvent::ClipboardWriteError("timeout".into()));
+        assert_eq!(*sm.state(), OverlayState::Error("timeout".into()));
+        assert!(effects.contains(&UiEffect::ShowWindow));
+
+        // User switches mode from Error — should NOT transition to Processing
+        // since there is no content to reprocess.
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Correct));
+        assert!(effects.is_empty());
+        // State stays Error, not Processing.
+        assert_eq!(*sm.state(), OverlayState::Error("timeout".into()));
+    }
+
+    #[test]
+    fn clipboard_error_resets_has_been_focused() {
+        let mut sm = new_sm();
+        // Simulate a previous session where focus was gained.
+        start_processing(&mut sm, "hello");
+        sm.set_focused();
+
+        // Focus lost → Hidden.
+        sm.handle(UiEvent::FocusLost);
+        assert_eq!(*sm.state(), OverlayState::Hidden);
+
+        // Clipboard error shows error overlay.
+        sm.handle(UiEvent::ClipboardWriteError("read failed".into()));
+        assert_eq!(*sm.state(), OverlayState::Error("read failed".into()));
+
+        // FocusLost should be ignored because has_been_focused was reset.
+        let effects = sm.handle(UiEvent::FocusLost);
+        assert!(effects.is_empty());
+        assert_eq!(*sm.state(), OverlayState::Error("read failed".into()));
     }
 }
