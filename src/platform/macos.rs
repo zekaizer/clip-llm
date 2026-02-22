@@ -20,6 +20,7 @@ const KEY_EVENT_DELAY_MS: u64 = 50;
 
 /// NSWindowCollectionBehavior flags.
 const NS_WINDOW_COLLECTION_BEHAVIOR_MOVE_TO_ACTIVE_SPACE: c_ulong = 1 << 1;
+const NS_WINDOW_COLLECTION_BEHAVIOR_TRANSIENT: c_ulong = 1 << 3;
 const NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY: c_ulong = 1 << 8;
 
 #[link(name = "AppKit", kind = "framework")]
@@ -53,7 +54,9 @@ unsafe fn get_app_window() -> *mut c_void {
 }
 
 /// Configure the NSWindow for overlay use:
-/// - Moves to active Space and can appear over fullscreen apps.
+/// - MoveToActiveSpace: window moves to the current Space when shown.
+/// - Transient: excluded from Dock/Exposé.
+/// - FullScreenAuxiliary: can appear alongside fullscreen apps.
 /// - Disables native macOS window shadow (we draw our own via egui Frame).
 ///
 /// Returns true if successfully configured.
@@ -71,6 +74,7 @@ pub fn configure_window_for_spaces() -> bool {
             return false;
         }
         let behavior = NS_WINDOW_COLLECTION_BEHAVIOR_MOVE_TO_ACTIVE_SPACE
+            | NS_WINDOW_COLLECTION_BEHAVIOR_TRANSIENT
             | NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY;
         let sel_set = sel_registerName(c"setCollectionBehavior:".as_ptr());
         msg_send_ulong(window, sel_set, behavior);
@@ -83,6 +87,39 @@ pub fn configure_window_for_spaces() -> bool {
 
         debug!("configured NSWindow for Spaces + disabled native shadow");
         true
+    }
+}
+
+/// Show the NSWindow and activate the app so it receives focus properly.
+///
+/// For Accessory-policy apps, `activateIgnoringOtherApps:` is safe because
+/// Accessory apps have no "home Space" — macOS will not switch Spaces.
+/// We use `orderFront:` first (instead of `makeKeyAndOrderFront:` via winit)
+/// to ensure the window is visible before activation.
+pub fn show_and_focus_window() {
+    type MsgSendBool = unsafe extern "C" fn(*mut c_void, *mut c_void, bool);
+    let msg_send_bool: MsgSendBool = unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+
+    unsafe {
+        let window = get_app_window();
+        if window.is_null() {
+            return;
+        }
+        let nil: *mut c_void = std::ptr::null_mut();
+        type MsgSendPtr = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void);
+        let msg_send_ptr: MsgSendPtr = std::mem::transmute(objc_msgSend as *const ());
+
+        // orderFront: shows the window without activating the app.
+        msg_send_ptr(window, sel_registerName(c"orderFront:".as_ptr()), nil);
+        // makeKeyWindow makes it receive keyboard input.
+        objc_msgSend(window, sel_registerName(c"makeKeyWindow".as_ptr()));
+
+        // Activate the app so winit reports proper focus state.
+        // Safe for Accessory apps — no home Space means no Space switching.
+        let cls = objc_getClass(c"NSApplication".as_ptr());
+        let app = objc_msgSend(cls, sel_registerName(c"sharedApplication".as_ptr()));
+        let sel = sel_registerName(c"activateIgnoringOtherApps:".as_ptr());
+        msg_send_bool(app, sel, true);
     }
 }
 
@@ -115,6 +152,50 @@ pub fn display_bounds_at_point(x: f64, y: f64) -> Option<(f64, f64, f64, f64)> {
             bounds.size.width,
             bounds.size.height,
         ))
+    }
+}
+
+#[allow(dead_code)]
+/// Log NSWindow and NSApp diagnostic info for debugging overlay behavior.
+/// Outputs: activation policy, collection behavior bits, window level,
+/// visibility, and key/main status.
+pub fn log_window_diagnostics() {
+    type MsgSendI64 = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i64;
+    let msg_send_i64: MsgSendI64 = unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+
+    type MsgSendBoolRet = unsafe extern "C" fn(*mut c_void, *mut c_void) -> bool;
+    let msg_send_bool: MsgSendBoolRet = unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+
+    unsafe {
+        let cls = objc_getClass(c"NSApplication".as_ptr());
+        let app = objc_msgSend(cls, sel_registerName(c"sharedApplication".as_ptr()));
+
+        let policy = msg_send_i64(app, sel_registerName(c"activationPolicy".as_ptr()));
+        let policy_name = match policy {
+            0 => "Regular",
+            1 => "Accessory",
+            2 => "Prohibited",
+            _ => "Unknown",
+        };
+
+        let window = get_app_window();
+        if window.is_null() {
+            info!(
+                "window_diag: policy={policy_name}({policy}), window=null"
+            );
+            return;
+        }
+
+        let behavior = msg_send_i64(window, sel_registerName(c"collectionBehavior".as_ptr()));
+        let level = msg_send_i64(window, sel_registerName(c"level".as_ptr()));
+        let visible = msg_send_bool(window, sel_registerName(c"isVisible".as_ptr()));
+        let is_key = msg_send_bool(window, sel_registerName(c"isKeyWindow".as_ptr()));
+        let is_main = msg_send_bool(window, sel_registerName(c"isMainWindow".as_ptr()));
+
+        info!(
+            "window_diag: policy={policy_name}({policy}), behavior=0x{behavior:x}, \
+             level={level}, visible={visible}, key={is_key}, main={is_main}"
+        );
     }
 }
 

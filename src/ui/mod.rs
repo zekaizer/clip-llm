@@ -34,6 +34,8 @@ pub struct OverlayApp {
     initial_hide_done: bool,
     /// Hotkey events forwarded from set_event_handler via channel.
     hotkey_rx: mpsc::Receiver<global_hotkey::GlobalHotKeyEvent>,
+    /// Cached desired_size to avoid redundant send_viewport_cmd calls.
+    last_desired_size: Option<egui::Vec2>,
     #[cfg(feature = "diagnostics")]
     diag: crate::diagnostics::DiagCollector,
     #[cfg(feature = "diagnostics")]
@@ -59,6 +61,7 @@ impl OverlayApp {
             spawn_position: None,
             initial_hide_done: false,
             hotkey_rx,
+            last_desired_size: None,
             #[cfg(feature = "diagnostics")]
             diag: crate::diagnostics::DiagCollector::new(),
             #[cfg(feature = "diagnostics")]
@@ -230,12 +233,19 @@ impl OverlayApp {
         }
     }
 
+    #[allow(unused_variables)]
     fn show_window(&self, ctx: &egui::Context) {
         #[cfg(target_os = "macos")]
-        crate::platform::macos::configure_window_for_spaces();
+        {
+            crate::platform::macos::configure_window_for_spaces();
+            crate::platform::macos::show_and_focus_window();
+        }
 
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        #[cfg(not(target_os = "macos"))]
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
     }
 
     fn hide_window(&self, ctx: &egui::Context) {
@@ -254,13 +264,13 @@ impl eframe::App for OverlayApp {
             self.initial_hide_done = true;
         }
 
-        // 1. Process worker responses.
+        // Process worker responses.
         self.poll_responses(ctx);
 
-        // 2. Process hotkeys.
+        // Process hotkeys.
         self.poll_hotkeys(ctx);
 
-        // 3. Diagnostics: drive scenario runner via state machine.
+        // Diagnostics: drive scenario runner via state machine.
         #[cfg(feature = "diagnostics")]
         {
             let state_name = self.sm.variant_name();
@@ -286,7 +296,7 @@ impl eframe::App for OverlayApp {
             }
         }
 
-        // 4. Diagnostics: receive screenshot events.
+        // Diagnostics: receive screenshot events.
         #[cfg(feature = "diagnostics")]
         ctx.input(|i| {
             for event in &i.events {
@@ -296,19 +306,28 @@ impl eframe::App for OverlayApp {
             }
         });
 
-        // 5. Render overlay.
+        // Render overlay.
         let output = overlay::render(self.sm.state(), self.sm.mode(), self.sm.streaming_text(), ctx);
 
-        // 6. Resize viewport to fit rendered content.
+        // Resize viewport to fit rendered content (only when size changes).
         if let Some(desired) = output.desired_size {
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(desired));
+            let size_changed = self.last_desired_size != Some(desired);
+            if size_changed {
+                self.last_desired_size = Some(desired);
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(desired));
+            }
 
-            if !matches!(self.sm.state(), OverlayState::Hidden) && !self.sm.user_repositioned() {
+            if size_changed
+                && !matches!(self.sm.state(), OverlayState::Hidden)
+                && !self.sm.user_repositioned()
+            {
                 self.reposition_window(ctx, desired);
             }
+        } else {
+            self.last_desired_size = None;
         }
 
-        // 7. Handle overlay UI actions.
+        // Handle overlay UI actions.
         let event = match output.action {
             overlay::OverlayAction::Close => Some(UiEvent::UserClose),
             overlay::OverlayAction::Cancel => Some(UiEvent::UserCancel),
@@ -325,7 +344,7 @@ impl eframe::App for OverlayApp {
             self.execute_effects(effects, ctx);
         }
 
-        // 8. Diagnostics: record frame data + flush stale screenshots.
+        // Diagnostics: record frame data + flush stale screenshots.
         #[cfg(feature = "diagnostics")]
         {
             use crate::diagnostics::FrameSnapshot;
@@ -345,7 +364,7 @@ impl eframe::App for OverlayApp {
             self.diag.flush_pending_if_stale();
         }
 
-        // 9. Focus-loss auto-hide (skip during diagnostics).
+        // Focus-loss auto-hide (skip during diagnostics).
         #[cfg(feature = "diagnostics")]
         let skip_focus_check = true;
         #[cfg(not(feature = "diagnostics"))]
@@ -355,7 +374,7 @@ impl eframe::App for OverlayApp {
             self.check_focus_lost(ctx);
         }
 
-        // 10. Schedule next repaint.
+        // Schedule next repaint.
         #[cfg(feature = "diagnostics")]
         let force_poll = true; // diagnostics needs periodic tick() calls
         #[cfg(not(feature = "diagnostics"))]
