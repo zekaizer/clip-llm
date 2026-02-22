@@ -10,6 +10,8 @@ const DOUBLE_TAP_TIMEOUT: Duration = Duration::from_millis(500);
 pub enum TapAction {
     /// First tap registered, waiting for potential second tap.
     Pending,
+    /// Single-tap confirmed after timeout elapsed without a second tap.
+    SingleTap,
     /// Double-tap confirmed within the timeout window.
     DoubleTap,
 }

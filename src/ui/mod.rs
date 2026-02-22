@@ -134,6 +134,7 @@ impl OverlayApp {
             }
             match self.detector.on_press() {
                 TapAction::Pending => {}
+                TapAction::SingleTap => unreachable!("on_press never returns SingleTap"),
                 TapAction::DoubleTap => {
                     info!("double-tap triggered, copying selection...");
                     self.trigger_double_tap(ctx);
