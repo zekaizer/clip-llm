@@ -7,18 +7,17 @@ use std::time::Duration;
 use tokio::sync::mpsc as tokio_mpsc;
 
 use eframe::egui;
-use global_hotkey::HotKeyState;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::clipboard::ClipboardManager;
-use crate::hotkey::{HotkeyDetector, TapAction};
+use crate::hotkey::TapAction;
 use crate::platform::{NativePlatform, Platform};
 use crate::worker::{WorkerCommand, WorkerResponse};
 
 pub use state_machine::OverlayState;
 use state_machine::{StateMachine, UiEffect, UiEvent};
 
-/// Polling interval when overlay is hidden (for hotkey detection).
+/// Polling interval for diagnostics scenario runner.
 const IDLE_POLL_MS: u64 = 100;
 
 pub struct OverlayApp {
@@ -27,13 +26,12 @@ pub struct OverlayApp {
     resp_rx: mpsc::Receiver<WorkerResponse>,
     clipboard: ClipboardManager,
     platform: NativePlatform,
-    detector: HotkeyDetector,
     /// Mouse cursor position captured at hotkey trigger time.
     spawn_position: Option<egui::Pos2>,
     /// Whether the initial Visible(false) command has been sent at startup.
     initial_hide_done: bool,
-    /// Hotkey events forwarded from set_event_handler via channel.
-    hotkey_rx: mpsc::Receiver<global_hotkey::GlobalHotKeyEvent>,
+    /// Tap actions from coordinator thread (hotkey detection runs off-UI).
+    tap_rx: mpsc::Receiver<TapAction>,
     /// Cached desired_size to avoid redundant send_viewport_cmd calls.
     last_desired_size: Option<egui::Vec2>,
     #[cfg(feature = "diagnostics")]
@@ -49,7 +47,7 @@ impl OverlayApp {
         cmd_tx: tokio_mpsc::UnboundedSender<WorkerCommand>,
         resp_rx: mpsc::Receiver<WorkerResponse>,
         clipboard: ClipboardManager,
-        hotkey_rx: mpsc::Receiver<global_hotkey::GlobalHotKeyEvent>,
+        tap_rx: mpsc::Receiver<TapAction>,
     ) -> Self {
         Self {
             sm: StateMachine::new(crate::ProcessMode::default()),
@@ -57,10 +55,9 @@ impl OverlayApp {
             resp_rx,
             clipboard,
             platform: NativePlatform,
-            detector: HotkeyDetector::new(),
             spawn_position: None,
             initial_hide_done: false,
-            hotkey_rx,
+            tap_rx,
             last_desired_size: None,
             #[cfg(feature = "diagnostics")]
             diag: crate::diagnostics::DiagCollector::new(),
@@ -125,44 +122,32 @@ impl OverlayApp {
         }
     }
 
-    // -- Hotkey handling --
+    // -- Tap action handling (from coordinator thread) --
 
-    fn poll_hotkeys(&mut self, ctx: &egui::Context) {
-        while let Ok(event) = self.hotkey_rx.try_recv() {
-            if event.state != HotKeyState::Pressed {
-                continue;
-            }
-            match self.detector.on_press() {
-                TapAction::Pending => {}
-                TapAction::SingleTap => unreachable!("on_press never returns SingleTap"),
+    fn poll_tap_actions(&mut self, ctx: &egui::Context) {
+        while let Ok(action) = self.tap_rx.try_recv() {
+            match action {
+                TapAction::SingleTap => {
+                    info!("single-tap triggered, using clipboard content...");
+                    let event = match self.clipboard.read_content() {
+                        Ok(content) => UiEvent::ContentReady(content),
+                        Err(e) => UiEvent::ClipboardWriteError(e.to_string()),
+                    };
+                    let effects = self.sm.handle(event);
+                    self.execute_effects(effects, ctx);
+                }
                 TapAction::DoubleTap => {
                     info!("double-tap triggered, copying selection...");
-                    self.trigger_double_tap(ctx);
+                    let event = match self.clipboard.copy_and_read(&self.platform) {
+                        Ok(content) => UiEvent::ContentReady(content),
+                        Err(e) => UiEvent::ClipboardWriteError(e.to_string()),
+                    };
+                    let effects = self.sm.handle(event);
+                    self.execute_effects(effects, ctx);
                 }
+                TapAction::Pending => {}
             }
         }
-        if self.detector.check_timeout() {
-            info!("single-tap triggered, using clipboard content...");
-            self.trigger_single_tap(ctx);
-        }
-    }
-
-    fn trigger_single_tap(&mut self, ctx: &egui::Context) {
-        let event = match self.clipboard.read_content() {
-            Ok(content) => UiEvent::ContentReady(content),
-            Err(e) => UiEvent::ClipboardWriteError(e.to_string()),
-        };
-        let effects = self.sm.handle(event);
-        self.execute_effects(effects, ctx);
-    }
-
-    fn trigger_double_tap(&mut self, ctx: &egui::Context) {
-        let event = match self.clipboard.copy_and_read(&self.platform) {
-            Ok(content) => UiEvent::ContentReady(content),
-            Err(e) => UiEvent::ClipboardWriteError(e.to_string()),
-        };
-        let effects = self.sm.handle(event);
-        self.execute_effects(effects, ctx);
     }
 
     // -- Worker response polling --
@@ -244,14 +229,21 @@ impl OverlayApp {
             crate::platform::macos::show_and_focus_window();
         }
 
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        crate::platform::windows::show_and_focus_window();
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
     }
 
+    #[allow(unused_variables)]
     fn hide_window(&self, ctx: &egui::Context) {
+        // Diagnostics: keep window visible so update() keeps firing on Windows
+        // (WM_PAINT not delivered to hidden windows).
+        #[cfg(not(feature = "diagnostics"))]
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
     }
 }
@@ -260,18 +252,23 @@ impl eframe::App for OverlayApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Ensure window is hidden at startup.
         // Fixes macOS startup where with_visible(false) doesn't fully suppress the window.
-        // Only sent once — send_viewport_cmd internally calls request_repaint(),
-        // which would override the 100ms throttle and cause a continuous repaint loop.
+        // Diagnostics: skip hide so update() keeps firing on Windows (WM_PAINT issue).
+        #[cfg(not(feature = "diagnostics"))]
         if !self.initial_hide_done && matches!(self.sm.state(), OverlayState::Hidden) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            debug!("update() first call — hiding window");
+            self.hide_window(ctx);
+            self.initial_hide_done = true;
+        }
+        #[cfg(feature = "diagnostics")]
+        {
             self.initial_hide_done = true;
         }
 
         // Process worker responses.
         self.poll_responses(ctx);
 
-        // Process hotkeys.
-        self.poll_hotkeys(ctx);
+        // Process tap actions from coordinator thread.
+        self.poll_tap_actions(ctx);
 
         // Diagnostics: drive scenario runner via state machine.
         #[cfg(feature = "diagnostics")]
@@ -396,9 +393,9 @@ impl eframe::App for OverlayApp {
                 ctx.request_repaint(); // spinner animation + streaming updates
             }
             _ => {
-                // Poll when single-tap timeout check is pending or diagnostics is active.
-                // Otherwise fully event-driven — hotkey handler wakes eframe.
-                if self.detector.is_pending() || force_poll {
+                // Hotkey polling is handled by coordinator thread — UI is event-driven only.
+                // Diagnostics needs periodic tick() calls for scenario runner.
+                if force_poll {
                     ctx.request_repaint_after(Duration::from_millis(IDLE_POLL_MS));
                 }
             }

@@ -10,6 +10,7 @@ use tracing_subscriber::EnvFilter;
 
 use clip_llm::api::client::LlmClient;
 use clip_llm::clipboard::ClipboardManager;
+use clip_llm::hotkey::TapAction;
 use clip_llm::ui::OverlayApp;
 use clip_llm::worker::{spawn_worker, WorkerCommand, WorkerResponse};
 use clip_llm::HotkeyError;
@@ -182,17 +183,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 window_corner_radius: egui::CornerRadius::same(12),
                 ..egui::Visuals::dark()
             });
-            // Forward hotkey events via channel and wake eframe immediately.
-            // set_event_handler intercepts events from the global channel,
-            // so poll_hotkeys() reads from hotkey_rx instead of GlobalHotKeyEvent::receiver().
+            // Forward hotkey events to coordinator thread (no request_repaint here —
+            // coordinator handles wake-up after detecting tap action).
             let (hotkey_tx, hotkey_rx) = mpsc::channel();
-            let ctx_for_hotkey = cc.egui_ctx.clone();
             GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
                 let _ = hotkey_tx.send(event);
-                ctx_for_hotkey.request_repaint();
             }));
 
-            Ok(Box::new(OverlayApp::new(cmd_tx, resp_rx, clipboard, hotkey_rx)))
+            // Platform-specific pre-show callback for coordinator thread.
+            // On Windows, shows window natively before sending TapAction so that
+            // WM_PAINT is delivered and eframe update() fires.
+            let pre_show = clip_llm::platform::pre_show_callback();
+
+            // Coordinator thread: event-driven hotkey detection (off-UI).
+            let (tap_tx, tap_rx) = mpsc::channel::<TapAction>();
+            let ctx_for_coord = cc.egui_ctx.clone();
+            std::thread::spawn(move || {
+                clip_llm::coordinator::run(hotkey_rx, tap_tx, ctx_for_coord, pre_show);
+            });
+
+            Ok(Box::new(OverlayApp::new(cmd_tx, resp_rx, clipboard, tap_rx)))
         }),
     )?;
 

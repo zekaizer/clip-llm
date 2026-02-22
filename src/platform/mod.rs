@@ -16,6 +16,21 @@ pub(crate) mod macos;
 pub use macos::MacOsPlatform as NativePlatform;
 
 #[cfg(target_os = "windows")]
-mod windows;
+pub(crate) mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::WindowsPlatform as NativePlatform;
+
+/// Returns a callback that shows and focuses the app window natively.
+///
+/// On Windows, uses `ShowWindowAsync` + `SetForegroundWindow` (cross-thread safe).
+/// On other platforms, returns a no-op (macOS handles show via ObjC in `ui::show_window`).
+pub fn pre_show_callback() -> Box<dyn Fn() + Send> {
+    #[cfg(target_os = "windows")]
+    {
+        Box::new(|| windows::show_and_focus_window())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Box::new(|| {})
+    }
+}
