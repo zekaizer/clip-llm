@@ -66,11 +66,28 @@ impl Platform for WindowsPlatform {
     }
 }
 
+/// Show the clip-llm window without activating or stealing focus.
+///
+/// Uses `SW_SHOWNA` so WM_PAINT is delivered (hidden windows don't receive it),
+/// while keeping the foreground window unchanged — this is critical because
+/// `SendInput(Ctrl+C)` targets the foreground window for copy simulation.
+///
+/// Called from coordinator / diagnostics threads before sending actions to UI.
+pub fn show_no_activate() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindowAsync, SW_SHOWNA};
+    let title: Vec<u16> = "clip-llm\0".encode_utf16().collect();
+    let hwnd = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
+    if !hwnd.is_null() {
+        unsafe {
+            ShowWindowAsync(hwnd, SW_SHOWNA);
+        }
+    }
+}
+
 /// Show and focus the clip-llm window from any thread.
 ///
 /// Uses `ShowWindowAsync` (PostMessage-based, cross-thread safe) + `SetForegroundWindow`.
-/// Called from the coordinator thread to make the window visible before sending
-/// a TapAction, ensuring `WM_PAINT` will be delivered so eframe `update()` fires.
+/// Called from `show_window()` in the UI after clipboard content is ready.
 pub fn show_and_focus_window() {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         FindWindowW, SetForegroundWindow, ShowWindowAsync, SW_SHOW,

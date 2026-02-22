@@ -20,14 +20,17 @@ pub(crate) mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::WindowsPlatform as NativePlatform;
 
-/// Returns a callback that shows and focuses the app window natively.
+/// Returns a platform-specific callback for pre-show hooks (coordinator / diagnostics threads).
 ///
-/// On Windows, uses `ShowWindowAsync` + `SetForegroundWindow` (cross-thread safe).
-/// On other platforms, returns a no-op (macOS handles show via ObjC in `ui::show_window`).
+/// On Windows, hidden windows (SW_HIDE) do not receive WM_PAINT, so eframe `update()`
+/// never fires. This callback uses `SW_SHOWNA` to make the window visible without
+/// stealing focus — keeping `SendInput(Ctrl+C)` targeting the correct foreground window.
+///
+/// On macOS, no-op — macOS uses `CGEvent` for copy simulation (focus-independent).
 pub fn pre_show_callback() -> Box<dyn Fn() + Send> {
     #[cfg(target_os = "windows")]
     {
-        Box::new(|| windows::show_and_focus_window())
+        Box::new(|| windows::show_no_activate())
     }
     #[cfg(not(target_os = "windows"))]
     {

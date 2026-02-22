@@ -290,7 +290,13 @@ impl OverlayApp {
         }
 
         #[cfg(target_os = "windows")]
-        crate::platform::windows::show_and_focus_window();
+        {
+            crate::platform::windows::show_and_focus_window();
+            // Sync winit internal state so later Visible(false) properly calls SW_HIDE.
+            // Native ShowWindowAsync bypasses winit, leaving it thinking the window
+            // is still hidden — without this, hide_window() becomes a no-op.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        }
 
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
