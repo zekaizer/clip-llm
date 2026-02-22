@@ -50,6 +50,11 @@ impl HotkeyDetector {
         TapAction::Pending
     }
 
+    /// Whether a first-tap is pending (waiting for potential double-tap).
+    pub fn is_pending(&self) -> bool {
+        self.last_press.is_some()
+    }
+
     /// Check if a pending single-tap has timed out.
     /// Returns `true` when a first tap was recorded and the timeout has elapsed,
     /// confirming a single-tap action.

@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::sync::mpsc as tokio_mpsc;
 
 use eframe::egui;
-use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
+use global_hotkey::HotKeyState;
 use tracing::{error, info};
 
 use crate::clipboard::ClipboardManager;
@@ -30,6 +30,10 @@ pub struct OverlayApp {
     detector: HotkeyDetector,
     /// Mouse cursor position captured at hotkey trigger time.
     spawn_position: Option<egui::Pos2>,
+    /// Whether the initial Visible(false) command has been sent at startup.
+    initial_hide_done: bool,
+    /// Hotkey events forwarded from set_event_handler via channel.
+    hotkey_rx: mpsc::Receiver<global_hotkey::GlobalHotKeyEvent>,
     #[cfg(feature = "diagnostics")]
     diag: crate::diagnostics::DiagCollector,
     #[cfg(feature = "diagnostics")]
@@ -43,6 +47,7 @@ impl OverlayApp {
         cmd_tx: tokio_mpsc::UnboundedSender<WorkerCommand>,
         resp_rx: mpsc::Receiver<WorkerResponse>,
         clipboard: ClipboardManager,
+        hotkey_rx: mpsc::Receiver<global_hotkey::GlobalHotKeyEvent>,
     ) -> Self {
         Self {
             sm: StateMachine::new(crate::ProcessMode::default()),
@@ -52,6 +57,8 @@ impl OverlayApp {
             platform: NativePlatform,
             detector: HotkeyDetector::new(),
             spawn_position: None,
+            initial_hide_done: false,
+            hotkey_rx,
             #[cfg(feature = "diagnostics")]
             diag: crate::diagnostics::DiagCollector::new(),
             #[cfg(feature = "diagnostics")]
@@ -116,8 +123,7 @@ impl OverlayApp {
     // -- Hotkey handling --
 
     fn poll_hotkeys(&mut self, ctx: &egui::Context) {
-        let receiver = GlobalHotKeyEvent::receiver();
-        while let Ok(event) = receiver.try_recv() {
+        while let Ok(event) = self.hotkey_rx.try_recv() {
             if event.state != HotKeyState::Pressed {
                 continue;
             }
@@ -239,20 +245,13 @@ impl OverlayApp {
 
 impl eframe::App for OverlayApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Transparent background for the entire viewport.
-        ctx.set_visuals(egui::Visuals {
-            window_fill: egui::Color32::TRANSPARENT,
-            panel_fill: egui::Color32::TRANSPARENT,
-            window_stroke: egui::Stroke::NONE,
-            window_shadow: egui::Shadow::NONE,
-            window_corner_radius: egui::CornerRadius::same(12),
-            ..egui::Visuals::dark()
-        });
-
-        // Ensure window is hidden when state is Hidden.
+        // Ensure window is hidden at startup.
         // Fixes macOS startup where with_visible(false) doesn't fully suppress the window.
-        if matches!(self.sm.state(), OverlayState::Hidden) {
+        // Only sent once — send_viewport_cmd internally calls request_repaint(),
+        // which would override the 100ms throttle and cause a continuous repaint loop.
+        if !self.initial_hide_done && matches!(self.sm.state(), OverlayState::Hidden) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.initial_hide_done = true;
         }
 
         // 1. Process worker responses.
@@ -357,12 +356,21 @@ impl eframe::App for OverlayApp {
         }
 
         // 10. Schedule next repaint.
+        #[cfg(feature = "diagnostics")]
+        let force_poll = true; // diagnostics needs periodic tick() calls
+        #[cfg(not(feature = "diagnostics"))]
+        let force_poll = false;
+
         match self.sm.state() {
-            OverlayState::Hidden => {
-                ctx.request_repaint_after(Duration::from_millis(IDLE_POLL_MS));
+            OverlayState::Processing => {
+                ctx.request_repaint(); // spinner animation + streaming updates
             }
             _ => {
-                ctx.request_repaint();
+                // Poll when single-tap timeout check is pending or diagnostics is active.
+                // Otherwise fully event-driven — hotkey handler wakes eframe.
+                if self.detector.is_pending() || force_poll {
+                    ctx.request_repaint_after(Duration::from_millis(IDLE_POLL_MS));
+                }
             }
         }
     }
