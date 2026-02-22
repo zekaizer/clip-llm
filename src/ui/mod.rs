@@ -354,11 +354,12 @@ impl eframe::App for OverlayApp {
 
         // 10. Schedule next repaint.
         match self.sm.state() {
-            OverlayState::Hidden => {
-                ctx.request_repaint_after(Duration::from_millis(IDLE_POLL_MS));
+            OverlayState::Processing => {
+                ctx.request_repaint(); // spinner animation + streaming updates
             }
             _ => {
-                ctx.request_repaint();
+                // Hidden, Result, Error: static content, poll for hotkeys only.
+                ctx.request_repaint_after(Duration::from_millis(IDLE_POLL_MS));
             }
         }
     }
