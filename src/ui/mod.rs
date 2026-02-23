@@ -431,11 +431,13 @@ impl eframe::App for OverlayApp {
         let output = overlay::render(
             self.sm.state(),
             self.sm.mode(),
-            self.sm.streaming_text(),
+            overlay::StreamingState {
+                text: self.sm.streaming_text(),
+                think_started: self.sm.think_started(),
+                think_content: self.sm.think_content(),
+                think_expanded: self.think_expanded,
+            },
             self.sm.available_modes(),
-            self.sm.think_started(),
-            self.sm.think_content(),
-            self.think_expanded,
             ctx,
         );
 

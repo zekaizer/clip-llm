@@ -8,6 +8,14 @@ const MAX_RESULT_HEIGHT: f32 = 260.0;
 /// Space around the frame for shadow rendering.
 const SHADOW_PAD: f32 = 20.0;
 
+/// Streaming and think-block display state for Processing/Result rendering.
+pub struct StreamingState<'a> {
+    pub text: &'a str,
+    pub think_started: bool,
+    pub think_content: Option<&'a str>,
+    pub think_expanded: bool,
+}
+
 /// Action requested by the overlay UI.
 pub enum OverlayAction {
     None,
@@ -28,15 +36,11 @@ pub struct OverlayOutput {
 }
 
 /// Render the overlay panel. Returns action and desired viewport size.
-#[allow(clippy::too_many_arguments)]
 pub fn render(
     state: &OverlayState,
     mode: ProcessMode,
-    streaming_text: &str,
+    streaming: StreamingState<'_>,
     available_modes: &[ProcessMode],
-    think_started: bool,
-    think_content: Option<&str>,
-    think_expanded: bool,
     ctx: &egui::Context,
 ) -> OverlayOutput {
     if matches!(state, OverlayState::Hidden) {
@@ -94,74 +98,16 @@ pub fn render(
 
                 match state {
                     OverlayState::Processing => {
-                        if think_started && streaming_text.is_empty() {
-                            // Think block in progress, no visible output yet.
-                            ui.horizontal(|ui| {
-                                ui.spinner();
-                                ui.label(
-                                    egui::RichText::new("Thinking...")
-                                        .color(egui::Color32::from_gray(160))
-                                        .size(15.0),
-                                );
-                            });
-                        } else if think_started {
-                            // Think done, answer streaming: show locked collapsed header.
-                            ui.label(
-                                egui::RichText::new("\u{25b6} Thinking")
-                                    .color(egui::Color32::from_gray(100))
-                                    .size(13.0),
-                            );
-                            ui.add_space(4.0);
-                            render_scrollable_text(
-                                ui,
-                                ("streaming", mode),
-                                streaming_text,
-                                MAX_RESULT_HEIGHT,
-                                true,
-                            );
-                        } else {
-                            ui.horizontal(|ui| {
-                                ui.spinner();
-                                ui.label(
-                                    egui::RichText::new(mode.processing_label())
-                                        .color(egui::Color32::WHITE)
-                                        .size(15.0),
-                                );
-                            });
-                            if !streaming_text.is_empty() {
-                                ui.add_space(4.0);
-                                render_scrollable_text(
-                                    ui,
-                                    ("streaming", mode),
-                                    streaming_text,
-                                    MAX_RESULT_HEIGHT,
-                                    true,
-                                );
-                            }
-                        }
-                        ui.add_space(4.0);
-                        let cancel_btn = egui::Button::new(
-                            egui::RichText::new("Cancel")
-                                .size(12.0)
-                                .color(egui::Color32::from_rgb(255, 140, 140)),
-                        )
-                        .fill(egui::Color32::from_rgba_unmultiplied(80, 30, 30, 180))
-                        .corner_radius(6.0);
-                        if ui.add(cancel_btn).clicked() {
-                            action = OverlayAction::Cancel;
-                        }
+                        render_processing(ui, mode, streaming.text, streaming.think_started, &mut action);
                     }
                     OverlayState::Result(text) => {
-                        if let Some(content) = think_content {
-                            render_think_toggle(ui, think_expanded, content, &mut action);
-                            ui.add_space(4.0);
-                        }
-                        render_scrollable_text(
+                        render_result(
                             ui,
-                            ("result", mode),
+                            mode,
                             text,
-                            MAX_RESULT_HEIGHT,
-                            false,
+                            streaming.think_content,
+                            streaming.think_expanded,
+                            &mut action,
                         );
                     }
                     OverlayState::Error(msg) => {
@@ -256,6 +202,80 @@ fn render_think_toggle(
                 );
             });
     }
+}
+
+fn render_processing(
+    ui: &mut egui::Ui,
+    mode: ProcessMode,
+    streaming_text: &str,
+    think_started: bool,
+    action: &mut OverlayAction,
+) {
+    if think_started && streaming_text.is_empty() {
+        // Think block in progress, no visible output yet.
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(
+                egui::RichText::new("Thinking...")
+                    .color(egui::Color32::from_gray(160))
+                    .size(15.0),
+            );
+        });
+    } else if think_started {
+        // Think done, answer streaming: show locked collapsed header.
+        ui.label(
+            egui::RichText::new("\u{25b6} Thinking")
+                .color(egui::Color32::from_gray(100))
+                .size(13.0),
+        );
+        ui.add_space(4.0);
+        render_scrollable_text(ui, ("streaming", mode), streaming_text, MAX_RESULT_HEIGHT, true);
+    } else {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(
+                egui::RichText::new(mode.processing_label())
+                    .color(egui::Color32::WHITE)
+                    .size(15.0),
+            );
+        });
+        if !streaming_text.is_empty() {
+            ui.add_space(4.0);
+            render_scrollable_text(
+                ui,
+                ("streaming", mode),
+                streaming_text,
+                MAX_RESULT_HEIGHT,
+                true,
+            );
+        }
+    }
+    ui.add_space(4.0);
+    let cancel_btn = egui::Button::new(
+        egui::RichText::new("Cancel")
+            .size(12.0)
+            .color(egui::Color32::from_rgb(255, 140, 140)),
+    )
+    .fill(egui::Color32::from_rgba_unmultiplied(80, 30, 30, 180))
+    .corner_radius(6.0);
+    if ui.add(cancel_btn).clicked() {
+        *action = OverlayAction::Cancel;
+    }
+}
+
+fn render_result(
+    ui: &mut egui::Ui,
+    mode: ProcessMode,
+    text: &str,
+    think_content: Option<&str>,
+    think_expanded: bool,
+    action: &mut OverlayAction,
+) {
+    if let Some(content) = think_content {
+        render_think_toggle(ui, think_expanded, content, action);
+        ui.add_space(4.0);
+    }
+    render_scrollable_text(ui, ("result", mode), text, MAX_RESULT_HEIGHT, false);
 }
 
 fn render_tab_bar(
