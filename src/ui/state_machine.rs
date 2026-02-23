@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::{ClipboardContent, ProcessMode};
+use crate::{ClipboardContent, ProcessMode, RephraseLength, RephraseParams, RephraseStyle};
 
 // ---------------------------------------------------------------------------
 // OverlayState
@@ -56,6 +56,10 @@ pub enum UiEvent {
     UserCancel,
     /// User switched processing mode via tab bar.
     UserSwitchMode(ProcessMode),
+    /// User changed the rephrase style parameter.
+    UserChangeRephraseStyle(RephraseStyle),
+    /// User changed the rephrase length parameter.
+    UserChangeRephraseLength(RephraseLength),
     /// User started dragging the overlay.
     UserStartDrag,
     /// Window gained focus.
@@ -74,6 +78,7 @@ pub enum UiEffect {
     SendProcess {
         content: ClipboardContent,
         mode: ProcessMode,
+        rephrase_params: RephraseParams,
         request_id: u64,
     },
     SendCancel,
@@ -98,13 +103,15 @@ pub struct StateMachine {
     next_request_id: u64,
     /// The request_id of the currently active request.
     current_request_id: u64,
+    /// Current rephrase parameters (style + length); affects system prompt for Rephrase mode.
+    rephrase_params: RephraseParams,
     /// True after the user drags the overlay; suppresses auto-repositioning.
     user_repositioned: bool,
     /// True once the window has received focus after show_window.
     has_been_focused: bool,
-    /// Per-mode result cache: maps mode → (text, think_content).
+    /// Result cache: maps system_prompt string → (text, think_content).
     /// Valid only for the current original content.
-    cache: HashMap<ProcessMode, (String, Option<String>)>,
+    cache: HashMap<String, (String, Option<String>)>,
     /// Accumulated visible streaming text (displayed during Processing).
     streaming_text: String,
     /// True once a think block has started during the current streaming request.
@@ -118,6 +125,7 @@ impl StateMachine {
         Self {
             state: OverlayState::Hidden,
             mode,
+            rephrase_params: RephraseParams::default(),
             original_content: None,
             next_request_id: 0,
             current_request_id: 0,
@@ -138,6 +146,10 @@ impl StateMachine {
 
     pub fn mode(&self) -> ProcessMode {
         self.mode
+    }
+
+    pub fn rephrase_params(&self) -> RephraseParams {
+        self.rephrase_params
     }
 
     pub fn streaming_text(&self) -> &str {
@@ -199,6 +211,8 @@ impl StateMachine {
             UiEvent::UserClose => self.on_close(),
             UiEvent::UserCancel => self.on_cancel(),
             UiEvent::UserSwitchMode(mode) => self.on_switch_mode(mode),
+            UiEvent::UserChangeRephraseStyle(style) => self.on_change_rephrase_style(style),
+            UiEvent::UserChangeRephraseLength(length) => self.on_change_rephrase_length(length),
             UiEvent::UserStartDrag => {
                 self.user_repositioned = true;
                 vec![]
@@ -244,6 +258,7 @@ impl StateMachine {
             UiEffect::SendProcess {
                 content,
                 mode: self.mode,
+                rephrase_params: self.rephrase_params,
                 request_id: self.current_request_id,
             },
         ];
@@ -286,7 +301,7 @@ impl StateMachine {
         self.streaming_text.clear();
         self.think_started = false;
         self.think_content = think_content.clone();
-        self.cache.insert(self.mode, (text.clone(), think_content));
+        self.cache.insert(self.cache_key(), (text.clone(), think_content));
         self.state = OverlayState::Result(text.clone());
         vec![
             UiEffect::WriteClipboard(text),
@@ -344,10 +359,12 @@ impl StateMachine {
             return vec![];
         }
         self.mode = new_mode;
+        // Cache key is computed after setting the new mode.
+        let key = self.cache_key();
 
         match &self.state {
             OverlayState::Processing => {
-                if let Some((cached_text, cached_think)) = self.cache.get(&new_mode).cloned() {
+                if let Some((cached_text, cached_think)) = self.cache.get(&key).cloned() {
                     // Cache hit: cancel in-flight, return cached result.
                     self.streaming_text.clear();
                     self.think_started = false;
@@ -366,6 +383,7 @@ impl StateMachine {
                         UiEffect::SendProcess {
                             content,
                             mode: self.mode,
+                            rephrase_params: self.rephrase_params,
                             request_id: self.current_request_id,
                         },
                     ]
@@ -375,7 +393,7 @@ impl StateMachine {
                 }
             }
             OverlayState::Result(_) | OverlayState::Error(_) => {
-                if let Some((cached_text, cached_think)) = self.cache.get(&new_mode).cloned() {
+                if let Some((cached_text, cached_think)) = self.cache.get(&key).cloned() {
                     // Cache hit: return cached result directly.
                     self.apply_cached_result(cached_text, cached_think)
                 } else if let Some(content) = self.original_content.clone() {
@@ -389,6 +407,7 @@ impl StateMachine {
                         UiEffect::SendProcess {
                             content,
                             mode: self.mode,
+                            rephrase_params: self.rephrase_params,
                             request_id: self.current_request_id,
                         },
                         UiEffect::ResetAreas,
@@ -425,6 +444,86 @@ impl StateMachine {
         // immediately auto-hide from a stale has_been_focused flag.
         self.has_been_focused = false;
         vec![UiEffect::ResetAreas, UiEffect::ShowWindow]
+    }
+
+    /// Cache key for the current mode + rephrase params combination.
+    fn cache_key(&self) -> String {
+        self.mode.system_prompt(self.rephrase_params)
+    }
+
+    fn on_change_rephrase_style(&mut self, style: RephraseStyle) -> Vec<UiEffect> {
+        if self.rephrase_params.style == style {
+            return vec![];
+        }
+        self.rephrase_params.style = style;
+        self.on_rephrase_params_changed()
+    }
+
+    fn on_change_rephrase_length(&mut self, length: RephraseLength) -> Vec<UiEffect> {
+        if self.rephrase_params.length == length {
+            return vec![];
+        }
+        self.rephrase_params.length = length;
+        self.on_rephrase_params_changed()
+    }
+
+    /// Re-process or serve from cache when rephrase params change (Rephrase mode only).
+    fn on_rephrase_params_changed(&mut self) -> Vec<UiEffect> {
+        if self.mode != ProcessMode::Rephrase {
+            return vec![];
+        }
+        let key = self.cache_key();
+        match &self.state {
+            OverlayState::Processing => {
+                if let Some((cached_text, cached_think)) = self.cache.get(&key).cloned() {
+                    self.streaming_text.clear();
+                    self.think_started = false;
+                    let mut effects = self.apply_cached_result(cached_text, cached_think);
+                    effects.insert(0, UiEffect::SendCancel);
+                    effects
+                } else if let Some(content) = self.original_content.clone() {
+                    self.streaming_text.clear();
+                    self.think_started = false;
+                    self.think_content = None;
+                    self.next_request_id += 1;
+                    self.current_request_id = self.next_request_id;
+                    vec![
+                        UiEffect::SendCancel,
+                        UiEffect::SendProcess {
+                            content,
+                            mode: self.mode,
+                            rephrase_params: self.rephrase_params,
+                            request_id: self.current_request_id,
+                        },
+                    ]
+                } else {
+                    vec![UiEffect::SendCancel]
+                }
+            }
+            OverlayState::Result(_) | OverlayState::Error(_) => {
+                if let Some((cached_text, cached_think)) = self.cache.get(&key).cloned() {
+                    self.apply_cached_result(cached_text, cached_think)
+                } else if let Some(content) = self.original_content.clone() {
+                    self.think_started = false;
+                    self.think_content = None;
+                    self.next_request_id += 1;
+                    self.current_request_id = self.next_request_id;
+                    self.state = OverlayState::Processing;
+                    vec![
+                        UiEffect::SendProcess {
+                            content,
+                            mode: self.mode,
+                            rephrase_params: self.rephrase_params,
+                            request_id: self.current_request_id,
+                        },
+                        UiEffect::ResetAreas,
+                    ]
+                } else {
+                    vec![]
+                }
+            }
+            OverlayState::Hidden => vec![],
+        }
     }
 
     fn check_invariants(&self) {
@@ -571,10 +670,10 @@ mod tests {
         let effects = start_processing(&mut sm, "hello");
         let old_rid = last_request_id(&effects);
 
-        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Correct));
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Rephrase));
 
         assert_eq!(*sm.state(), OverlayState::Processing);
-        assert_eq!(sm.mode(), ProcessMode::Correct);
+        assert_eq!(sm.mode(), ProcessMode::Rephrase);
         assert!(effects.contains(&UiEffect::SendCancel));
 
         let new_rid = last_request_id(&effects);
@@ -592,10 +691,10 @@ mod tests {
             request_id: rid,
         });
 
-        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Correct));
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Rephrase));
 
         assert_eq!(*sm.state(), OverlayState::Processing);
-        assert!(effects.iter().any(|e| matches!(e, UiEffect::SendProcess { mode: ProcessMode::Correct, .. })));
+        assert!(effects.iter().any(|e| matches!(e, UiEffect::SendProcess { mode: ProcessMode::Rephrase, .. })));
         assert!(effects.contains(&UiEffect::ResetAreas));
         // Should NOT contain SendCancel (no in-flight request from Result state).
         assert!(!effects.contains(&UiEffect::SendCancel));
@@ -615,10 +714,10 @@ mod tests {
     fn switch_mode_from_hidden_changes_mode_only() {
         let mut sm = new_sm();
 
-        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Correct));
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Rephrase));
 
         assert_eq!(*sm.state(), OverlayState::Hidden);
-        assert_eq!(sm.mode(), ProcessMode::Correct);
+        assert_eq!(sm.mode(), ProcessMode::Rephrase);
         assert!(effects.is_empty());
     }
 
@@ -729,7 +828,7 @@ mod tests {
         let mut sm = new_sm();
         start_processing(&mut sm, "hello");
 
-        sm.handle(UiEvent::UserSwitchMode(ProcessMode::Correct));
+        sm.handle(UiEvent::UserSwitchMode(ProcessMode::Rephrase));
 
         assert_eq!(sm.original_text(), Some("hello"));
     }
@@ -823,7 +922,7 @@ mod tests {
         assert!(sm.original_text().is_some());
 
         // Result -> Processing (mode switch)
-        sm.handle(UiEvent::UserSwitchMode(ProcessMode::Correct));
+        sm.handle(UiEvent::UserSwitchMode(ProcessMode::Rephrase));
         let rid2 = sm.current_request_id();
         assert!(sm.original_text().is_some());
 
@@ -892,7 +991,7 @@ mod tests {
             request_id: rid,
         });
         // Switch to Correct → Result
-        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Correct));
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Rephrase));
         let rid = last_request_id(&effects);
         sm.handle(UiEvent::WorkerResult {
             text: "corrected".into(),
@@ -922,7 +1021,7 @@ mod tests {
             request_id: rid,
         });
         // Switch to Correct → Processing (in-flight)
-        sm.handle(UiEvent::UserSwitchMode(ProcessMode::Correct));
+        sm.handle(UiEvent::UserSwitchMode(ProcessMode::Rephrase));
         assert_eq!(*sm.state(), OverlayState::Processing);
 
         // Switch back to Translate while Correct is still processing: cache hit
@@ -945,7 +1044,7 @@ mod tests {
             request_id: rid,
         });
         // Switch to Correct → Error
-        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Correct));
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Rephrase));
         let rid = last_request_id(&effects);
         sm.handle(UiEvent::WorkerError {
             message: "fail".into(),
@@ -1072,7 +1171,7 @@ mod tests {
         let rid = last_request_id(&effects);
 
         sm.handle(UiEvent::StreamDelta { text: "partial".into(), request_id: rid });
-        sm.handle(UiEvent::UserSwitchMode(ProcessMode::Correct));
+        sm.handle(UiEvent::UserSwitchMode(ProcessMode::Rephrase));
 
         assert_eq!(sm.streaming_text(), "");
     }
@@ -1178,7 +1277,7 @@ mod tests {
 
         // User switches mode from Error — should NOT transition to Processing
         // since there is no content to reprocess.
-        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Correct));
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Rephrase));
         assert!(effects.is_empty());
         // State stays Error, not Processing.
         assert_eq!(*sm.state(), OverlayState::Error("timeout".into()));

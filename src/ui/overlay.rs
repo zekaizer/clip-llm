@@ -1,7 +1,7 @@
 use eframe::egui;
 
 use super::state_machine::OverlayState;
-use crate::ProcessMode;
+use crate::{ProcessMode, RephraseLength, RephraseParams, RephraseStyle};
 
 const OVERLAY_WIDTH: f32 = 480.0;
 const MAX_RESULT_HEIGHT: f32 = 260.0;
@@ -24,6 +24,8 @@ pub enum OverlayAction {
     StartDrag,
     SwitchMode(ProcessMode),
     ToggleThink,
+    ChangeRephraseStyle(RephraseStyle),
+    ChangeRephraseLength(RephraseLength),
 }
 
 pub struct OverlayOutput {
@@ -41,6 +43,7 @@ pub fn render(
     mode: ProcessMode,
     streaming: StreamingState<'_>,
     available_modes: &[ProcessMode],
+    rephrase_params: RephraseParams,
     ctx: &egui::Context,
 ) -> OverlayOutput {
     if matches!(state, OverlayState::Hidden) {
@@ -91,7 +94,13 @@ pub fn render(
 
                 render_tab_bar(ui, mode, available_modes, &mut action);
 
-                // Separator between tab bar and content.
+                // Rephrase parameter rows (style + length), shown when Rephrase is active.
+                if mode == ProcessMode::Rephrase && !matches!(state, OverlayState::Hidden) {
+                    ui.add_space(4.0);
+                    render_rephrase_params(ui, rephrase_params, &mut action);
+                }
+
+                // Separator between tab bar / params and content.
                 ui.add_space(4.0);
                 ui.add(egui::Separator::default().spacing(4.0));
                 ui.add_space(4.0);
@@ -278,6 +287,69 @@ fn render_result(
         ui.add_space(4.0);
     }
     render_scrollable_text(ui, ("result", mode), text, MAX_RESULT_HEIGHT, false);
+}
+
+fn render_param_pills<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    label: &str,
+    all: &[T],
+    current: T,
+    get_label: impl Fn(T) -> &'static str,
+    make_action: impl Fn(T) -> OverlayAction,
+    action: &mut OverlayAction,
+) {
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(label)
+                .color(egui::Color32::from_gray(140))
+                .size(12.0),
+        );
+        for &item in all {
+            let is_selected = item == current;
+            let text = egui::RichText::new(get_label(item))
+                .size(12.0)
+                .color(if is_selected {
+                    egui::Color32::WHITE
+                } else {
+                    egui::Color32::from_gray(100)
+                });
+            let button = egui::Button::new(text)
+                .fill(if is_selected {
+                    egui::Color32::from_rgba_unmultiplied(60, 60, 60, 200)
+                } else {
+                    egui::Color32::TRANSPARENT
+                })
+                .corner_radius(6.0);
+            if ui.add(button).clicked() && !is_selected {
+                *action = make_action(item);
+            }
+        }
+    });
+}
+
+fn render_rephrase_params(
+    ui: &mut egui::Ui,
+    params: RephraseParams,
+    action: &mut OverlayAction,
+) {
+    render_param_pills(
+        ui,
+        "Style",
+        RephraseStyle::ALL,
+        params.style,
+        |s| s.label(),
+        OverlayAction::ChangeRephraseStyle,
+        action,
+    );
+    render_param_pills(
+        ui,
+        "Length",
+        RephraseLength::ALL,
+        params.length,
+        |l| l.label(),
+        OverlayAction::ChangeRephraseLength,
+        action,
+    );
 }
 
 fn render_tab_bar(

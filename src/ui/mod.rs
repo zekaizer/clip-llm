@@ -107,6 +107,7 @@ impl OverlayApp {
                 UiEffect::SendProcess {
                     content,
                     mode,
+                    rephrase_params,
                     request_id,
                 } => {
                     let text_len = content.text.as_ref().map_or(0, |t| t.len());
@@ -115,6 +116,7 @@ impl OverlayApp {
                     let _ = self.cmd_tx.send(WorkerCommand::Process {
                         content,
                         mode,
+                        rephrase_params,
                         request_id,
                     });
                 }
@@ -362,6 +364,12 @@ impl OverlayApp {
                 self.think_expanded = !self.think_expanded;
                 return;
             }
+            overlay::OverlayAction::ChangeRephraseStyle(style) => {
+                UiEvent::UserChangeRephraseStyle(style)
+            }
+            overlay::OverlayAction::ChangeRephraseLength(length) => {
+                UiEvent::UserChangeRephraseLength(length)
+            }
         };
         let effects = self.sm.handle(event);
         self.execute_effects(effects, ctx);
@@ -407,6 +415,7 @@ impl eframe::App for OverlayApp {
                 think_expanded: self.think_expanded,
             },
             self.sm.available_modes(),
+            self.sm.rephrase_params(),
             ctx,
         );
 

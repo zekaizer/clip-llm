@@ -18,6 +18,87 @@ use thiserror::Error;
 pub const PRIMARY_LANG: &str = "Korean";
 pub const SECONDARY_LANG: &str = "English";
 
+// -- Rephrase parameters --
+
+/// Style axis for Rephrase mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum RephraseStyle {
+    /// Fix errors only, preserve original tone and style exactly.
+    #[default]
+    Correct,
+    /// Friendly, conversational tone.
+    Casual,
+    /// Polite, formal register.
+    Formal,
+    /// Concise professional business tone.
+    Business,
+    /// Precise technical/engineering terminology.
+    Technical,
+}
+
+impl RephraseStyle {
+    pub const ALL: &[Self] = &[
+        Self::Correct,
+        Self::Casual,
+        Self::Formal,
+        Self::Business,
+        Self::Technical,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Correct => "Correct",
+            Self::Casual => "Casual",
+            Self::Formal => "Formal",
+            Self::Business => "Business",
+            Self::Technical => "Technical",
+        }
+    }
+}
+
+/// Length axis for Rephrase mode (5 discrete levels).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum RephraseLength {
+    /// ~40% of original — essential points only.
+    Terse,
+    /// ~70% of original — remove redundancy.
+    Brief,
+    /// Keep original length.
+    #[default]
+    Same,
+    /// ~150% of original — additional context or detail.
+    Detailed,
+    /// ~200% of original — thorough explanation.
+    Full,
+}
+
+impl RephraseLength {
+    pub const ALL: &[Self] = &[
+        Self::Terse,
+        Self::Brief,
+        Self::Same,
+        Self::Detailed,
+        Self::Full,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Terse => "Terse",
+            Self::Brief => "Brief",
+            Self::Same => "Same",
+            Self::Detailed => "Detailed",
+            Self::Full => "Full",
+        }
+    }
+}
+
+/// Bundled rephrase parameters — passed as a single argument instead of (style, length) pairs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct RephraseParams {
+    pub style: RephraseStyle,
+    pub length: RephraseLength,
+}
+
 // -- Process mode --
 
 /// Available processing modes for the LLM pipeline.
@@ -26,7 +107,7 @@ pub const SECONDARY_LANG: &str = "English";
 pub enum ProcessMode {
     #[default]
     Translate,
-    Correct,
+    Rephrase,
     Summarize,
 }
 
@@ -34,14 +115,14 @@ impl ProcessMode {
     /// All modes in tab bar display order.
     pub const ALL: &[ProcessMode] = &[
         ProcessMode::Translate,
-        ProcessMode::Correct,
+        ProcessMode::Rephrase,
         ProcessMode::Summarize,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Translate => "Translate",
-            Self::Correct => "Correct",
+            Self::Rephrase => "Rephrase",
             Self::Summarize => "Summarize",
         }
     }
@@ -49,12 +130,21 @@ impl ProcessMode {
     pub fn processing_label(self) -> &'static str {
         match self {
             Self::Translate => "Translating...",
-            Self::Correct => "Correcting...",
+            Self::Rephrase => "Rephrasing...",
             Self::Summarize => "Summarizing...",
         }
     }
 
-    pub fn system_prompt(self) -> String {
+    /// Returns the processing label, using style-aware label for Rephrase mode.
+    pub fn processing_label_rephrase(self, params: RephraseParams) -> &'static str {
+        if self == Self::Rephrase && params.style == RephraseStyle::Correct {
+            "Correcting..."
+        } else {
+            self.processing_label()
+        }
+    }
+
+    pub fn system_prompt(self, params: RephraseParams) -> String {
         match self {
             Self::Translate => format!(
                 "You are a {PRIMARY_LANG}↔{SECONDARY_LANG} translator for software engineering text. \
@@ -67,14 +157,38 @@ impl ProcessMode {
                  - If the input is plain text: translate naturally while keeping the general structure. \
                  - Output the translation only — no preamble, labels, explanations, or markdown formatting."
             ),
-            Self::Correct => "\
-You are a proofreader for software engineering text. \
-Auto-detect the input language and correct it in the same language. \
-Fix grammar, spelling, punctuation, and awkward phrasing to improve naturalness while preserving the original meaning and tone. \
-Rules: \
-- If the input contains code: preserve all whitespace, indentation, and structure exactly. Never dedent or normalize. Do not modify code, variable names, or identifiers — only correct comments and string literals. \
-- If the input is plain text: correct naturally while keeping the general structure. \
-- Output the corrected text only — no preamble, labels, explanations, or markdown formatting.".to_owned(),
+            Self::Rephrase => {
+                let style_modifier = match params.style {
+                    RephraseStyle::Correct =>
+                        "Fix grammar, spelling, and punctuation. Preserve original tone and style exactly.",
+                    RephraseStyle::Casual =>
+                        "Rewrite in a friendly, conversational tone. Fix any errors.",
+                    RephraseStyle::Formal =>
+                        "Rewrite in a polite, formal register. Fix any errors.",
+                    RephraseStyle::Business =>
+                        "Rewrite in a concise, professional business tone. Fix any errors.",
+                    RephraseStyle::Technical =>
+                        "Rewrite using precise technical/engineering terminology naturally. Fix any errors.",
+                };
+                let length_modifier = match params.length {
+                    RephraseLength::Terse =>
+                        " Target output length: 40% of input. Cut aggressively — keep only the single core point per sentence. Do not pad.",
+                    RephraseLength::Brief =>
+                        " Target output length: 70% of input. Remove all redundancy and filler. Do not pad.",
+                    RephraseLength::Same => "",
+                    RephraseLength::Detailed =>
+                        " Target output length: 150% of input. Do not exceed 160%. Add only concrete context — no padding or filler.",
+                    RephraseLength::Full =>
+                        " Target output length: 200% of input. Do not exceed 220%. Add substantive detail only — no padding or repetition.",
+                };
+                format!(
+                    "You are a proofreader/rewriter for software engineering text. \
+                     Auto-detect the input language and output in the same language. \
+                     Preserve all code, variable names, and identifiers unchanged. \
+                     {style_modifier}{length_modifier} \
+                     Output the result only — no preamble, labels, or markdown."
+                )
+            }
             Self::Summarize => format!(
                 "You are a text summarizer for software engineering content. \
                  Produce a concise summary in {PRIMARY_LANG} that captures the key points \
@@ -96,19 +210,11 @@ Rules: \
                  \n\
                  ## Background / Context\n\
                  \n\
-                 ## Conclusion / Judgment\n\
+                 ## Conclusion\n\
                  \n\
                  ## Open Issues\n\
                  \n\
-                 ## Action Items\n\
-                 \n\
-                 ## Change History\n\
-                 \n\
-                 ## Stakeholders\n\
-                 \n\
-                 ## Related Documents\n\
-                 \n\
-                 ## References"
+                 ## Action Items"
             ),
         }
     }
