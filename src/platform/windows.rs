@@ -8,7 +8,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_C, VK_CONTROL,
     VK_SHIFT,
 };
-use windows_sys::Win32::Foundation::POINT;
+use windows_sys::Win32::Foundation::{HWND, POINT};
 use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
 use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
@@ -69,8 +69,7 @@ impl Platform for WindowsPlatform {
         }
         // GetCursorPos returns physical pixels in DPI-aware processes.
         // Convert to logical points for egui OuterPosition.
-        let dpi = unsafe { GetDpiForSystem() } as f64;
-        let scale = dpi / 96.0;
+        let scale = system_dpi_scale();
         Some((pt.x as f64 / scale, pt.y as f64 / scale))
     }
 
@@ -78,8 +77,7 @@ impl Platform for WindowsPlatform {
         use windows_sys::Win32::Graphics::Gdi::{
             GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
         };
-        let dpi = unsafe { GetDpiForSystem() } as f64;
-        let scale = dpi / 96.0;
+        let scale = system_dpi_scale();
         // Convert logical points to physical pixels for MonitorFromPoint.
         let pt = POINT {
             x: (x * scale) as i32,
@@ -105,6 +103,20 @@ impl Platform for WindowsPlatform {
     }
 }
 
+/// Find the clip-llm window handle. Returns `None` when the window does not exist yet.
+fn find_clip_llm_hwnd() -> Option<HWND> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
+    let title: Vec<u16> = "clip-llm\0".encode_utf16().collect();
+    let hwnd = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
+    if hwnd.is_null() { None } else { Some(hwnd) }
+}
+
+/// DPI scale factor derived from the system primary DPI setting (physical pixels / logical points).
+fn system_dpi_scale() -> f64 {
+    let dpi = unsafe { GetDpiForSystem() } as f64;
+    dpi / 96.0
+}
+
 /// Show the clip-llm window without activating or stealing focus.
 ///
 /// Uses `SW_SHOWNA` so WM_PAINT is delivered (hidden windows don't receive it),
@@ -115,12 +127,10 @@ impl Platform for WindowsPlatform {
 pub fn show_no_activate() {
     use windows_sys::Win32::Foundation::RECT;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, GetWindowRect, SetWindowPos, ShowWindowAsync, HWND_TOP, SW_SHOWNA,
+        GetWindowRect, SetWindowPos, ShowWindowAsync, HWND_TOP, SW_SHOWNA,
         SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
     };
-    let title: Vec<u16> = "clip-llm\0".encode_utf16().collect();
-    let hwnd = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
-    if !hwnd.is_null() {
+    if let Some(hwnd) = find_clip_llm_hwnd() {
         unsafe {
             // Center window on cursor before showing to prevent flash.
             // Both GetCursorPos and GetWindowRect return physical pixels,
@@ -155,16 +165,13 @@ pub fn show_no_activate() {
 /// Called from `show_window()` in the UI after clipboard content is ready.
 pub fn show_and_focus_window(position: Option<(f32, f32)>) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, SetForegroundWindow, SetWindowPos, ShowWindowAsync, HWND_TOP, SW_SHOW,
+        SetForegroundWindow, SetWindowPos, ShowWindowAsync, HWND_TOP, SW_SHOW,
         SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
     };
-    let title: Vec<u16> = "clip-llm\0".encode_utf16().collect();
-    let hwnd = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
-    if !hwnd.is_null() {
+    if let Some(hwnd) = find_clip_llm_hwnd() {
         unsafe {
             if let Some((x, y)) = position {
-                let dpi = GetDpiForSystem() as f64;
-                let scale = dpi / 96.0;
+                let scale = system_dpi_scale();
                 SetWindowPos(
                     hwnd,
                     HWND_TOP,
@@ -192,13 +199,10 @@ pub fn show_and_focus_window(position: Option<(f32, f32)>) {
 /// different DPI (e.g. primary 100% + secondary 150%).
 pub fn set_window_position(x: f32, y: f32) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, SetWindowPos, HWND_TOP, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+        SetWindowPos, HWND_TOP, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
     };
-    let title: Vec<u16> = "clip-llm\0".encode_utf16().collect();
-    let hwnd = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
-    if !hwnd.is_null() {
-        let dpi = unsafe { GetDpiForSystem() } as f64;
-        let scale = dpi / 96.0;
+    if let Some(hwnd) = find_clip_llm_hwnd() {
+        let scale = system_dpi_scale();
         unsafe {
             SetWindowPos(
                 hwnd,
@@ -221,11 +225,9 @@ pub fn set_window_position(x: f32, y: f32) {
 /// keeping `ControlFlow::Wait` (zero CPU).
 pub fn move_window_offscreen() {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, SetWindowPos, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+        SetWindowPos, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
     };
-    let title: Vec<u16> = "clip-llm\0".encode_utf16().collect();
-    let hwnd = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
-    if !hwnd.is_null() {
+    if let Some(hwnd) = find_clip_llm_hwnd() {
         unsafe {
             SetWindowPos(
                 hwnd,

@@ -2,12 +2,10 @@ mod overlay;
 pub mod state_machine;
 
 use std::sync::mpsc;
-use std::time::Duration;
-
 use tokio::sync::mpsc as tokio_mpsc;
 
 use eframe::egui;
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 use crate::clipboard::ClipboardManager;
 use crate::hotkey::{TapAction, TapEvent};
@@ -18,6 +16,7 @@ pub use state_machine::OverlayState;
 use state_machine::{StateMachine, UiEffect, UiEvent};
 
 /// Polling interval for diagnostics scenario runner.
+#[cfg(feature = "diagnostics")]
 const IDLE_POLL_MS: u64 = 100;
 
 pub struct OverlayApp {
@@ -126,8 +125,8 @@ impl OverlayApp {
                     if let Err(e) = self.clipboard.write_text(&text) {
                         error!("clipboard write failed: {e}");
                         let err_effects =
-                            self.sm.handle(UiEvent::ClipboardWriteError(e.to_string()));
-                        // ClipboardWriteError never emits WriteClipboard — recursion safe.
+                            self.sm.handle(UiEvent::ClipboardError(e.to_string()));
+                        // ClipboardError never emits WriteClipboard — recursion safe.
                         self.execute_effects(err_effects, ctx);
                     } else {
                         info!(
@@ -177,7 +176,7 @@ impl OverlayApp {
                     info!("single-tap triggered, using clipboard content...");
                     let event = match self.clipboard.read_content() {
                         Ok(content) => UiEvent::ContentReady(content),
-                        Err(e) => UiEvent::ClipboardWriteError(e.to_string()),
+                        Err(e) => UiEvent::ClipboardError(e.to_string()),
                     };
                     let effects = self.sm.handle(event);
                     self.execute_effects(effects, ctx);
@@ -186,7 +185,7 @@ impl OverlayApp {
                     info!("double-tap triggered, copying selection...");
                     let event = match self.clipboard.copy_and_read(&self.platform) {
                         Ok(content) => UiEvent::ContentReady(content),
-                        Err(e) => UiEvent::ClipboardWriteError(e.to_string()),
+                        Err(e) => UiEvent::ClipboardError(e.to_string()),
                     };
                     let effects = self.sm.handle(event);
                     self.execute_effects(effects, ctx);
@@ -359,34 +358,63 @@ impl OverlayApp {
         #[cfg(not(target_os = "windows"))]
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
     }
+
+    // -- update() helpers --
+
+    /// Hide the window on the very first frame so the overlay is not visible at startup.
+    fn maybe_initial_hide(&mut self, ctx: &egui::Context) {
+        if !self.initial_hide_done {
+            self.initial_hide_done = true;
+            self.hide_window(ctx);
+        }
+    }
+
+    /// Resize the viewport when the desired content size changes, then reposition.
+    fn update_viewport(&mut self, ctx: &egui::Context, desired: Option<egui::Vec2>) {
+        let Some(size) = desired else { return };
+        if self.last_desired_size != Some(size) {
+            self.last_desired_size = Some(size);
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        }
+        if !matches!(self.sm.state(), OverlayState::Hidden) {
+            self.reposition_window(ctx, size);
+        }
+    }
+
+    /// Translate the overlay action returned by `render()` into state machine events.
+    fn handle_overlay_action(&mut self, ctx: &egui::Context, action: overlay::OverlayAction) {
+        let event = match action {
+            overlay::OverlayAction::None => return,
+            overlay::OverlayAction::Close => UiEvent::UserClose,
+            overlay::OverlayAction::Cancel => UiEvent::UserCancel,
+            overlay::OverlayAction::StartDrag => UiEvent::UserStartDrag,
+            overlay::OverlayAction::SwitchMode(mode) => UiEvent::UserSwitchMode(mode),
+            overlay::OverlayAction::ToggleThink => {
+                self.think_expanded = !self.think_expanded;
+                return;
+            }
+        };
+        let effects = self.sm.handle(event);
+        self.execute_effects(effects, ctx);
+    }
+
+    /// Request repaints: every frame while Processing (spinner), idle poll in diagnostics mode.
+    fn schedule_repaint(&self, ctx: &egui::Context) {
+        if matches!(self.sm.state(), OverlayState::Processing) {
+            ctx.request_repaint();
+        } else {
+            #[cfg(feature = "diagnostics")]
+            ctx.request_repaint_after(std::time::Duration::from_millis(IDLE_POLL_MS));
+        }
+    }
 }
 
 impl eframe::App for OverlayApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Ensure window is hidden at startup.
-        if !self.initial_hide_done && matches!(self.sm.state(), OverlayState::Hidden) {
-            debug!("update() first call — hiding window");
-            // On Windows, flip winit to visible=true while keeping window off-screen.
-            // Builder's with_visible(false) sets winit visible=false → ControlFlow::Poll.
-            // Visible(true) + off-screen avoids the CPU spin bug (egui#5229).
-            #[cfg(target_os = "windows")]
-            {
-                crate::platform::windows::move_window_offscreen();
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            }
-            // On macOS, with_visible(false) doesn't fully suppress the window.
-            #[cfg(not(target_os = "windows"))]
-            self.hide_window(ctx);
-            self.initial_hide_done = true;
-        }
+        self.maybe_initial_hide(ctx);
 
-        // Process worker responses.
         self.poll_responses(ctx);
-
-        // Process tap actions from coordinator thread.
         self.poll_tap_actions(ctx);
-
-        // Diagnostics: process scenario actions from runner thread.
         #[cfg(feature = "diagnostics")]
         self.poll_diag_actions(ctx);
 
@@ -400,56 +428,21 @@ impl eframe::App for OverlayApp {
             }
         });
 
-        // Render overlay.
         let output = overlay::render(
             self.sm.state(),
             self.sm.mode(),
-            self.sm.streaming_text(),
+            overlay::StreamingState {
+                text: self.sm.streaming_text(),
+                think_started: self.sm.think_started(),
+                think_content: self.sm.think_content(),
+                think_expanded: self.think_expanded,
+            },
             self.sm.available_modes(),
-            self.sm.think_started(),
-            self.sm.think_content(),
-            self.think_expanded,
             ctx,
         );
 
-        // Resize viewport to fit rendered content (only when size changes).
-        if let Some(desired) = output.desired_size {
-            let size_changed = self.last_desired_size != Some(desired);
-            if size_changed {
-                self.last_desired_size = Some(desired);
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(desired));
-            }
-
-            if size_changed
-                && !matches!(self.sm.state(), OverlayState::Hidden)
-                && !self.sm.user_repositioned()
-            {
-                self.reposition_window(ctx, desired);
-            }
-        }
-        // When desired_size is None (Hidden state), preserve last_desired_size
-        // so show_window() can use it as a pre-positioning hint.
-
-        // Handle overlay UI actions.
-        let event = match output.action {
-            overlay::OverlayAction::Close => Some(UiEvent::UserClose),
-            overlay::OverlayAction::Cancel => Some(UiEvent::UserCancel),
-            overlay::OverlayAction::SwitchMode(m) => Some(UiEvent::UserSwitchMode(m)),
-            overlay::OverlayAction::StartDrag => {
-                self.sm.set_user_repositioned();
-                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                None
-            }
-            overlay::OverlayAction::ToggleThink => {
-                self.think_expanded = !self.think_expanded;
-                None
-            }
-            overlay::OverlayAction::None => None,
-        };
-        if let Some(ev) = event {
-            let effects = self.sm.handle(ev);
-            self.execute_effects(effects, ctx);
-        }
+        self.update_viewport(ctx, output.desired_size);
+        self.handle_overlay_action(ctx, output.action);
 
         // Diagnostics: record frame data + flush stale screenshots.
         #[cfg(feature = "diagnostics")]
@@ -471,40 +464,13 @@ impl eframe::App for OverlayApp {
             self.diag.flush_pending_if_stale();
         }
 
-        // Poll system tray "Quit" menu event.
         crate::platform::poll_tray_quit(ctx);
 
         // Focus-loss auto-hide (skip during diagnostics).
-        #[cfg(feature = "diagnostics")]
-        let skip_focus_check = true;
         #[cfg(not(feature = "diagnostics"))]
-        let skip_focus_check = false;
+        self.check_focus_lost(ctx);
 
-        if !skip_focus_check {
-            self.check_focus_lost(ctx);
-        }
-
-        // Schedule next repaint.
-        // DiagCollector needs periodic tick_screenshot() and flush_pending_if_stale()
-        // calls when pending screenshots exist (visible states after transition).
-        // When hidden, update() stops (no WM_PAINT on Windows) — no tick needed.
-        #[cfg(feature = "diagnostics")]
-        let force_poll = true;
-        #[cfg(not(feature = "diagnostics"))]
-        let force_poll = false;
-
-        match self.sm.state() {
-            OverlayState::Processing => {
-                ctx.request_repaint(); // spinner animation + streaming updates
-            }
-            _ => {
-                // Hotkey polling is handled by coordinator thread — UI is event-driven only.
-                // Diagnostics: DiagCollector needs periodic repaints for screenshot capture.
-                if force_poll {
-                    ctx.request_repaint_after(Duration::from_millis(IDLE_POLL_MS));
-                }
-            }
-        }
+        self.schedule_repaint(ctx);
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {

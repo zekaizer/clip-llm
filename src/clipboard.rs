@@ -38,6 +38,24 @@ impl ClipboardContent {
     }
 }
 
+/// Read the current image from the clipboard and encode it as PNG.
+/// Returns an empty vec if no image is present; propagates encoding errors.
+fn read_image_from_board(board: &mut Clipboard) -> Result<Vec<Arc<Vec<u8>>>, ClipboardError> {
+    match board.get_image() {
+        Ok(img) => {
+            let png = rgba_to_png(img.bytes.as_ref(), img.width as u32, img.height as u32)?;
+            info!(
+                "read clipboard image ({}x{}, {} bytes PNG)",
+                img.width,
+                img.height,
+                png.len()
+            );
+            Ok(vec![Arc::new(png)])
+        }
+        Err(_) => Ok(vec![]),
+    }
+}
+
 /// Encode raw RGBA pixel data to PNG.
 fn rgba_to_png(bytes: &[u8], width: u32, height: u32) -> Result<Vec<u8>, ClipboardError> {
     let mut out = Vec::new();
@@ -103,17 +121,7 @@ impl ClipboardManager {
 
             if text.is_some() || has_image {
                 // Pasteboard is populated atomically — read both types now.
-                let images = match self.board.get_image() {
-                    Ok(img) => {
-                        let png = rgba_to_png(
-                            img.bytes.as_ref(),
-                            img.width as u32,
-                            img.height as u32,
-                        )?;
-                        vec![Arc::new(png)]
-                    }
-                    Err(_) => vec![],
-                };
+                let images = read_image_from_board(&mut self.board)?;
 
                 let content = ClipboardContent { text, images };
                 let elapsed = start.elapsed().as_millis();
@@ -139,18 +147,7 @@ impl ClipboardManager {
     pub fn read_content(&mut self) -> Result<ClipboardContent, ClipboardError> {
         let text = self.board.get_text().ok().filter(|s| !s.trim().is_empty());
 
-        let images = match self.board.get_image() {
-            Ok(img) => {
-                let png = rgba_to_png(
-                    img.bytes.as_ref(),
-                    img.width as u32,
-                    img.height as u32,
-                )?;
-                info!("read clipboard image ({}x{}, {} bytes PNG)", img.width, img.height, png.len());
-                vec![Arc::new(png)]
-            }
-            Err(_) => vec![],
-        };
+        let images = read_image_from_board(&mut self.board)?;
 
         let content = ClipboardContent { text, images };
         if content.is_empty() {

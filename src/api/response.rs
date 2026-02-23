@@ -2,9 +2,6 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-static THINK_BLOCK_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?s)<think>.*?</think>").unwrap());
-
 static THINK_CAPTURE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?s)<think>(.*?)</think>").unwrap());
 
@@ -21,7 +18,7 @@ pub fn extract_first_think_content(text: &str) -> Option<String> {
 /// Only trims leading newlines (from think-block removal) and trailing whitespace,
 /// preserving leading indentation on the first content line.
 pub fn strip_think_blocks(text: &str) -> String {
-    THINK_BLOCK_RE
+    THINK_CAPTURE_RE
         .replace_all(text, "")
         .trim_end()
         .trim_start_matches(['\n', '\r'])

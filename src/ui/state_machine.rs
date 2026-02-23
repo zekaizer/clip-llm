@@ -62,8 +62,8 @@ pub enum UiEvent {
     FocusLost,
     /// Streaming token from the worker (incremental response).
     StreamDelta { text: String, request_id: u64 },
-    /// Clipboard write failed (feedback from effect execution).
-    ClipboardWriteError(String),
+    /// Clipboard operation failed (read or write).
+    ClipboardError(String),
 }
 
 /// Side effects that the adapter must execute after a state transition.
@@ -222,7 +222,7 @@ impl StateMachine {
                 self.on_stream_delta(text, request_id)
             }
             UiEvent::FocusLost => self.on_focus_lost(),
-            UiEvent::ClipboardWriteError(msg) => self.on_clipboard_write_error(msg),
+            UiEvent::ClipboardError(msg) => self.on_clipboard_error(msg),
         };
 
         self.check_invariants();
@@ -319,10 +319,8 @@ impl StateMachine {
         vec![UiEffect::ResetAreas, UiEffect::ShowWindow]
     }
 
-    fn on_close(&mut self) -> Vec<UiEffect> {
-        if matches!(self.state, OverlayState::Hidden) {
-            return vec![];
-        }
+    /// Resets all transient state and transitions to Hidden.
+    fn reset_to_hidden(&mut self) {
         self.state = OverlayState::Hidden;
         self.original_content = None;
         self.mode_cache.clear();
@@ -331,6 +329,13 @@ impl StateMachine {
         self.think_content = None;
         self.think_cache.clear();
         self.has_been_focused = false;
+    }
+
+    fn on_close(&mut self) -> Vec<UiEffect> {
+        if matches!(self.state, OverlayState::Hidden) {
+            return vec![];
+        }
+        self.reset_to_hidden();
         vec![UiEffect::HideWindow]
     }
 
@@ -338,14 +343,7 @@ impl StateMachine {
         if !matches!(self.state, OverlayState::Processing) {
             return vec![];
         }
-        self.state = OverlayState::Hidden;
-        self.original_content = None;
-        self.mode_cache.clear();
-        self.streaming_text.clear();
-        self.think_started = false;
-        self.think_content = None;
-        self.think_cache.clear();
-        self.has_been_focused = false;
+        self.reset_to_hidden();
         vec![UiEffect::SendCancel, UiEffect::HideWindow]
     }
 
@@ -367,13 +365,9 @@ impl StateMachine {
                     // Cache hit: cancel in-flight, return cached result.
                     self.streaming_text.clear();
                     self.think_started = false;
-                    self.think_content = self.think_cache.get(&new_mode).cloned().flatten();
-                    self.state = OverlayState::Result(cached.clone());
-                    vec![
-                        UiEffect::SendCancel,
-                        UiEffect::WriteClipboard(cached),
-                        UiEffect::ResetAreas,
-                    ]
+                    let mut effects = self.apply_cached_result(new_mode, cached);
+                    effects.insert(0, UiEffect::SendCancel);
+                    effects
                 } else if let Some(content) = self.original_content.clone() {
                     // Cache miss: cancel current, re-send with new mode.
                     self.streaming_text.clear();
@@ -397,12 +391,7 @@ impl StateMachine {
             OverlayState::Result(_) | OverlayState::Error(_) => {
                 if let Some(cached) = self.mode_cache.get(&new_mode).cloned() {
                     // Cache hit: return cached result directly.
-                    self.think_content = self.think_cache.get(&new_mode).cloned().flatten();
-                    self.state = OverlayState::Result(cached.clone());
-                    vec![
-                        UiEffect::WriteClipboard(cached),
-                        UiEffect::ResetAreas,
-                    ]
+                    self.apply_cached_result(new_mode, cached)
                 } else if let Some(content) = self.original_content.clone() {
                     // Cache miss: re-process with new mode.
                     self.think_started = false;
@@ -427,22 +416,23 @@ impl StateMachine {
         }
     }
 
+    /// Applies a cached result for `mode`: updates think_content and state,
+    /// returns [WriteClipboard, ResetAreas].
+    fn apply_cached_result(&mut self, mode: ProcessMode, cached: String) -> Vec<UiEffect> {
+        self.think_content = self.think_cache.get(&mode).cloned().flatten();
+        self.state = OverlayState::Result(cached.clone());
+        vec![UiEffect::WriteClipboard(cached), UiEffect::ResetAreas]
+    }
+
     fn on_focus_lost(&mut self) -> Vec<UiEffect> {
         if matches!(self.state, OverlayState::Hidden) || !self.has_been_focused {
             return vec![];
         }
-        self.state = OverlayState::Hidden;
-        self.original_content = None;
-        self.mode_cache.clear();
-        self.streaming_text.clear();
-        self.think_started = false;
-        self.think_content = None;
-        self.think_cache.clear();
-        self.has_been_focused = false;
+        self.reset_to_hidden();
         vec![UiEffect::HideWindow]
     }
 
-    fn on_clipboard_write_error(&mut self, msg: String) -> Vec<UiEffect> {
+    fn on_clipboard_error(&mut self, msg: String) -> Vec<UiEffect> {
         // Must NOT emit WriteClipboard to avoid infinite recursion.
         self.state = OverlayState::Error(msg);
         // Reset focus tracking so the newly shown error window doesn't
@@ -816,11 +806,11 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_write_error_transitions_to_error() {
+    fn clipboard_error_transitions_to_error() {
         let mut sm = new_sm();
         start_processing(&mut sm, "hello");
 
-        let effects = sm.handle(UiEvent::ClipboardWriteError("write failed".into()));
+        let effects = sm.handle(UiEvent::ClipboardError("write failed".into()));
 
         assert_eq!(*sm.state(), OverlayState::Error("write failed".into()));
         assert!(effects.contains(&UiEffect::ShowWindow));
@@ -1196,7 +1186,7 @@ mod tests {
         assert_eq!(*sm.state(), OverlayState::Hidden);
 
         // Clipboard read fails (e.g. copy_and_read timeout) → Error with no original_content.
-        let effects = sm.handle(UiEvent::ClipboardWriteError("timeout".into()));
+        let effects = sm.handle(UiEvent::ClipboardError("timeout".into()));
         assert_eq!(*sm.state(), OverlayState::Error("timeout".into()));
         assert!(effects.contains(&UiEffect::ShowWindow));
 
@@ -1220,7 +1210,7 @@ mod tests {
         assert_eq!(*sm.state(), OverlayState::Hidden);
 
         // Clipboard error shows error overlay.
-        sm.handle(UiEvent::ClipboardWriteError("read failed".into()));
+        sm.handle(UiEvent::ClipboardError("read failed".into()));
         assert_eq!(*sm.state(), OverlayState::Error("read failed".into()));
 
         // FocusLost should be ignored because has_been_focused was reset.

@@ -15,6 +15,14 @@ use crate::PlatformError;
 /// Virtual key code for 'C' on ANSI keyboards.
 const KEY_C: CGKeyCode = 0x08;
 
+// Typed function pointer aliases for `objc_msgSend` transmute casts.
+type MsgSendBool = unsafe extern "C" fn(*mut c_void, *mut c_void, bool);
+type MsgSendUlong = unsafe extern "C" fn(*mut c_void, *mut c_void, c_ulong);
+type MsgSendPoint = unsafe extern "C" fn(*mut c_void, *mut c_void, CGPoint);
+type MsgSendPtr = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void);
+type MsgSendRetI64 = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i64;
+type MsgSendRetBool = unsafe extern "C" fn(*mut c_void, *mut c_void) -> bool;
+
 /// Delay between key-down and key-up events (ms).
 const KEY_EVENT_DELAY_MS: u64 = 50;
 
@@ -61,10 +69,7 @@ unsafe fn get_app_window() -> *mut c_void {
 ///
 /// Returns true if successfully configured.
 pub fn configure_window_for_spaces() -> bool {
-    type MsgSendUlong = unsafe extern "C" fn(*mut c_void, *mut c_void, c_ulong);
     let msg_send_ulong: MsgSendUlong = unsafe { std::mem::transmute(objc_msgSend as *const ()) };
-
-    type MsgSendBool = unsafe extern "C" fn(*mut c_void, *mut c_void, bool);
     let msg_send_bool: MsgSendBool = unsafe { std::mem::transmute(objc_msgSend as *const ()) };
 
     unsafe {
@@ -100,7 +105,6 @@ pub fn configure_window_for_spaces() -> bool {
 /// For Accessory-policy apps, `activateIgnoringOtherApps:` is safe because
 /// Accessory apps have no "home Space" — macOS will not switch Spaces.
 pub fn show_and_focus_window(position: Option<(f32, f32)>) {
-    type MsgSendBool = unsafe extern "C" fn(*mut c_void, *mut c_void, bool);
     let msg_send_bool: MsgSendBool = unsafe { std::mem::transmute(objc_msgSend as *const ()) };
 
     unsafe {
@@ -114,7 +118,6 @@ pub fn show_and_focus_window(position: Option<(f32, f32)>) {
         if let Some((x, y)) = position {
             let screen_height = CGDisplayBounds(CGMainDisplayID()).size.height;
             let cocoa_point = CGPoint::new(x as f64, screen_height - y as f64);
-            type MsgSendPoint = unsafe extern "C" fn(*mut c_void, *mut c_void, CGPoint);
             let msg_send_point: MsgSendPoint = std::mem::transmute(objc_msgSend as *const ());
             msg_send_point(
                 window,
@@ -124,7 +127,6 @@ pub fn show_and_focus_window(position: Option<(f32, f32)>) {
         }
 
         let nil: *mut c_void = std::ptr::null_mut();
-        type MsgSendPtr = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void);
         let msg_send_ptr: MsgSendPtr = std::mem::transmute(objc_msgSend as *const ());
 
         // orderFront: shows the window without activating the app.
@@ -179,11 +181,8 @@ pub fn display_bounds_at_point(x: f64, y: f64) -> Option<(f64, f64, f64, f64)> {
 /// Outputs: activation policy, collection behavior bits, window level,
 /// visibility, and key/main status.
 pub fn log_window_diagnostics() {
-    type MsgSendI64 = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i64;
-    let msg_send_i64: MsgSendI64 = unsafe { std::mem::transmute(objc_msgSend as *const ()) };
-
-    type MsgSendBoolRet = unsafe extern "C" fn(*mut c_void, *mut c_void) -> bool;
-    let msg_send_bool: MsgSendBoolRet = unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+    let msg_send_i64: MsgSendRetI64 = unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+    let msg_send_bool: MsgSendRetBool = unsafe { std::mem::transmute(objc_msgSend as *const ()) };
 
     unsafe {
         let cls = objc_getClass(c"NSApplication".as_ptr());
