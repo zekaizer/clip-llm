@@ -101,6 +101,21 @@ impl Platform for WindowsPlatform {
             (rc.bottom - rc.top) as f64 / scale,
         ))
     }
+
+    fn show_window(&self, pos: Option<(f32, f32)>) -> bool {
+        show_and_focus_window(pos);
+        true // needs Visible(true) to sync winit state (ControlFlow::Wait, egui#5229)
+    }
+
+    fn hide_window(&self) -> bool {
+        move_window_offscreen();
+        true // handled natively; caller must NOT send Visible(false)
+    }
+
+    fn reposition_window(&self, x: f32, y: f32) -> bool {
+        set_window_position(x, y);
+        true // handled natively; caller must NOT send OuterPosition
+    }
 }
 
 /// Find the clip-llm window handle. Returns `None` when the window does not exist yet.

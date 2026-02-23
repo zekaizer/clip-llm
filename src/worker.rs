@@ -366,13 +366,14 @@ pub fn spawn_worker(
             .build()
             .expect("failed to create tokio runtime");
 
-        rt.block_on(async move {
-            let config = WorkerConfig {
-                streaming: std::env::var("CLIP_LLM_NO_STREAM").is_err(),
-                #[cfg(feature = "diagnostics")]
-                use_mock: std::env::var("DIAG_MOCK").is_ok(),
-            };
+        // Read env vars once at thread start — no async context needed.
+        let config = WorkerConfig {
+            streaming: std::env::var("CLIP_LLM_NO_STREAM").is_err(),
+            #[cfg(feature = "diagnostics")]
+            use_mock: std::env::var("DIAG_MOCK").is_ok(),
+        };
 
+        rt.block_on(async move {
             // Probe vision support eagerly so it doesn't delay the first user request.
             llm.probe_vision().await;
 

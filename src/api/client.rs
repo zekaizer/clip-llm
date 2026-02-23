@@ -80,26 +80,22 @@ pub(crate) struct ResponseMessage {
 
 // -- SSE streaming types (used by worker in streaming loop) --
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct StreamChunk {
     choices: Vec<StreamChoice>,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct StreamChoice {
     delta: Delta,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct Delta {
     content: Option<String>,
 }
 
 /// Parsed SSE event from a streaming response.
-#[allow(dead_code)]
 #[derive(Debug, PartialEq)]
 pub(crate) enum SseEvent {
     Content(String),
@@ -107,9 +103,11 @@ pub(crate) enum SseEvent {
 }
 
 /// Line-based SSE parser that buffers incomplete lines across chunks.
-#[allow(dead_code)]
 pub(crate) struct SseParser {
+    /// Accumulates complete UTF-8 text lines waiting for newline processing.
     buffer: String,
+    /// Carry-over bytes for incomplete multi-byte UTF-8 sequences at chunk boundaries.
+    tail: Vec<u8>,
 }
 
 impl Default for SseParser {
@@ -118,17 +116,40 @@ impl Default for SseParser {
     }
 }
 
-#[allow(dead_code)]
 impl SseParser {
     pub fn new() -> Self {
         Self {
             buffer: String::new(),
+            tail: Vec::new(),
         }
     }
 
     /// Feed raw bytes from `reqwest::Response::chunk()` and return parsed events.
+    ///
+    /// Uses a byte carry-over buffer to handle multi-byte UTF-8 sequences that span
+    /// chunk boundaries, avoiding the replacement-character corruption of `from_utf8_lossy`.
     pub fn feed(&mut self, chunk: &[u8]) -> Vec<SseEvent> {
-        self.buffer.push_str(&String::from_utf8_lossy(chunk));
+        // Prepend any incomplete UTF-8 tail from the previous call.
+        let data: std::borrow::Cow<[u8]> = if self.tail.is_empty() {
+            std::borrow::Cow::Borrowed(chunk)
+        } else {
+            let mut v = std::mem::take(&mut self.tail);
+            v.extend_from_slice(chunk);
+            std::borrow::Cow::Owned(v)
+        };
+
+        // Find the longest valid UTF-8 prefix and carry over the remainder.
+        let (valid, remainder) = match std::str::from_utf8(&data) {
+            Ok(s) => (s, &[][..]),
+            Err(e) => {
+                let valid_up_to = e.valid_up_to();
+                // Safety: valid_up_to is guaranteed to be a valid UTF-8 boundary.
+                let s = unsafe { std::str::from_utf8_unchecked(&data[..valid_up_to]) };
+                (s, &data[valid_up_to..])
+            }
+        };
+        self.tail.extend_from_slice(remainder);
+        self.buffer.push_str(valid);
 
         let mut events = Vec::new();
         while let Some(pos) = self.buffer.find('\n') {
@@ -322,6 +343,24 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert!(matches!(&events[0], SseEvent::Done));
         assert!(matches!(&events[1], SseEvent::Content(s) if s == "after"));
+    }
+
+    // Multi-byte UTF-8 sequence (e.g. CJK character, 3 bytes) split at a chunk boundary
+    // must not produce replacement characters — the incomplete bytes are carried over.
+    #[test]
+    fn sse_utf8_split_across_chunks() {
+        // "가" = 0xEA 0xB0 0x80 (3-byte UTF-8)
+        // Split after first byte, then after second byte.
+        let prefix = b"data: {\"choices\":[{\"delta\":{\"content\":\"\xEA";
+        let middle = b"\xB0";
+        let suffix = b"\x80\"}}]}\n";
+
+        let mut p = SseParser::new();
+        assert!(p.feed(prefix).is_empty());
+        assert!(p.feed(middle).is_empty());
+        let events = p.feed(suffix);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Content(s) if s == "가"));
     }
 
     // --- MessageContent serialization tests ---

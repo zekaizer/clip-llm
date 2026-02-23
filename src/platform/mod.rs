@@ -12,6 +12,19 @@ pub trait Platform {
     /// Get the display work area (logical points) of the monitor containing the given point.
     /// Returns (origin_x, origin_y, width, height). Work area excludes taskbar/dock.
     fn display_bounds_at_point(&self, x: f64, y: f64) -> Option<(f64, f64, f64, f64)>;
+
+    /// Show and focus the overlay window at an optional position.
+    /// Returns true if an egui `Visible(true)` viewport sync is also needed
+    /// (Windows winit workaround to maintain ControlFlow::Wait, egui#5229).
+    fn show_window(&self, pos: Option<(f32, f32)>) -> bool;
+
+    /// Hide the overlay window. Returns true if handled natively (caller must not send
+    /// `Visible(false)`); false means the caller should send `ViewportCommand::Visible(false)`.
+    fn hide_window(&self) -> bool;
+
+    /// Reposition the window using a direct native API call.
+    /// Returns true if handled natively (caller must not send `OuterPosition`).
+    fn reposition_window(&self, x: f32, y: f32) -> bool;
 }
 
 #[cfg(target_os = "macos")]

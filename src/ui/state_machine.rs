@@ -58,6 +58,8 @@ pub enum UiEvent {
     UserSwitchMode(ProcessMode),
     /// User started dragging the overlay.
     UserStartDrag,
+    /// Window gained focus.
+    FocusGained,
     /// Window lost focus (after having been focused at least once).
     FocusLost,
     /// Streaming token from the worker (incremental response).
@@ -100,16 +102,15 @@ pub struct StateMachine {
     user_repositioned: bool,
     /// True once the window has received focus after show_window.
     has_been_focused: bool,
-    /// Per-mode result cache, valid only for the current original content.
-    mode_cache: HashMap<ProcessMode, String>,
+    /// Per-mode result cache: maps mode → (text, think_content).
+    /// Valid only for the current original content.
+    cache: HashMap<ProcessMode, (String, Option<String>)>,
     /// Accumulated visible streaming text (displayed during Processing).
     streaming_text: String,
     /// True once a think block has started during the current streaming request.
     think_started: bool,
     /// Think block content for the current mode (set on WorkerResult).
     think_content: Option<String>,
-    /// Per-mode think content cache, mirroring mode_cache.
-    think_cache: HashMap<ProcessMode, Option<String>>,
 }
 
 impl StateMachine {
@@ -122,11 +123,10 @@ impl StateMachine {
             current_request_id: 0,
             user_repositioned: false,
             has_been_focused: false,
-            mode_cache: HashMap::new(),
+            cache: HashMap::new(),
             streaming_text: String::new(),
             think_started: false,
             think_content: None,
-            think_cache: HashMap::new(),
         }
     }
 
@@ -162,21 +162,6 @@ impl StateMachine {
 
     pub fn variant_name(&self) -> &'static str {
         self.state.variant_name()
-    }
-
-    /// Call when the adapter detects window focus gained.
-    pub fn set_focused(&mut self) {
-        self.has_been_focused = true;
-    }
-
-    /// Call when the user starts dragging the overlay.
-    pub fn set_user_repositioned(&mut self) {
-        self.user_repositioned = true;
-    }
-
-    /// Set the processing mode (used by diagnostics scenario injection).
-    pub fn set_mode(&mut self, mode: ProcessMode) {
-        self.mode = mode;
     }
 
     /// Modes available for the current content.
@@ -218,6 +203,10 @@ impl StateMachine {
                 self.user_repositioned = true;
                 vec![]
             }
+            UiEvent::FocusGained => {
+                self.has_been_focused = true;
+                vec![]
+            }
             UiEvent::StreamDelta { text, request_id } => {
                 self.on_stream_delta(text, request_id)
             }
@@ -240,11 +229,10 @@ impl StateMachine {
         }
 
         self.original_content = Some(content.clone());
-        self.mode_cache.clear();
+        self.cache.clear();
         self.streaming_text.clear();
         self.think_started = false;
         self.think_content = None;
-        self.think_cache.clear();
         self.next_request_id += 1;
         self.current_request_id = self.next_request_id;
         self.state = OverlayState::Processing;
@@ -298,8 +286,7 @@ impl StateMachine {
         self.streaming_text.clear();
         self.think_started = false;
         self.think_content = think_content.clone();
-        self.mode_cache.insert(self.mode, text.clone());
-        self.think_cache.insert(self.mode, think_content);
+        self.cache.insert(self.mode, (text.clone(), think_content));
         self.state = OverlayState::Result(text.clone());
         vec![
             UiEffect::WriteClipboard(text),
@@ -323,11 +310,10 @@ impl StateMachine {
     fn reset_to_hidden(&mut self) {
         self.state = OverlayState::Hidden;
         self.original_content = None;
-        self.mode_cache.clear();
+        self.cache.clear();
         self.streaming_text.clear();
         self.think_started = false;
         self.think_content = None;
-        self.think_cache.clear();
         self.has_been_focused = false;
     }
 
@@ -361,11 +347,11 @@ impl StateMachine {
 
         match &self.state {
             OverlayState::Processing => {
-                if let Some(cached) = self.mode_cache.get(&new_mode).cloned() {
+                if let Some((cached_text, cached_think)) = self.cache.get(&new_mode).cloned() {
                     // Cache hit: cancel in-flight, return cached result.
                     self.streaming_text.clear();
                     self.think_started = false;
-                    let mut effects = self.apply_cached_result(new_mode, cached);
+                    let mut effects = self.apply_cached_result(cached_text, cached_think);
                     effects.insert(0, UiEffect::SendCancel);
                     effects
                 } else if let Some(content) = self.original_content.clone() {
@@ -389,9 +375,9 @@ impl StateMachine {
                 }
             }
             OverlayState::Result(_) | OverlayState::Error(_) => {
-                if let Some(cached) = self.mode_cache.get(&new_mode).cloned() {
+                if let Some((cached_text, cached_think)) = self.cache.get(&new_mode).cloned() {
                     // Cache hit: return cached result directly.
-                    self.apply_cached_result(new_mode, cached)
+                    self.apply_cached_result(cached_text, cached_think)
                 } else if let Some(content) = self.original_content.clone() {
                     // Cache miss: re-process with new mode.
                     self.think_started = false;
@@ -416,12 +402,12 @@ impl StateMachine {
         }
     }
 
-    /// Applies a cached result for `mode`: updates think_content and state,
+    /// Applies a cached result: updates think_content and state,
     /// returns [WriteClipboard, ResetAreas].
-    fn apply_cached_result(&mut self, mode: ProcessMode, cached: String) -> Vec<UiEffect> {
-        self.think_content = self.think_cache.get(&mode).cloned().flatten();
-        self.state = OverlayState::Result(cached.clone());
-        vec![UiEffect::WriteClipboard(cached), UiEffect::ResetAreas]
+    fn apply_cached_result(&mut self, text: String, think_content: Option<String>) -> Vec<UiEffect> {
+        self.think_content = think_content;
+        self.state = OverlayState::Result(text.clone());
+        vec![UiEffect::WriteClipboard(text), UiEffect::ResetAreas]
     }
 
     fn on_focus_lost(&mut self) -> Vec<UiEffect> {
@@ -754,7 +740,7 @@ mod tests {
     fn focus_lost_hides_when_focused() {
         let mut sm = new_sm();
         start_processing(&mut sm, "hello");
-        sm.set_focused();
+        sm.handle(UiEvent::FocusGained);
 
         let effects = sm.handle(UiEvent::FocusLost);
 
@@ -777,7 +763,7 @@ mod tests {
     #[test]
     fn focus_lost_ignored_when_hidden() {
         let mut sm = new_sm();
-        sm.set_focused();
+        sm.handle(UiEvent::FocusGained);
 
         let effects = sm.handle(UiEvent::FocusLost);
 
@@ -1203,7 +1189,7 @@ mod tests {
         let mut sm = new_sm();
         // Simulate a previous session where focus was gained.
         start_processing(&mut sm, "hello");
-        sm.set_focused();
+        sm.handle(UiEvent::FocusGained);
 
         // Focus lost → Hidden.
         sm.handle(UiEvent::FocusLost);

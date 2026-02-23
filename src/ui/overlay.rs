@@ -110,13 +110,7 @@ pub fn render(
                             &mut action,
                         );
                     }
-                    OverlayState::Error(msg) => {
-                        ui.label(
-                            egui::RichText::new(format!("Error: {msg}"))
-                                .color(egui::Color32::from_rgb(255, 100, 100))
-                                .size(14.0),
-                        );
-                    }
+                    OverlayState::Error(msg) => render_error(ui, msg),
                     OverlayState::Hidden => unreachable!(),
                 }
             });
@@ -261,6 +255,14 @@ fn render_processing(
     if ui.add(cancel_btn).clicked() {
         *action = OverlayAction::Cancel;
     }
+}
+
+fn render_error(ui: &mut egui::Ui, message: &str) {
+    ui.label(
+        egui::RichText::new(format!("Error: {message}"))
+            .color(egui::Color32::from_rgb(255, 100, 100))
+            .size(14.0),
+    );
 }
 
 fn render_result(

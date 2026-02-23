@@ -202,7 +202,8 @@ impl OverlayApp {
         while let Ok(action) = self.diag_action_rx.try_recv() {
             match action {
                 crate::diagnostics::ScenarioAction::ShowOverlay { mode, text } => {
-                    self.sm.set_mode(mode);
+                    // Switch mode first (no-op effects in Hidden state) before ContentReady.
+                    self.sm.handle(UiEvent::UserSwitchMode(mode));
                     let effects = self.sm.handle(UiEvent::ContentReady(
                         crate::ClipboardContent::text_only(text),
                     ));
@@ -263,7 +264,7 @@ impl OverlayApp {
         }
         let focused = ctx.input(|i| i.viewport().focused);
         if focused == Some(true) {
-            self.sm.set_focused();
+            self.sm.handle(UiEvent::FocusGained);
         } else if focused == Some(false) {
             let effects = self.sm.handle(UiEvent::FocusLost);
             self.execute_effects(effects, ctx);
@@ -294,23 +295,16 @@ impl OverlayApp {
 
     /// Reposition the window while the overlay is already visible (e.g. after size change).
     ///
-    /// On Windows, calls SetWindowPos directly to avoid winit's per-monitor DPI scaling.
-    /// ViewportCommand::OuterPosition would multiply our "system DPI logical" coordinates by
-    /// the window's current per-monitor scale factor, placing the window off-screen on a
-    /// secondary monitor with a different DPI than the primary.
+    /// Delegates to the platform for native DPI-safe repositioning (e.g. Windows SetWindowPos
+    /// bypasses winit's per-monitor scaling). Falls back to ViewportCommand::OuterPosition.
     fn reposition_window(&self, ctx: &egui::Context, win_size: egui::Vec2) {
         if let Some(pos) = self.calculate_centered_position(win_size) {
-            #[cfg(target_os = "windows")]
-            {
-                crate::platform::windows::set_window_position(pos.x, pos.y);
-                return;
+            if !self.platform.reposition_window(pos.x, pos.y) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
             }
-            #[allow(unreachable_code)]
-            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
         }
     }
 
-    #[allow(unused_variables)]
     fn show_window(&self, ctx: &egui::Context) {
         // Skip repositioning if user has manually dragged the window;
         // only reposition on initial show (before any drag).
@@ -322,41 +316,16 @@ impl OverlayApp {
                 .map(|p| (p.x, p.y))
         };
 
-        #[cfg(target_os = "macos")]
-        {
-            crate::platform::macos::configure_window_for_spaces();
-            crate::platform::macos::show_and_focus_window(pos);
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            crate::platform::windows::show_and_focus_window(pos);
-            // Sync winit to visible=true. hide_window() bypasses winit (hides at
-            // OS level only via ShowWindowAsync), so winit needs Visible(true) here
-            // to maintain ControlFlow::Wait and avoid the CPU spin bug (egui#5229).
+        if self.platform.show_window(pos) {
+            // Windows: sync winit to visible=true to maintain ControlFlow::Wait (egui#5229).
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-        }
-
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        {
-            if let Some((x, y)) = pos {
-                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
-            }
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
     }
 
-    #[allow(unused_variables)]
     fn hide_window(&self, ctx: &egui::Context) {
-        // On Windows, move off-screen instead of Visible(false) to avoid
-        // ControlFlow::Poll CPU spin (egui#5229). Window stays visible
-        // from winit's perspective, keeping ControlFlow::Wait.
-        #[cfg(target_os = "windows")]
-        crate::platform::windows::move_window_offscreen();
-
-        #[cfg(not(target_os = "windows"))]
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        if !self.platform.hide_window() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
     }
 
     // -- update() helpers --
