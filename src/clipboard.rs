@@ -117,11 +117,9 @@ impl ClipboardManager {
             thread::sleep(interval);
 
             let text = self.board.get_text().ok().filter(|s| !s.trim().is_empty());
-            let has_image = self.board.get_image().is_ok();
+            let images = read_image_from_board(&mut self.board)?;
 
-            if text.is_some() || has_image {
-                // Pasteboard is populated atomically — read both types now.
-                let images = read_image_from_board(&mut self.board)?;
+            if text.is_some() || !images.is_empty() {
 
                 let content = ClipboardContent { text, images };
                 let elapsed = start.elapsed().as_millis();
