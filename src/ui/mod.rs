@@ -202,7 +202,8 @@ impl OverlayApp {
         while let Ok(action) = self.diag_action_rx.try_recv() {
             match action {
                 crate::diagnostics::ScenarioAction::ShowOverlay { mode, text } => {
-                    self.sm.set_mode(mode);
+                    // Switch mode first (no-op effects in Hidden state) before ContentReady.
+                    self.sm.handle(UiEvent::UserSwitchMode(mode));
                     let effects = self.sm.handle(UiEvent::ContentReady(
                         crate::ClipboardContent::text_only(text),
                     ));
@@ -263,7 +264,7 @@ impl OverlayApp {
         }
         let focused = ctx.input(|i| i.viewport().focused);
         if focused == Some(true) {
-            self.sm.set_focused();
+            self.sm.handle(UiEvent::FocusGained);
         } else if focused == Some(false) {
             let effects = self.sm.handle(UiEvent::FocusLost);
             self.execute_effects(effects, ctx);

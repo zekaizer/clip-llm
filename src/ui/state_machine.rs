@@ -58,6 +58,8 @@ pub enum UiEvent {
     UserSwitchMode(ProcessMode),
     /// User started dragging the overlay.
     UserStartDrag,
+    /// Window gained focus.
+    FocusGained,
     /// Window lost focus (after having been focused at least once).
     FocusLost,
     /// Streaming token from the worker (incremental response).
@@ -162,21 +164,6 @@ impl StateMachine {
         self.state.variant_name()
     }
 
-    /// Call when the adapter detects window focus gained.
-    pub fn set_focused(&mut self) {
-        self.has_been_focused = true;
-    }
-
-    /// Call when the user starts dragging the overlay.
-    pub fn set_user_repositioned(&mut self) {
-        self.user_repositioned = true;
-    }
-
-    /// Set the processing mode (used by diagnostics scenario injection).
-    pub fn set_mode(&mut self, mode: ProcessMode) {
-        self.mode = mode;
-    }
-
     /// Modes available for the current content.
     /// - No content: no modes available (tabs disabled).
     /// - Image-only: Summarize only.
@@ -214,6 +201,10 @@ impl StateMachine {
             UiEvent::UserSwitchMode(mode) => self.on_switch_mode(mode),
             UiEvent::UserStartDrag => {
                 self.user_repositioned = true;
+                vec![]
+            }
+            UiEvent::FocusGained => {
+                self.has_been_focused = true;
                 vec![]
             }
             UiEvent::StreamDelta { text, request_id } => {
@@ -749,7 +740,7 @@ mod tests {
     fn focus_lost_hides_when_focused() {
         let mut sm = new_sm();
         start_processing(&mut sm, "hello");
-        sm.set_focused();
+        sm.handle(UiEvent::FocusGained);
 
         let effects = sm.handle(UiEvent::FocusLost);
 
@@ -772,7 +763,7 @@ mod tests {
     #[test]
     fn focus_lost_ignored_when_hidden() {
         let mut sm = new_sm();
-        sm.set_focused();
+        sm.handle(UiEvent::FocusGained);
 
         let effects = sm.handle(UiEvent::FocusLost);
 
@@ -1198,7 +1189,7 @@ mod tests {
         let mut sm = new_sm();
         // Simulate a previous session where focus was gained.
         start_processing(&mut sm, "hello");
-        sm.set_focused();
+        sm.handle(UiEvent::FocusGained);
 
         // Focus lost → Hidden.
         sm.handle(UiEvent::FocusLost);
