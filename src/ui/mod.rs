@@ -347,7 +347,7 @@ impl OverlayApp {
             self.last_desired_size = Some(size);
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
         }
-        if !matches!(self.sm.state(), OverlayState::Hidden) {
+        if !matches!(self.sm.state(), OverlayState::Hidden) && !self.sm.user_repositioned() {
             self.reposition_window(ctx, size);
         }
     }
@@ -358,7 +358,10 @@ impl OverlayApp {
             overlay::OverlayAction::None => return,
             overlay::OverlayAction::Close => UiEvent::UserClose,
             overlay::OverlayAction::Cancel => UiEvent::UserCancel,
-            overlay::OverlayAction::StartDrag => UiEvent::UserStartDrag,
+            overlay::OverlayAction::StartDrag => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                UiEvent::UserStartDrag
+            }
             overlay::OverlayAction::SwitchMode(mode) => UiEvent::UserSwitchMode(mode),
             overlay::OverlayAction::ToggleThink => {
                 self.think_expanded = !self.think_expanded;
