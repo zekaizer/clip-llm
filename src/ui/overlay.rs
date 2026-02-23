@@ -112,24 +112,13 @@ pub fn render(
                                     .size(13.0),
                             );
                             ui.add_space(4.0);
-                            egui::ScrollArea::vertical()
-                                .id_salt(("streaming", mode))
-                                .max_height(MAX_RESULT_HEIGHT)
-                                .auto_shrink([false, true])
-                                .stick_to_bottom(true)
-                                .scroll_bar_visibility(
-                                    egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
-                                )
-                                .show(ui, |ui| {
-                                    ui.add(
-                                        egui::Label::new(
-                                            egui::RichText::new(streaming_text)
-                                                .color(egui::Color32::WHITE)
-                                                .size(15.0),
-                                        )
-                                        .wrap_mode(egui::TextWrapMode::Wrap),
-                                    );
-                                });
+                            render_scrollable_text(
+                                ui,
+                                ("streaming", mode),
+                                streaming_text,
+                                MAX_RESULT_HEIGHT,
+                                true,
+                            );
                         } else {
                             ui.horizontal(|ui| {
                                 ui.spinner();
@@ -141,24 +130,13 @@ pub fn render(
                             });
                             if !streaming_text.is_empty() {
                                 ui.add_space(4.0);
-                                egui::ScrollArea::vertical()
-                                    .id_salt(("streaming", mode))
-                                    .max_height(MAX_RESULT_HEIGHT)
-                                    .auto_shrink([false, true])
-                                    .stick_to_bottom(true)
-                                    .scroll_bar_visibility(
-                                        egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
-                                    )
-                                    .show(ui, |ui| {
-                                        ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new(streaming_text)
-                                                    .color(egui::Color32::WHITE)
-                                                    .size(15.0),
-                                            )
-                                            .wrap_mode(egui::TextWrapMode::Wrap),
-                                        );
-                                    });
+                                render_scrollable_text(
+                                    ui,
+                                    ("streaming", mode),
+                                    streaming_text,
+                                    MAX_RESULT_HEIGHT,
+                                    true,
+                                );
                             }
                         }
                         ui.add_space(4.0);
@@ -178,23 +156,13 @@ pub fn render(
                             render_think_toggle(ui, think_expanded, content, &mut action);
                             ui.add_space(4.0);
                         }
-                        egui::ScrollArea::vertical()
-                            .id_salt(("result", mode))
-                            .max_height(MAX_RESULT_HEIGHT)
-                            .auto_shrink([false, true])
-                            .scroll_bar_visibility(
-                                egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
-                            )
-                            .show(ui, |ui| {
-                                ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new(text)
-                                            .color(egui::Color32::WHITE)
-                                            .size(15.0),
-                                    )
-                                    .wrap_mode(egui::TextWrapMode::Wrap),
-                                );
-                            });
+                        render_scrollable_text(
+                            ui,
+                            ("result", mode),
+                            text,
+                            MAX_RESULT_HEIGHT,
+                            false,
+                        );
                     }
                     OverlayState::Error(msg) => {
                         ui.label(
@@ -227,6 +195,30 @@ pub fn render(
         desired_size: Some(desired),
         content_size: Some(content_size),
     }
+}
+
+/// Renders a vertically scrollable, word-wrapped text label with a consistent style.
+fn render_scrollable_text(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash,
+    text: &str,
+    max_height: f32,
+    stick_to_bottom: bool,
+) {
+    egui::ScrollArea::vertical()
+        .id_salt(id_salt)
+        .max_height(max_height)
+        .auto_shrink([false, true])
+        .stick_to_bottom(stick_to_bottom)
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+        .show(ui, |ui| {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(text).color(egui::Color32::WHITE).size(15.0),
+                )
+                .wrap_mode(egui::TextWrapMode::Wrap),
+            );
+        });
 }
 
 fn render_think_toggle(
