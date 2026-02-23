@@ -365,13 +365,9 @@ impl StateMachine {
                     // Cache hit: cancel in-flight, return cached result.
                     self.streaming_text.clear();
                     self.think_started = false;
-                    self.think_content = self.think_cache.get(&new_mode).cloned().flatten();
-                    self.state = OverlayState::Result(cached.clone());
-                    vec![
-                        UiEffect::SendCancel,
-                        UiEffect::WriteClipboard(cached),
-                        UiEffect::ResetAreas,
-                    ]
+                    let mut effects = self.apply_cached_result(new_mode, cached);
+                    effects.insert(0, UiEffect::SendCancel);
+                    effects
                 } else if let Some(content) = self.original_content.clone() {
                     // Cache miss: cancel current, re-send with new mode.
                     self.streaming_text.clear();
@@ -395,12 +391,7 @@ impl StateMachine {
             OverlayState::Result(_) | OverlayState::Error(_) => {
                 if let Some(cached) = self.mode_cache.get(&new_mode).cloned() {
                     // Cache hit: return cached result directly.
-                    self.think_content = self.think_cache.get(&new_mode).cloned().flatten();
-                    self.state = OverlayState::Result(cached.clone());
-                    vec![
-                        UiEffect::WriteClipboard(cached),
-                        UiEffect::ResetAreas,
-                    ]
+                    self.apply_cached_result(new_mode, cached)
                 } else if let Some(content) = self.original_content.clone() {
                     // Cache miss: re-process with new mode.
                     self.think_started = false;
@@ -423,6 +414,14 @@ impl StateMachine {
             }
             OverlayState::Hidden => vec![],
         }
+    }
+
+    /// Applies a cached result for `mode`: updates think_content and state,
+    /// returns [WriteClipboard, ResetAreas].
+    fn apply_cached_result(&mut self, mode: ProcessMode, cached: String) -> Vec<UiEffect> {
+        self.think_content = self.think_cache.get(&mode).cloned().flatten();
+        self.state = OverlayState::Result(cached.clone());
+        vec![UiEffect::WriteClipboard(cached), UiEffect::ResetAreas]
     }
 
     fn on_focus_lost(&mut self) -> Vec<UiEffect> {
