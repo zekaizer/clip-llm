@@ -80,26 +80,22 @@ pub(crate) struct ResponseMessage {
 
 // -- SSE streaming types (used by worker in streaming loop) --
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct StreamChunk {
     choices: Vec<StreamChoice>,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct StreamChoice {
     delta: Delta,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct Delta {
     content: Option<String>,
 }
 
 /// Parsed SSE event from a streaming response.
-#[allow(dead_code)]
 #[derive(Debug, PartialEq)]
 pub(crate) enum SseEvent {
     Content(String),
@@ -107,7 +103,6 @@ pub(crate) enum SseEvent {
 }
 
 /// Line-based SSE parser that buffers incomplete lines across chunks.
-#[allow(dead_code)]
 pub(crate) struct SseParser {
     buffer: String,
 }
@@ -118,7 +113,6 @@ impl Default for SseParser {
     }
 }
 
-#[allow(dead_code)]
 impl SseParser {
     pub fn new() -> Self {
         Self {

@@ -128,9 +128,6 @@ pub enum ApiError {
     #[error("http request failed: {0}")]
     Http(#[from] reqwest::Error),
 
-    #[error("unexpected response structure: {0}")]
-    ParseError(String),
-
     #[error("empty response from model")]
     EmptyResponse,
 
@@ -168,17 +165,3 @@ pub enum HotkeyError {
     RegisterFailed(String),
 }
 
-#[derive(Debug, Error)]
-pub enum AppError {
-    #[error(transparent)]
-    Platform(#[from] PlatformError),
-
-    #[error(transparent)]
-    Clipboard(#[from] ClipboardError),
-
-    #[error(transparent)]
-    Api(#[from] ApiError),
-
-    #[error(transparent)]
-    Hotkey(#[from] HotkeyError),
-}
