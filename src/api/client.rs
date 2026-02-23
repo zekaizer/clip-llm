@@ -528,13 +528,15 @@ impl LlmClient {
         MessageContent::Parts(parts)
     }
 
-    /// Send content to the vLLM server and return the raw response content.
-    /// Think-block stripping is handled separately by `response::strip_think_blocks`.
-    pub async fn complete(
+    /// Build and send a chat completion request. Probes vision support, constructs
+    /// the request body, applies auth, and returns the raw response.
+    /// `stream=true` uses the no-timeout streaming client; `false` uses the regular client.
+    async fn build_and_send(
         &self,
         content: &ClipboardContent,
         mode: ProcessMode,
-    ) -> Result<String, ApiError> {
+        stream: bool,
+    ) -> Result<reqwest::Response, ApiError> {
         let inner = &self.0;
         let vision = self.probe_vision().await;
         let sys_prompt = mode.system_prompt();
@@ -552,20 +554,29 @@ impl LlmClient {
             ],
             temperature: TEMPERATURE,
             max_tokens: MAX_TOKENS,
-            stream: None,
+            stream: if stream { Some(true) } else { None },
         };
 
-        info!("sending request to {}", inner.endpoint);
-        debug!("model={}, temperature={}, max_tokens={}", inner.model, TEMPERATURE, MAX_TOKENS);
-        debug!("request body: {}", serde_json::to_string(&body).unwrap_or_default());
-
-        let mut req = inner.client.post(&inner.endpoint).json(&body);
+        let client = if stream { &inner.streaming_client } else { &inner.client };
+        let mut req = client.post(&inner.endpoint).json(&body);
         if let Some(key) = &inner.api_key {
             req = req.bearer_auth(key);
         }
+        Ok(req.send().await?.error_for_status()?)
+    }
 
-        let resp = req.send().await?.error_for_status()?;
+    /// Send content to the vLLM server and return the raw response content.
+    /// Think-block stripping is handled separately by `response::strip_think_blocks`.
+    pub async fn complete(
+        &self,
+        content: &ClipboardContent,
+        mode: ProcessMode,
+    ) -> Result<String, ApiError> {
+        let inner = &self.0;
+        info!("sending request to {}", inner.endpoint);
+        debug!("model={}, temperature={}, max_tokens={}", inner.model, TEMPERATURE, MAX_TOKENS);
 
+        let resp = self.build_and_send(content, mode, false).await?;
         let chat: ChatResponse = resp.json().await?;
 
         let resp_content = chat
@@ -593,33 +604,7 @@ impl LlmClient {
         mode: ProcessMode,
     ) -> Result<reqwest::Response, ApiError> {
         let inner = &self.0;
-        let vision = self.probe_vision().await;
-        let sys_prompt = mode.system_prompt();
-        let body = ChatRequest {
-            model: &inner.model,
-            messages: vec![
-                Message {
-                    role: "system",
-                    content: MessageContent::Text(&sys_prompt),
-                },
-                Message {
-                    role: "user",
-                    content: Self::build_user_content(content, mode, vision),
-                },
-            ],
-            temperature: TEMPERATURE,
-            max_tokens: MAX_TOKENS,
-            stream: Some(true),
-        };
-
         info!("sending streaming request to {}", inner.endpoint);
-
-        let mut req = inner.streaming_client.post(&inner.endpoint).json(&body);
-        if let Some(key) = &inner.api_key {
-            req = req.bearer_auth(key);
-        }
-
-        let resp = req.send().await?.error_for_status()?;
-        Ok(resp)
+        self.build_and_send(content, mode, true).await
     }
 }
