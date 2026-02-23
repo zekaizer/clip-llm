@@ -210,19 +210,11 @@ impl ProcessMode {
                  \n\
                  ## Background / Context\n\
                  \n\
-                 ## Conclusion / Judgment\n\
+                 ## Conclusion\n\
                  \n\
                  ## Open Issues\n\
                  \n\
-                 ## Action Items\n\
-                 \n\
-                 ## Change History\n\
-                 \n\
-                 ## Stakeholders\n\
-                 \n\
-                 ## Related Documents\n\
-                 \n\
-                 ## References"
+                 ## Action Items"
             ),
         }
     }
