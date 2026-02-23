@@ -34,6 +34,8 @@ pub struct OverlayApp {
     tap_rx: mpsc::Receiver<TapEvent>,
     /// Cached desired_size to avoid redundant send_viewport_cmd calls.
     last_desired_size: Option<egui::Vec2>,
+    /// Whether the think block section is expanded in the Result state.
+    think_expanded: bool,
     #[cfg(feature = "diagnostics")]
     diag: crate::diagnostics::DiagCollector,
     #[cfg(feature = "diagnostics")]
@@ -64,6 +66,7 @@ impl OverlayApp {
             initial_hide_done: false,
             tap_rx,
             last_desired_size: None,
+            think_expanded: false,
             diag: crate::diagnostics::DiagCollector::new(),
             diag_action_rx,
             diag_state_tx,
@@ -90,6 +93,7 @@ impl OverlayApp {
             initial_hide_done: false,
             tap_rx,
             last_desired_size: None,
+            think_expanded: false,
         }
     }
 }
@@ -150,6 +154,7 @@ impl OverlayApp {
                         // Notify scenario runner thread of state change.
                         let _ = self.diag_state_tx.send(to);
                     }
+                    self.think_expanded = false;
                     ctx.memory_mut(|m| m.reset_areas());
                 }
             }
@@ -226,9 +231,10 @@ impl OverlayApp {
     fn poll_responses(&mut self, ctx: &egui::Context) {
         while let Ok(response) = self.resp_rx.try_recv() {
             let event = match response {
-                WorkerResponse::Complete { result, request_id } => {
+                WorkerResponse::Complete { result, think_content, request_id } => {
                     UiEvent::WorkerResult {
                         text: result,
+                        think_content,
                         request_id,
                     }
                 }
@@ -240,6 +246,9 @@ impl OverlayApp {
                 }
                 WorkerResponse::StreamDelta { text, request_id } => {
                     UiEvent::StreamDelta { text, request_id }
+                }
+                WorkerResponse::ThinkStarted { request_id } => {
+                    UiEvent::ThinkStarted { request_id }
                 }
             };
             let effects = self.sm.handle(event);
@@ -397,6 +406,9 @@ impl eframe::App for OverlayApp {
             self.sm.mode(),
             self.sm.streaming_text(),
             self.sm.available_modes(),
+            self.sm.think_started(),
+            self.sm.think_content(),
+            self.think_expanded,
             ctx,
         );
 
@@ -426,6 +438,10 @@ impl eframe::App for OverlayApp {
             overlay::OverlayAction::StartDrag => {
                 self.sm.set_user_repositioned();
                 ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                None
+            }
+            overlay::OverlayAction::ToggleThink => {
+                self.think_expanded = !self.think_expanded;
                 None
             }
             overlay::OverlayAction::None => None,

@@ -5,7 +5,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tracing::{debug, error, info};
 
 use crate::api::client::{LlmClient, SseEvent, SseParser};
-use crate::api::response::{strip_think_blocks, ThinkBlockFilter};
+use crate::api::response::{extract_first_think_content, strip_think_blocks, ThinkBlockFilter};
 use crate::{ClipboardContent, ProcessMode};
 
 pub enum WorkerCommand {
@@ -19,7 +19,9 @@ pub enum WorkerCommand {
 
 pub enum WorkerResponse {
     StreamDelta { text: String, request_id: u64 },
-    Complete { result: String, request_id: u64 },
+    /// Emitted once when the first `<think>` block begins (streaming only).
+    ThinkStarted { request_id: u64 },
+    Complete { result: String, think_content: Option<String>, request_id: u64 },
     Error { message: String, request_id: u64 },
 }
 
@@ -31,6 +33,7 @@ fn make_complete_response(
     request_id: u64,
     label: &str,
 ) -> WorkerResponse {
+    let think_content = extract_first_think_content(raw);
     let text = strip_think_blocks(raw);
     if text.is_empty() {
         WorkerResponse::Error {
@@ -41,6 +44,7 @@ fn make_complete_response(
         info!("worker: {} {label} ({} chars)", mode.label(), text.len());
         WorkerResponse::Complete {
             result: text,
+            think_content,
             request_id,
         }
     }
@@ -107,6 +111,7 @@ async fn run_streaming(
     let mut parser = SseParser::new();
     let mut filter = ThinkBlockFilter::new();
     let mut full_content = String::new();
+    let mut think_notified = false;
 
     loop {
         let chunk = tokio::select! {
@@ -124,6 +129,10 @@ async fn run_streaming(
                         SseEvent::Content(token) => {
                             full_content.push_str(&token);
                             let visible = filter.feed(&token);
+                            if filter.is_thinking() && !think_notified {
+                                think_notified = true;
+                                let _ = resp_tx.send(WorkerResponse::ThinkStarted { request_id });
+                            }
                             if !visible.is_empty() {
                                 let _ = resp_tx.send(WorkerResponse::StreamDelta {
                                     text: visible,
@@ -264,7 +273,7 @@ mod tests {
 
     fn assert_complete(r: &WorkerResponse, expected_id: u64) -> String {
         match r {
-            WorkerResponse::Complete { result, request_id } => {
+            WorkerResponse::Complete { result, request_id, .. } => {
                 assert_eq!(*request_id, expected_id);
                 result.clone()
             }
@@ -285,6 +294,7 @@ mod tests {
     fn variant_name(r: &WorkerResponse) -> &'static str {
         match r {
             WorkerResponse::StreamDelta { .. } => "StreamDelta",
+            WorkerResponse::ThinkStarted { .. } => "ThinkStarted",
             WorkerResponse::Complete { .. } => "Complete",
             WorkerResponse::Error { .. } => "Error",
         }

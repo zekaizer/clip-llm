@@ -5,6 +5,18 @@ use regex::Regex;
 static THINK_BLOCK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?s)<think>.*?</think>").unwrap());
 
+static THINK_CAPTURE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?s)<think>(.*?)</think>").unwrap());
+
+/// Extract the content of the first `<think>...</think>` block (tags removed).
+/// Returns `None` if no complete think block exists.
+pub fn extract_first_think_content(text: &str) -> Option<String> {
+    THINK_CAPTURE_RE
+        .captures(text)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
+}
+
 /// Strip `<think>...</think>` blocks from LLM response.
 /// Only trims leading newlines (from think-block removal) and trailing whitespace,
 /// preserving leading indentation on the first content line.
@@ -26,6 +38,8 @@ pub struct ThinkBlockFilter {
     state: ThinkState,
     pending: String,
     trim_leading_newlines: bool,
+    /// Accumulated content of the first think block (populated when InsideThink).
+    think_content: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +64,19 @@ impl ThinkBlockFilter {
             state: ThinkState::BeforeThink,
             pending: String::new(),
             trim_leading_newlines: false,
+            think_content: String::new(),
         }
+    }
+
+    /// Returns `true` while inside a `<think>…</think>` block.
+    pub fn is_thinking(&self) -> bool {
+        matches!(self.state, ThinkState::InsideThink)
+    }
+
+    /// Take the accumulated think-block content, leaving it empty.
+    /// Only meaningful after the close tag has been processed.
+    pub fn take_think_content(&mut self) -> String {
+        std::mem::take(&mut self.think_content)
     }
 
     /// Feed a streaming token; returns the text to display (may be empty).
@@ -86,6 +112,8 @@ impl ThinkBlockFilter {
         self.pending.push_str(token);
 
         if let Some(pos) = self.pending.find(CLOSE_TAG) {
+            // Save the think content before the close tag.
+            self.think_content.push_str(&self.pending[..pos]);
             let after = &self.pending[pos + CLOSE_TAG.len()..];
             let trimmed = after.trim_start_matches(['\n', '\r']).to_string();
             self.trim_leading_newlines = trimmed.is_empty();
@@ -101,6 +129,8 @@ impl ThinkBlockFilter {
                 while !self.pending.is_char_boundary(start) {
                     start -= 1;
                 }
+                // Accumulate the discarded prefix into think_content.
+                self.think_content.push_str(&self.pending[..start]);
                 self.pending = self.pending[start..].to_string();
             }
             String::new()

@@ -15,6 +15,7 @@ pub enum OverlayAction {
     Cancel,
     StartDrag,
     SwitchMode(ProcessMode),
+    ToggleThink,
 }
 
 pub struct OverlayOutput {
@@ -27,11 +28,15 @@ pub struct OverlayOutput {
 }
 
 /// Render the overlay panel. Returns action and desired viewport size.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     state: &OverlayState,
     mode: ProcessMode,
     streaming_text: &str,
     available_modes: &[ProcessMode],
+    think_started: bool,
+    think_content: Option<&str>,
+    think_expanded: bool,
     ctx: &egui::Context,
 ) -> OverlayOutput {
     if matches!(state, OverlayState::Hidden) {
@@ -89,15 +94,23 @@ pub fn render(
 
                 match state {
                     OverlayState::Processing => {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
+                        if think_started && streaming_text.is_empty() {
+                            // Think block in progress, no visible output yet.
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(
+                                    egui::RichText::new("Thinking...")
+                                        .color(egui::Color32::from_gray(160))
+                                        .size(15.0),
+                                );
+                            });
+                        } else if think_started {
+                            // Think done, answer streaming: show locked collapsed header.
                             ui.label(
-                                egui::RichText::new(mode.processing_label())
-                                    .color(egui::Color32::WHITE)
-                                    .size(15.0),
+                                egui::RichText::new("\u{25b6} Thinking")
+                                    .color(egui::Color32::from_gray(100))
+                                    .size(13.0),
                             );
-                        });
-                        if !streaming_text.is_empty() {
                             ui.add_space(4.0);
                             egui::ScrollArea::vertical()
                                 .id_salt(("streaming", mode))
@@ -117,6 +130,36 @@ pub fn render(
                                         .wrap_mode(egui::TextWrapMode::Wrap),
                                     );
                                 });
+                        } else {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(
+                                    egui::RichText::new(mode.processing_label())
+                                        .color(egui::Color32::WHITE)
+                                        .size(15.0),
+                                );
+                            });
+                            if !streaming_text.is_empty() {
+                                ui.add_space(4.0);
+                                egui::ScrollArea::vertical()
+                                    .id_salt(("streaming", mode))
+                                    .max_height(MAX_RESULT_HEIGHT)
+                                    .auto_shrink([false, true])
+                                    .stick_to_bottom(true)
+                                    .scroll_bar_visibility(
+                                        egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
+                                    )
+                                    .show(ui, |ui| {
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(streaming_text)
+                                                    .color(egui::Color32::WHITE)
+                                                    .size(15.0),
+                                            )
+                                            .wrap_mode(egui::TextWrapMode::Wrap),
+                                        );
+                                    });
+                            }
                         }
                         ui.add_space(4.0);
                         let cancel_btn = egui::Button::new(
@@ -131,6 +174,10 @@ pub fn render(
                         }
                     }
                     OverlayState::Result(text) => {
+                        if let Some(content) = think_content {
+                            render_think_toggle(ui, think_expanded, content, &mut action);
+                            ui.add_space(4.0);
+                        }
                         egui::ScrollArea::vertical()
                             .id_salt(("result", mode))
                             .max_height(MAX_RESULT_HEIGHT)
@@ -179,6 +226,43 @@ pub fn render(
         action,
         desired_size: Some(desired),
         content_size: Some(content_size),
+    }
+}
+
+fn render_think_toggle(
+    ui: &mut egui::Ui,
+    expanded: bool,
+    content: &str,
+    action: &mut OverlayAction,
+) {
+    let icon = if expanded { "\u{25bc}" } else { "\u{25b6}" };
+    let btn = egui::Button::new(
+        egui::RichText::new(format!("{icon} Thinking"))
+            .color(egui::Color32::from_gray(160))
+            .size(13.0),
+    )
+    .fill(egui::Color32::TRANSPARENT);
+    if ui.add(btn).clicked() {
+        *action = OverlayAction::ToggleThink;
+    }
+    if expanded {
+        egui::ScrollArea::vertical()
+            .id_salt("think_content")
+            .max_height(120.0)
+            .auto_shrink([false, true])
+            .scroll_bar_visibility(
+                egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
+            )
+            .show(ui, |ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(content)
+                            .color(egui::Color32::from_gray(130))
+                            .size(13.0),
+                    )
+                    .wrap_mode(egui::TextWrapMode::Wrap),
+                );
+            });
     }
 }
 

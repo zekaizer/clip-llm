@@ -45,7 +45,9 @@ pub enum UiEvent {
     /// Clipboard content ready for processing.
     ContentReady(ClipboardContent),
     /// Worker completed successfully.
-    WorkerResult { text: String, request_id: u64 },
+    WorkerResult { text: String, think_content: Option<String>, request_id: u64 },
+    /// Worker detected a think block beginning (streaming only).
+    ThinkStarted { request_id: u64 },
     /// Worker reported an error.
     WorkerError { message: String, request_id: u64 },
     /// User pressed close / Escape.
@@ -102,6 +104,12 @@ pub struct StateMachine {
     mode_cache: HashMap<ProcessMode, String>,
     /// Accumulated visible streaming text (displayed during Processing).
     streaming_text: String,
+    /// True once a think block has started during the current streaming request.
+    think_started: bool,
+    /// Think block content for the current mode (set on WorkerResult).
+    think_content: Option<String>,
+    /// Per-mode think content cache, mirroring mode_cache.
+    think_cache: HashMap<ProcessMode, Option<String>>,
 }
 
 impl StateMachine {
@@ -116,6 +124,9 @@ impl StateMachine {
             has_been_focused: false,
             mode_cache: HashMap::new(),
             streaming_text: String::new(),
+            think_started: false,
+            think_content: None,
+            think_cache: HashMap::new(),
         }
     }
 
@@ -131,6 +142,14 @@ impl StateMachine {
 
     pub fn streaming_text(&self) -> &str {
         &self.streaming_text
+    }
+
+    pub fn think_started(&self) -> bool {
+        self.think_started
+    }
+
+    pub fn think_content(&self) -> Option<&str> {
+        self.think_content.as_deref()
     }
 
     pub fn user_repositioned(&self) -> bool {
@@ -184,9 +203,10 @@ impl StateMachine {
     pub fn handle(&mut self, event: UiEvent) -> Vec<UiEffect> {
         let effects = match event {
             UiEvent::ContentReady(content) => self.on_content_ready(content),
-            UiEvent::WorkerResult { text, request_id } => {
-                self.on_worker_result(text, request_id)
+            UiEvent::WorkerResult { text, think_content, request_id } => {
+                self.on_worker_result(text, think_content, request_id)
             }
+            UiEvent::ThinkStarted { request_id } => self.on_think_started(request_id),
             UiEvent::WorkerError {
                 message,
                 request_id,
@@ -222,6 +242,9 @@ impl StateMachine {
         self.original_content = Some(content.clone());
         self.mode_cache.clear();
         self.streaming_text.clear();
+        self.think_started = false;
+        self.think_content = None;
+        self.think_cache.clear();
         self.next_request_id += 1;
         self.current_request_id = self.next_request_id;
         self.state = OverlayState::Processing;
@@ -254,7 +277,18 @@ impl StateMachine {
         vec![]
     }
 
-    fn on_worker_result(&mut self, text: String, request_id: u64) -> Vec<UiEffect> {
+    fn on_think_started(&mut self, request_id: u64) -> Vec<UiEffect> {
+        if request_id != self.current_request_id {
+            return vec![];
+        }
+        if !matches!(self.state, OverlayState::Processing) {
+            return vec![];
+        }
+        self.think_started = true;
+        vec![]
+    }
+
+    fn on_worker_result(&mut self, text: String, think_content: Option<String>, request_id: u64) -> Vec<UiEffect> {
         if request_id != self.current_request_id {
             return vec![];
         }
@@ -262,7 +296,10 @@ impl StateMachine {
             return vec![];
         }
         self.streaming_text.clear();
+        self.think_started = false;
+        self.think_content = think_content.clone();
         self.mode_cache.insert(self.mode, text.clone());
+        self.think_cache.insert(self.mode, think_content);
         self.state = OverlayState::Result(text.clone());
         vec![
             UiEffect::WriteClipboard(text),
@@ -290,6 +327,9 @@ impl StateMachine {
         self.original_content = None;
         self.mode_cache.clear();
         self.streaming_text.clear();
+        self.think_started = false;
+        self.think_content = None;
+        self.think_cache.clear();
         self.has_been_focused = false;
         vec![UiEffect::HideWindow]
     }
@@ -302,6 +342,9 @@ impl StateMachine {
         self.original_content = None;
         self.mode_cache.clear();
         self.streaming_text.clear();
+        self.think_started = false;
+        self.think_content = None;
+        self.think_cache.clear();
         self.has_been_focused = false;
         vec![UiEffect::SendCancel, UiEffect::HideWindow]
     }
@@ -323,6 +366,8 @@ impl StateMachine {
                 if let Some(cached) = self.mode_cache.get(&new_mode).cloned() {
                     // Cache hit: cancel in-flight, return cached result.
                     self.streaming_text.clear();
+                    self.think_started = false;
+                    self.think_content = self.think_cache.get(&new_mode).cloned().flatten();
                     self.state = OverlayState::Result(cached.clone());
                     vec![
                         UiEffect::SendCancel,
@@ -332,6 +377,8 @@ impl StateMachine {
                 } else if let Some(content) = self.original_content.clone() {
                     // Cache miss: cancel current, re-send with new mode.
                     self.streaming_text.clear();
+                    self.think_started = false;
+                    self.think_content = None;
                     self.next_request_id += 1;
                     self.current_request_id = self.next_request_id;
                     vec![
@@ -350,6 +397,7 @@ impl StateMachine {
             OverlayState::Result(_) | OverlayState::Error(_) => {
                 if let Some(cached) = self.mode_cache.get(&new_mode).cloned() {
                     // Cache hit: return cached result directly.
+                    self.think_content = self.think_cache.get(&new_mode).cloned().flatten();
                     self.state = OverlayState::Result(cached.clone());
                     vec![
                         UiEffect::WriteClipboard(cached),
@@ -357,6 +405,8 @@ impl StateMachine {
                     ]
                 } else if let Some(content) = self.original_content.clone() {
                     // Cache miss: re-process with new mode.
+                    self.think_started = false;
+                    self.think_content = None;
                     self.next_request_id += 1;
                     self.current_request_id = self.next_request_id;
                     self.state = OverlayState::Processing;
@@ -385,6 +435,9 @@ impl StateMachine {
         self.original_content = None;
         self.mode_cache.clear();
         self.streaming_text.clear();
+        self.think_started = false;
+        self.think_content = None;
+        self.think_cache.clear();
         self.has_been_focused = false;
         vec![UiEffect::HideWindow]
     }
@@ -461,6 +514,7 @@ mod tests {
 
         let effects = sm.handle(UiEvent::WorkerResult {
             text: "translated".into(),
+            think_content: None,
             request_id: rid,
         });
 
@@ -495,6 +549,7 @@ mod tests {
         let rid = last_request_id(&effects);
         sm.handle(UiEvent::WorkerResult {
             text: "ok".into(),
+            think_content: None,
             request_id: rid,
         });
 
@@ -557,6 +612,7 @@ mod tests {
         let rid = last_request_id(&effects);
         sm.handle(UiEvent::WorkerResult {
             text: "ok".into(),
+            think_content: None,
             request_id: rid,
         });
 
@@ -606,6 +662,7 @@ mod tests {
         // Stale response from first request arrives.
         let effects = sm.handle(UiEvent::WorkerResult {
             text: "stale".into(),
+            think_content: None,
             request_id: rid1,
         });
 
@@ -615,6 +672,7 @@ mod tests {
         // Current response works.
         let effects = sm.handle(UiEvent::WorkerResult {
             text: "current".into(),
+            think_content: None,
             request_id: rid2,
         });
 
@@ -671,6 +729,7 @@ mod tests {
         let rid = last_request_id(&effects);
         sm.handle(UiEvent::WorkerResult {
             text: "ok".into(),
+            think_content: None,
             request_id: rid,
         });
 
@@ -745,6 +804,7 @@ mod tests {
         let rid = last_request_id(&effects);
         sm.handle(UiEvent::WorkerResult {
             text: "ok".into(),
+            think_content: None,
             request_id: rid,
         });
 
@@ -781,6 +841,7 @@ mod tests {
         // Processing -> Result
         sm.handle(UiEvent::WorkerResult {
             text: "result".into(),
+            think_content: None,
             request_id: rid,
         });
         assert!(sm.original_text().is_some());
@@ -793,6 +854,7 @@ mod tests {
         // Processing -> Result
         sm.handle(UiEvent::WorkerResult {
             text: "corrected".into(),
+            think_content: None,
             request_id: rid2,
         });
 
@@ -825,6 +887,7 @@ mod tests {
 
         sm.handle(UiEvent::WorkerResult {
             text: "translated".into(),
+            think_content: None,
             request_id: rid,
         });
         assert_eq!(*sm.state(), OverlayState::Result("translated".into()));
@@ -849,6 +912,7 @@ mod tests {
         let rid = last_request_id(&effects);
         sm.handle(UiEvent::WorkerResult {
             text: "translated".into(),
+            think_content: None,
             request_id: rid,
         });
         // Switch to Correct → Result
@@ -856,6 +920,7 @@ mod tests {
         let rid = last_request_id(&effects);
         sm.handle(UiEvent::WorkerResult {
             text: "corrected".into(),
+            think_content: None,
             request_id: rid,
         });
         assert_eq!(*sm.state(), OverlayState::Result("corrected".into()));
@@ -877,6 +942,7 @@ mod tests {
         let rid = last_request_id(&effects);
         sm.handle(UiEvent::WorkerResult {
             text: "translated".into(),
+            think_content: None,
             request_id: rid,
         });
         // Switch to Correct → Processing (in-flight)
@@ -899,6 +965,7 @@ mod tests {
         let rid = last_request_id(&effects);
         sm.handle(UiEvent::WorkerResult {
             text: "ok".into(),
+            think_content: None,
             request_id: rid,
         });
         // Switch to Correct → Error
@@ -924,6 +991,7 @@ mod tests {
         let rid = last_request_id(&effects);
         sm.handle(UiEvent::WorkerResult {
             text: "translated".into(),
+            think_content: None,
             request_id: rid,
         });
         // Cache now has Translate → "translated"
@@ -941,6 +1009,7 @@ mod tests {
         let rid = last_request_id(&effects);
         sm.handle(UiEvent::WorkerResult {
             text: "translated".into(),
+            think_content: None,
             request_id: rid,
         });
 
@@ -987,7 +1056,7 @@ mod tests {
         let rid = last_request_id(&effects);
 
         // Transition to Result.
-        sm.handle(UiEvent::WorkerResult { text: "done".into(), request_id: rid });
+        sm.handle(UiEvent::WorkerResult { text: "done".into(), think_content: None, request_id: rid });
 
         // Delta arrives after Result — ignored.
         sm.handle(UiEvent::StreamDelta { text: "late".into(), request_id: rid });
@@ -1004,7 +1073,7 @@ mod tests {
         sm.handle(UiEvent::StreamDelta { text: "partial".into(), request_id: rid });
         assert_eq!(sm.streaming_text(), "partial");
 
-        sm.handle(UiEvent::WorkerResult { text: "done".into(), request_id: rid });
+        sm.handle(UiEvent::WorkerResult { text: "done".into(), think_content: None, request_id: rid });
         assert_eq!(sm.streaming_text(), "");
     }
 
