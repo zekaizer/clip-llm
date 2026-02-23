@@ -8,6 +8,16 @@ use crate::api::client::{LlmClient, SseEvent, SseParser};
 use crate::api::response::{extract_first_think_content, strip_think_blocks, ThinkBlockFilter};
 use crate::{ClipboardContent, ProcessMode};
 
+/// Runtime configuration resolved from environment variables once at worker startup.
+#[derive(Copy, Clone)]
+struct WorkerConfig {
+    /// Use streaming SSE API. Disabled by setting `CLIP_LLM_NO_STREAM`.
+    streaming: bool,
+    /// Use mock LLM responses for diagnostics. Enabled by setting `DIAG_MOCK`.
+    #[cfg(feature = "diagnostics")]
+    use_mock: bool,
+}
+
 pub enum WorkerCommand {
     Process {
         content: ClipboardContent,
@@ -221,6 +231,7 @@ fn dispatch_process(
     llm: &LlmClient,
     resp_tx: &mpsc::Sender<WorkerResponse>,
     cancel_tx: &mut Option<tokio::sync::oneshot::Sender<()>>,
+    config: &WorkerConfig,
 ) {
     // Cancel any in-flight request.
     if let Some(tx) = cancel_tx.take() {
@@ -237,16 +248,14 @@ fn dispatch_process(
 
     // Mock mode: simulate streaming with canned responses.
     #[cfg(feature = "diagnostics")]
-    if std::env::var("DIAG_MOCK").is_ok() {
+    if config.use_mock {
         let mock_text = text_for_log.to_owned();
         info!("worker: mock streaming {} ({} chars)", mode.label(), mock_text.len());
         tokio::spawn(run_mock_streaming(mock_text, mode, request_id, resp_tx, c_rx));
         return;
     }
 
-    let streaming = std::env::var("CLIP_LLM_NO_STREAM").is_err();
-
-    if streaming {
+    if config.streaming {
         info!(
             "worker: starting stream {} ({} chars, {} images)",
             mode.label(), text_for_log.len(), content.images.len(),
@@ -358,6 +367,12 @@ pub fn spawn_worker(
             .expect("failed to create tokio runtime");
 
         rt.block_on(async move {
+            let config = WorkerConfig {
+                streaming: std::env::var("CLIP_LLM_NO_STREAM").is_err(),
+                #[cfg(feature = "diagnostics")]
+                use_mock: std::env::var("DIAG_MOCK").is_ok(),
+            };
+
             // Probe vision support eagerly so it doesn't delay the first user request.
             llm.probe_vision().await;
 
@@ -368,7 +383,7 @@ pub fn spawn_worker(
                     WorkerCommand::Process { content, mode, request_id } => {
                         dispatch_process(
                             content, mode, request_id,
-                            &llm, &resp_tx, &mut cancel_tx,
+                            &llm, &resp_tx, &mut cancel_tx, &config,
                         );
                     }
                     WorkerCommand::Cancel => {
