@@ -319,10 +319,8 @@ impl StateMachine {
         vec![UiEffect::ResetAreas, UiEffect::ShowWindow]
     }
 
-    fn on_close(&mut self) -> Vec<UiEffect> {
-        if matches!(self.state, OverlayState::Hidden) {
-            return vec![];
-        }
+    /// Resets all transient state and transitions to Hidden.
+    fn reset_to_hidden(&mut self) {
         self.state = OverlayState::Hidden;
         self.original_content = None;
         self.mode_cache.clear();
@@ -331,6 +329,13 @@ impl StateMachine {
         self.think_content = None;
         self.think_cache.clear();
         self.has_been_focused = false;
+    }
+
+    fn on_close(&mut self) -> Vec<UiEffect> {
+        if matches!(self.state, OverlayState::Hidden) {
+            return vec![];
+        }
+        self.reset_to_hidden();
         vec![UiEffect::HideWindow]
     }
 
@@ -338,14 +343,7 @@ impl StateMachine {
         if !matches!(self.state, OverlayState::Processing) {
             return vec![];
         }
-        self.state = OverlayState::Hidden;
-        self.original_content = None;
-        self.mode_cache.clear();
-        self.streaming_text.clear();
-        self.think_started = false;
-        self.think_content = None;
-        self.think_cache.clear();
-        self.has_been_focused = false;
+        self.reset_to_hidden();
         vec![UiEffect::SendCancel, UiEffect::HideWindow]
     }
 
@@ -431,14 +429,7 @@ impl StateMachine {
         if matches!(self.state, OverlayState::Hidden) || !self.has_been_focused {
             return vec![];
         }
-        self.state = OverlayState::Hidden;
-        self.original_content = None;
-        self.mode_cache.clear();
-        self.streaming_text.clear();
-        self.think_started = false;
-        self.think_content = None;
-        self.think_cache.clear();
-        self.has_been_focused = false;
+        self.reset_to_hidden();
         vec![UiEffect::HideWindow]
     }
 
