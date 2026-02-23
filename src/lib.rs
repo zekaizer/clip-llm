@@ -172,14 +172,14 @@ impl ProcessMode {
                 };
                 let length_modifier = match params.length {
                     RephraseLength::Terse =>
-                        " Reduce length to approximately 40% of the original. Keep only essential points.",
+                        " Target output length: 40% of input. Cut aggressively — keep only the single core point per sentence. Do not pad.",
                     RephraseLength::Brief =>
-                        " Reduce length to approximately 70% of the original. Remove redundancy.",
+                        " Target output length: 70% of input. Remove all redundancy and filler. Do not pad.",
                     RephraseLength::Same => "",
                     RephraseLength::Detailed =>
-                        " Expand to approximately 150% of the original with additional context or detail.",
+                        " Target output length: 150% of input. Do not exceed 160%. Add only concrete context — no padding or filler.",
                     RephraseLength::Full =>
-                        " Expand to approximately 200% of the original with thorough explanation.",
+                        " Target output length: 200% of input. Do not exceed 220%. Add substantive detail only — no padding or repetition.",
                 };
                 format!(
                     "You are a proofreader/rewriter for software engineering text. \
