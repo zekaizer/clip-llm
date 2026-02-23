@@ -294,10 +294,20 @@ impl OverlayApp {
         Some(egui::pos2(x, y))
     }
 
-    /// Reposition the window via async ViewportCommand.
-    /// Used for size-change repositioning while the overlay is already visible.
+    /// Reposition the window while the overlay is already visible (e.g. after size change).
+    ///
+    /// On Windows, calls SetWindowPos directly to avoid winit's per-monitor DPI scaling.
+    /// ViewportCommand::OuterPosition would multiply our "system DPI logical" coordinates by
+    /// the window's current per-monitor scale factor, placing the window off-screen on a
+    /// secondary monitor with a different DPI than the primary.
     fn reposition_window(&self, ctx: &egui::Context, win_size: egui::Vec2) {
         if let Some(pos) = self.calculate_centered_position(win_size) {
+            #[cfg(target_os = "windows")]
+            {
+                crate::platform::windows::set_window_position(pos.x, pos.y);
+                return;
+            }
+            #[allow(unreachable_code)]
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
         }
     }

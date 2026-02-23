@@ -181,6 +181,38 @@ pub fn show_and_focus_window(position: Option<(f32, f32)>) {
     }
 }
 
+/// Move the clip-llm window to the given position without showing or focusing it.
+///
+/// Coordinates are in the same "system DPI logical" space used by `show_and_focus_window()`:
+/// physical pixels divided by `GetDpiForSystem()/96`. On a 100% DPI primary monitor this
+/// equals physical pixels, so the round-trip through `GetDpiForSystem` is always consistent.
+///
+/// Uses `SetWindowPos` directly to bypass winit's per-monitor DPI scaling, which would
+/// otherwise mis-scale the coordinates when the window is on a secondary monitor with a
+/// different DPI (e.g. primary 100% + secondary 150%).
+pub fn set_window_position(x: f32, y: f32) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, SetWindowPos, HWND_TOP, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+    };
+    let title: Vec<u16> = "clip-llm\0".encode_utf16().collect();
+    let hwnd = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
+    if !hwnd.is_null() {
+        let dpi = unsafe { GetDpiForSystem() } as f64;
+        let scale = dpi / 96.0;
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                HWND_TOP,
+                (x as f64 * scale) as i32,
+                (y as f64 * scale) as i32,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+}
+
 /// Move the clip-llm window off-screen instead of hiding it.
 ///
 /// Bypasses eframe's `Visible(false)` which triggers `ControlFlow::Poll` and
