@@ -280,18 +280,8 @@ impl OverlayApp {
     /// Returns top-left corner in screen coordinates (Quartz on macOS, logical on Windows).
     fn calculate_centered_position(&self, win_size: egui::Vec2) -> Option<egui::Pos2> {
         let cursor = self.spawn_position?;
-        let mut x = cursor.x - win_size.x / 2.0;
-        let mut y = cursor.y - win_size.y / 2.0;
-
-        if let Some((ox, oy, w, h)) =
-            self.platform.display_bounds_at_point(cursor.x as f64, cursor.y as f64)
-        {
-            let (ox, oy, w, h) = (ox as f32, oy as f32, w as f32, h as f32);
-            x = x.clamp(ox, (ox + w - win_size.x).max(ox));
-            y = y.clamp(oy, (oy + h - win_size.y).max(oy));
-        }
-
-        Some(egui::pos2(x, y))
+        let bounds = self.platform.display_bounds_at_point(cursor.x as f64, cursor.y as f64);
+        Some(center_clamped_to_bounds(cursor, win_size, bounds))
     }
 
     /// Reposition the window while the overlay is already visible (e.g. after size change).
@@ -503,5 +493,147 @@ impl eframe::App for OverlayApp {
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0.0, 0.0, 0.0, 0.0]
+    }
+}
+
+/// Center `win_size` on `cursor` and clamp the result within `bounds`.
+///
+/// `bounds` is `(origin_x, origin_y, width, height)` in the same coordinate space
+/// as `cursor`. Returns the top-left corner of the positioned window.
+///
+/// Extracted as a free function so the clamping logic can be unit-tested without
+/// a live platform or egui context.
+fn center_clamped_to_bounds(
+    cursor: egui::Pos2,
+    win_size: egui::Vec2,
+    bounds: Option<(f64, f64, f64, f64)>,
+) -> egui::Pos2 {
+    let mut x = cursor.x - win_size.x / 2.0;
+    let mut y = cursor.y - win_size.y / 2.0;
+
+    if let Some((ox, oy, w, h)) = bounds {
+        let (ox, oy, w, h) = (ox as f32, oy as f32, w as f32, h as f32);
+        x = x.clamp(ox, (ox + w - win_size.x).max(ox));
+        y = y.clamp(oy, (oy + h - win_size.y).max(oy));
+    }
+
+    egui::pos2(x, y)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bounds(ox: f64, oy: f64, w: f64, h: f64) -> Option<(f64, f64, f64, f64)> {
+        Some((ox, oy, w, h))
+    }
+
+    // --- no bounds: pure cursor centering ---
+
+    #[test]
+    fn no_bounds_centers_on_cursor() {
+        let pos = center_clamped_to_bounds(egui::pos2(1000.0, 500.0), egui::vec2(400.0, 300.0), None);
+        assert_eq!(pos, egui::pos2(800.0, 350.0));
+    }
+
+    // --- primary monitor (origin at 0,0) ---
+
+    #[test]
+    fn primary_monitor_cursor_centered() {
+        // cursor well inside 2560×1440, overlay 600×400 → no clamping
+        let pos = center_clamped_to_bounds(
+            egui::pos2(1280.0, 720.0),
+            egui::vec2(600.0, 400.0),
+            bounds(0.0, 0.0, 2560.0, 1440.0),
+        );
+        assert_eq!(pos, egui::pos2(980.0, 520.0));
+    }
+
+    #[test]
+    fn primary_monitor_clamp_right_edge() {
+        // cursor near right edge → clamp so window stays on-screen
+        let pos = center_clamped_to_bounds(
+            egui::pos2(2500.0, 720.0),
+            egui::vec2(600.0, 400.0),
+            bounds(0.0, 0.0, 2560.0, 1440.0),
+        );
+        // max_x = 0 + 2560 - 600 = 1960
+        assert_eq!(pos.x, 1960.0);
+        assert_eq!(pos.y, 520.0);
+    }
+
+    #[test]
+    fn primary_monitor_clamp_bottom_edge() {
+        let pos = center_clamped_to_bounds(
+            egui::pos2(1280.0, 1400.0),
+            egui::vec2(600.0, 400.0),
+            bounds(0.0, 0.0, 2560.0, 1440.0),
+        );
+        // max_y = 0 + 1440 - 400 = 1040
+        assert_eq!(pos.y, 1040.0);
+    }
+
+    #[test]
+    fn primary_monitor_clamp_top_left_corner() {
+        let pos = center_clamped_to_bounds(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(600.0, 400.0),
+            bounds(0.0, 0.0, 2560.0, 1440.0),
+        );
+        // raw = (-300, -200) → clamped to (0, 0)
+        assert_eq!(pos, egui::pos2(0.0, 0.0));
+    }
+
+    // --- secondary monitor (offset origin, different DPI scale) ---
+
+    #[test]
+    fn secondary_monitor_cursor_centered() {
+        // Secondary monitor placed to the right: logical origin (2560, 0), size 1920×1080.
+        // Simulates the multi-monitor DPI bug scenario: cursor at logical (3500, 500).
+        let pos = center_clamped_to_bounds(
+            egui::pos2(3500.0, 500.0),
+            egui::vec2(600.0, 400.0),
+            bounds(2560.0, 0.0, 1920.0, 1080.0),
+        );
+        // centered: (3200, 300); within bounds [2560..3880, 0..680] → no clamp
+        assert_eq!(pos, egui::pos2(3200.0, 300.0));
+    }
+
+    #[test]
+    fn secondary_monitor_clamp_right_edge() {
+        // cursor near right edge of secondary monitor
+        let pos = center_clamped_to_bounds(
+            egui::pos2(4400.0, 500.0),
+            egui::vec2(600.0, 400.0),
+            bounds(2560.0, 0.0, 1920.0, 1080.0),
+        );
+        // max_x = 2560 + 1920 - 600 = 3880
+        assert_eq!(pos.x, 3880.0);
+    }
+
+    #[test]
+    fn secondary_monitor_clamp_left_edge() {
+        // cursor at left edge of secondary monitor
+        let pos = center_clamped_to_bounds(
+            egui::pos2(2560.0, 500.0),
+            egui::vec2(600.0, 400.0),
+            bounds(2560.0, 0.0, 1920.0, 1080.0),
+        );
+        // raw x = 2560 - 300 = 2260 < 2560 → clamp to 2560
+        assert_eq!(pos.x, 2560.0);
+    }
+
+    // --- window larger than monitor (degenerate guard) ---
+
+    #[test]
+    fn window_wider_than_monitor_clamps_to_origin() {
+        // win_size.x > monitor width → max(ox) guard prevents negative clamp bound
+        let pos = center_clamped_to_bounds(
+            egui::pos2(100.0, 100.0),
+            egui::vec2(2000.0, 400.0),
+            bounds(0.0, 0.0, 800.0, 600.0),
+        );
+        // max_x = max(0, 0 + 800 - 2000) = max(0, -1200) = 0
+        assert_eq!(pos.x, 0.0);
     }
 }
