@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 use tracing::{debug, info, warn};
 
-use crate::{ApiError, ClipboardContent, ProcessMode};
+use crate::{ApiError, ClipboardContent, ProcessMode, RephraseParams};
 
 // Defaults — overridable via environment variables.
 const DEFAULT_API_ENDPOINT: &str = "http://localhost:8000/v1";
@@ -574,11 +574,12 @@ impl LlmClient {
         &self,
         content: &ClipboardContent,
         mode: ProcessMode,
+        rephrase_params: RephraseParams,
         stream: bool,
     ) -> Result<reqwest::Response, ApiError> {
         let inner = &self.0;
         let vision = self.probe_vision().await;
-        let sys_prompt = mode.system_prompt();
+        let sys_prompt = mode.system_prompt(rephrase_params);
         let body = ChatRequest {
             model: &inner.model,
             messages: vec![
@@ -610,12 +611,13 @@ impl LlmClient {
         &self,
         content: &ClipboardContent,
         mode: ProcessMode,
+        rephrase_params: RephraseParams,
     ) -> Result<String, ApiError> {
         let inner = &self.0;
         info!("sending request to {}", inner.endpoint);
         debug!("model={}, temperature={}, max_tokens={}", inner.model, TEMPERATURE, MAX_TOKENS);
 
-        let resp = self.build_and_send(content, mode, false).await?;
+        let resp = self.build_and_send(content, mode, rephrase_params, false).await?;
         let chat: ChatResponse = resp.json().await?;
 
         let resp_content = chat
@@ -641,9 +643,10 @@ impl LlmClient {
         &self,
         content: &ClipboardContent,
         mode: ProcessMode,
+        rephrase_params: RephraseParams,
     ) -> Result<reqwest::Response, ApiError> {
         let inner = &self.0;
         info!("sending streaming request to {}", inner.endpoint);
-        self.build_and_send(content, mode, true).await
+        self.build_and_send(content, mode, rephrase_params, true).await
     }
 }

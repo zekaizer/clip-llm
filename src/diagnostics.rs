@@ -350,9 +350,9 @@ impl DiagScenarioRunner {
             },
             Scenario {
                 name: "mode_switch",
-                input: "Testing mode switch from Translate to Correct.",
+                input: "Testing mode switch from Translate to Rephrase.",
                 mode: ProcessMode::Translate,
-                switch_to: Some(ProcessMode::Correct),
+                switch_to: Some(ProcessMode::Rephrase),
             },
             Scenario {
                 name: "error_display",
@@ -367,9 +367,9 @@ impl DiagScenarioRunner {
                 switch_to: None,
             },
             Scenario {
-                name: "correct_mode",
+                name: "rephrase_mode",
                 input: "This sentense has speling erors that need correcting.",
-                mode: ProcessMode::Correct,
+                mode: ProcessMode::Rephrase,
                 switch_to: None,
             },
             Scenario {
@@ -660,7 +660,7 @@ mod tests {
         // Result arrives — runner should return SwitchMode.
         match runner.tick("Result") {
             ScenarioAction::SwitchMode(mode) => {
-                assert_eq!(mode, ProcessMode::Correct);
+                assert_eq!(mode, ProcessMode::Rephrase);
             }
             other => panic!("expected SwitchMode, got {other:?}"),
         }
