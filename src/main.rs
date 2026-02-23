@@ -111,68 +111,32 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Check platform permissions before anything else.
     {
         use clip_llm::platform::{NativePlatform, Platform};
-        let plat = NativePlatform;
-        plat.check_accessibility()?;
+        NativePlatform.check_accessibility()?;
     }
 
     // GlobalHotKeyManager must be created on the main thread and kept alive.
     let manager = GlobalHotKeyManager::new()
         .map_err(|e| HotkeyError::InitFailed(e.to_string()))?;
-
     let hotkey = HotKey::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyC);
-
     manager
         .register(hotkey)
         .map_err(|e| HotkeyError::RegisterFailed(e.to_string()))?;
-
     info!("registered hotkey: Ctrl+Shift+C (single-tap: clipboard, double-tap: copy selection)");
 
-    // Set up channels between main thread and worker.
+    // Set up channels and spawn the async worker thread.
     // Command channel uses tokio::sync::mpsc so worker can .recv().await
     // without blocking the single-threaded tokio runtime.
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerCommand>();
     let (resp_tx, resp_rx) = mpsc::channel::<WorkerResponse>();
-
     let llm = LlmClient::new()?;
     let clipboard = ClipboardManager::new()?;
-
-    // Spawn the async worker thread.
     let _worker = spawn_worker(cmd_rx, resp_tx, llm);
 
     info!("starting eframe overlay");
 
-    let viewport = egui::ViewportBuilder::default()
-        .with_title("clip-llm")
-        .with_inner_size([400.0, 120.0])
-        .with_visible(false)
-        .with_decorations(false)
-        .with_resizable(false)
-        .with_always_on_top()
-        .with_transparent(true)
-        .with_taskbar(false);
-
-    let native_options = eframe::NativeOptions {
-        viewport,
-        wgpu_options: egui_wgpu::WgpuConfiguration {
-            wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew {
-                native_adapter_selector: Some(Arc::new(select_wgpu_adapter)),
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-        // Accessory policy: no Dock icon, no Cmd+Tab, no "home Space".
-        // Prevents macOS from switching Spaces when the app shows a window.
-        #[cfg(target_os = "macos")]
-        event_loop_builder: Some(Box::new(|builder| {
-            use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
-            builder.with_activation_policy(ActivationPolicy::Accessory);
-        })),
-        ..Default::default()
-    };
-
     eframe::run_native(
         "clip-llm",
-        native_options,
+        build_native_options(),
         Box::new(move |cc| {
             configure_fonts(&cc.egui_ctx);
             // Transparent background for the overlay viewport (one-time setup).
@@ -184,6 +148,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 window_corner_radius: egui::CornerRadius::same(12),
                 ..egui::Visuals::dark()
             });
+
             // Forward hotkey events to coordinator thread (no request_repaint here —
             // coordinator handles wake-up after detecting tap action).
             let (hotkey_tx, hotkey_rx) = mpsc::channel();
@@ -194,27 +159,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             // System tray icon (Windows: replaces taskbar icon).
             clip_llm::platform::init_tray(&cc.egui_ctx);
 
-            // Platform-specific pre-show callback for coordinator thread.
-            // On Windows, shows window natively before sending TapAction so that
-            // WM_PAINT is delivered and eframe update() fires.
-            let pre_show = clip_llm::platform::pre_show_callback();
-
             // Coordinator thread: event-driven hotkey detection (off-UI).
-            let (tap_tx, tap_rx) = mpsc::channel::<TapEvent>();
-            let ctx_for_coord = cc.egui_ctx.clone();
-            let mouse_pos_fn: Box<dyn Fn() -> Option<(f64, f64)> + Send> = {
-                use clip_llm::platform::{NativePlatform, Platform};
-                Box::new(|| NativePlatform.mouse_position())
-            };
-            std::thread::spawn(move || {
-                clip_llm::coordinator::run(
-                    hotkey_rx,
-                    tap_tx,
-                    ctx_for_coord,
-                    pre_show,
-                    mouse_pos_fn,
-                );
-            });
+            let tap_rx = spawn_coordinator_thread(hotkey_rx, cc.egui_ctx.clone());
 
             // Diagnostics: spawn scenario runner thread (off-UI, like coordinator).
             #[cfg(feature = "diagnostics")]
@@ -244,4 +190,57 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     Ok(())
+}
+
+/// Build eframe native options: overlay viewport geometry, wgpu adapter selection,
+/// and macOS Accessory activation policy.
+fn build_native_options() -> eframe::NativeOptions {
+    let viewport = egui::ViewportBuilder::default()
+        .with_title("clip-llm")
+        .with_inner_size([400.0, 120.0])
+        .with_visible(false)
+        .with_decorations(false)
+        .with_resizable(false)
+        .with_always_on_top()
+        .with_transparent(true)
+        .with_taskbar(false);
+
+    eframe::NativeOptions {
+        viewport,
+        wgpu_options: egui_wgpu::WgpuConfiguration {
+            wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew {
+                native_adapter_selector: Some(Arc::new(select_wgpu_adapter)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        // Accessory policy: no Dock icon, no Cmd+Tab, no "home Space".
+        // Prevents macOS from switching Spaces when the app shows a window.
+        #[cfg(target_os = "macos")]
+        event_loop_builder: Some(Box::new(|builder| {
+            use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+            builder.with_activation_policy(ActivationPolicy::Accessory);
+        })),
+        ..Default::default()
+    }
+}
+
+/// Spawn the coordinator thread and return the tap event receiver.
+///
+/// The coordinator blocks on hotkey events, runs [`HotkeyDetector`] tap detection,
+/// and sends [`TapEvent`]s to the UI via the returned channel.
+fn spawn_coordinator_thread(
+    hotkey_rx: mpsc::Receiver<GlobalHotKeyEvent>,
+    ctx: egui::Context,
+) -> mpsc::Receiver<TapEvent> {
+    let pre_show = clip_llm::platform::pre_show_callback();
+    let mouse_pos_fn: Box<dyn Fn() -> Option<(f64, f64)> + Send> = {
+        use clip_llm::platform::{NativePlatform, Platform};
+        Box::new(|| NativePlatform.mouse_position())
+    };
+    let (tap_tx, tap_rx) = mpsc::channel::<TapEvent>();
+    std::thread::spawn(move || {
+        clip_llm::coordinator::run(hotkey_rx, tap_tx, ctx, pre_show, mouse_pos_fn);
+    });
+    tap_rx
 }
