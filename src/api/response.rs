@@ -223,4 +223,82 @@ mod tests {
         let mut f = ThinkBlockFilter::new();
         assert_eq!(f.feed(""), "");
     }
+
+    // Verify that the close tag is detected regardless of which byte it is split at.
+    // The `keep = CLOSE_TAG.len() - 1` tail-preservation logic must handle all splits.
+    #[test]
+    fn filter_close_tag_split_at_each_byte() {
+        let close = "</think>";
+        for split in 1..close.len() {
+            let (first, second) = close.split_at(split);
+            let mut f = ThinkBlockFilter::new();
+            assert_eq!(f.feed("<think>reasoning"), "", "split at {split}: open");
+            assert_eq!(f.feed(first), "", "split at {split}: first half");
+            assert_eq!(f.feed(second), "", "split at {split}: second half");
+            assert_eq!(f.feed("answer"), "answer", "split at {split}: after");
+        }
+    }
+
+    // Content immediately following the close tag (no leading newline) must be
+    // returned immediately and must NOT set trim_leading_newlines.
+    #[test]
+    fn filter_content_immediately_after_close_tag() {
+        let mut f = ThinkBlockFilter::new();
+        assert_eq!(f.feed("<think>x</think>answer"), "answer");
+        assert_eq!(f.feed(" more"), " more");
+    }
+
+    // After the first think block the filter enters PassThrough.
+    // Any subsequent <think> tokens must be passed through verbatim.
+    #[test]
+    fn filter_second_think_block_passes_through() {
+        let mut f = ThinkBlockFilter::new();
+        assert_eq!(f.feed("<think>first</think>"), "");
+        // PassThrough: second block is NOT filtered.
+        assert_eq!(f.feed("<think>second</think>"), "<think>second</think>");
+        assert_eq!(f.feed(" rest"), " rest");
+    }
+
+    // Korean 3-byte chars near the tail preservation boundary must not cause a
+    // char-boundary panic. The char_boundary adjustment in feed_inside is exercised.
+    #[test]
+    fn filter_utf8_boundary_at_close_tag_tail() {
+        let mut f = ThinkBlockFilter::new();
+        // "가나다" = 9 bytes; keep = CLOSE_TAG.len()-1 = 7.
+        // After feed("<think>가나다"), pending inside = "가나다" (9 bytes, no truncation yet).
+        // After feed("</thi"), pending = "가나다</thi" (15 bytes) → truncated to last 7 bytes.
+        // Byte 15-7=8 lands inside "다" (bytes 6-8), so char_boundary loop backs up to byte 6.
+        assert_eq!(f.feed("<think>가나다"), "");
+        assert_eq!(f.feed("</thi"), ""); // must not panic
+        assert_eq!(f.feed("nk>"), "");
+        assert_eq!(f.feed("answer"), "answer");
+    }
+
+    // Leading newlines after close tag are trimmed; the first non-newline token
+    // stops trimming and is passed through intact, with no further trimming.
+    #[test]
+    fn filter_newline_then_non_newline_after_close_tag() {
+        let mut f = ThinkBlockFilter::new();
+        assert_eq!(f.feed("<think>x</think>"), "");
+        assert_eq!(f.feed("\n"), "");
+        assert_eq!(f.feed("\n"), "");
+        assert_eq!(f.feed("answer\n"), "answer\n"); // trim_leading_newlines reset after first non-newline
+        assert_eq!(f.feed("\n"), "\n"); // subsequent newlines pass through
+    }
+
+    // --- strip_think_blocks edge cases ---
+
+    // An unclosed <think> tag is not matched by the regex and must be preserved.
+    #[test]
+    fn unclosed_think_tag_preserved() {
+        let input = "<think>no closing tag";
+        assert_eq!(strip_think_blocks(input), "<think>no closing tag");
+    }
+
+    // Non-greedy `.*?` correctly handles nested markup inside the think block.
+    #[test]
+    fn nested_markup_inside_think_block() {
+        let input = "<think><b>bold reasoning</b></think>answer";
+        assert_eq!(strip_think_blocks(input), "answer");
+    }
 }

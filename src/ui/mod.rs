@@ -636,4 +636,47 @@ mod tests {
         // max_x = max(0, 0 + 800 - 2000) = max(0, -1200) = 0
         assert_eq!(pos.x, 0.0);
     }
+
+    // --- negative-origin monitors (macOS vertical stacks, Windows left/above primary) ---
+
+    #[test]
+    fn monitor_left_of_primary_negative_x_origin() {
+        // Secondary monitor to the left of primary: origin at (-1920, 0).
+        let pos = center_clamped_to_bounds(
+            egui::pos2(-960.0, 540.0),
+            egui::vec2(600.0, 400.0),
+            bounds(-1920.0, 0.0, 1920.0, 1080.0),
+        );
+        // centered: x = -960 - 300 = -1260, clamp to [-1920, -1920+1920-600] = [-1920, -600]
+        // -1260 is within [-1920, -600] → no clamp
+        assert_eq!(pos.x, -1260.0);
+        // centered: y = 540 - 200 = 340, clamp to [0, 680] → 340
+        assert_eq!(pos.y, 340.0);
+    }
+
+    #[test]
+    fn monitor_above_primary_negative_y_origin() {
+        // Secondary monitor above primary: origin at (0, -1080).
+        let pos = center_clamped_to_bounds(
+            egui::pos2(1280.0, -540.0),
+            egui::vec2(600.0, 400.0),
+            bounds(0.0, -1080.0, 2560.0, 1080.0),
+        );
+        // centered: y = -540 - 200 = -740, clamp to [-1080, -1080+1080-400] = [-1080, -400]
+        // -740 is within [-1080, -400] → no clamp
+        assert_eq!(pos.y, -740.0);
+    }
+
+    // Without display bounds, centering on a cursor near the screen origin produces
+    // negative top-left coordinates. This is intentional: the OS will render the
+    // window partially off-screen, which is acceptable without monitor clamping info.
+    #[test]
+    fn no_bounds_result_is_negative_near_origin() {
+        let pos = center_clamped_to_bounds(
+            egui::pos2(10.0, 10.0),
+            egui::vec2(600.0, 400.0),
+            None,
+        );
+        assert_eq!(pos, egui::pos2(-290.0, -190.0));
+    }
 }

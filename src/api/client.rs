@@ -272,6 +272,58 @@ mod tests {
         assert!(matches!(&events[0], SseEvent::Content(s) if s == "x"));
     }
 
+    // --- Additional SseParser edge cases ---
+
+    // SSE spec allows \r\n line endings; trim_end_matches('\r') must strip the CR.
+    #[test]
+    fn sse_crlf_line_ending() {
+        let mut p = SseParser::new();
+        let events =
+            p.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\r\n");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Content(s) if s == "hi"));
+    }
+
+    // Empty string content must not produce an event (guarded by !content.is_empty()).
+    #[test]
+    fn sse_empty_content_not_emitted() {
+        let mut p = SseParser::new();
+        let events =
+            p.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"\"}}]}\n");
+        assert!(events.is_empty());
+    }
+
+    // null content field deserializes as Option::None and must not produce an event.
+    #[test]
+    fn sse_null_content_not_emitted() {
+        let mut p = SseParser::new();
+        let events =
+            p.feed(b"data: {\"choices\":[{\"delta\":{\"content\":null}}]}\n");
+        assert!(events.is_empty());
+    }
+
+    // Malformed JSON in a data line must be silently ignored (no panic, no event).
+    #[test]
+    fn sse_bad_json_silently_ignored() {
+        let mut p = SseParser::new();
+        let events = p.feed(b"data: not-valid-json\n");
+        assert!(events.is_empty());
+    }
+
+    // [DONE] does not halt parsing; subsequent data lines are still processed.
+    #[test]
+    fn sse_done_does_not_stop_subsequent_parsing() {
+        let mut p = SseParser::new();
+        let input = concat!(
+            "data: [DONE]\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"after\"}}]}\n",
+        );
+        let events = p.feed(input.as_bytes());
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], SseEvent::Done));
+        assert!(matches!(&events[1], SseEvent::Content(s) if s == "after"));
+    }
+
     // --- MessageContent serialization tests ---
 
     #[test]
