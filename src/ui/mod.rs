@@ -125,8 +125,8 @@ impl OverlayApp {
                     if let Err(e) = self.clipboard.write_text(&text) {
                         error!("clipboard write failed: {e}");
                         let err_effects =
-                            self.sm.handle(UiEvent::ClipboardWriteError(e.to_string()));
-                        // ClipboardWriteError never emits WriteClipboard — recursion safe.
+                            self.sm.handle(UiEvent::ClipboardError(e.to_string()));
+                        // ClipboardError never emits WriteClipboard — recursion safe.
                         self.execute_effects(err_effects, ctx);
                     } else {
                         info!(
@@ -176,7 +176,7 @@ impl OverlayApp {
                     info!("single-tap triggered, using clipboard content...");
                     let event = match self.clipboard.read_content() {
                         Ok(content) => UiEvent::ContentReady(content),
-                        Err(e) => UiEvent::ClipboardWriteError(e.to_string()),
+                        Err(e) => UiEvent::ClipboardError(e.to_string()),
                     };
                     let effects = self.sm.handle(event);
                     self.execute_effects(effects, ctx);
@@ -185,7 +185,7 @@ impl OverlayApp {
                     info!("double-tap triggered, copying selection...");
                     let event = match self.clipboard.copy_and_read(&self.platform) {
                         Ok(content) => UiEvent::ContentReady(content),
-                        Err(e) => UiEvent::ClipboardWriteError(e.to_string()),
+                        Err(e) => UiEvent::ClipboardError(e.to_string()),
                     };
                     let effects = self.sm.handle(event);
                     self.execute_effects(effects, ctx);

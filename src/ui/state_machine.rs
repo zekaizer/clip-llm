@@ -62,8 +62,8 @@ pub enum UiEvent {
     FocusLost,
     /// Streaming token from the worker (incremental response).
     StreamDelta { text: String, request_id: u64 },
-    /// Clipboard write failed (feedback from effect execution).
-    ClipboardWriteError(String),
+    /// Clipboard operation failed (read or write).
+    ClipboardError(String),
 }
 
 /// Side effects that the adapter must execute after a state transition.
@@ -222,7 +222,7 @@ impl StateMachine {
                 self.on_stream_delta(text, request_id)
             }
             UiEvent::FocusLost => self.on_focus_lost(),
-            UiEvent::ClipboardWriteError(msg) => self.on_clipboard_write_error(msg),
+            UiEvent::ClipboardError(msg) => self.on_clipboard_error(msg),
         };
 
         self.check_invariants();
@@ -432,7 +432,7 @@ impl StateMachine {
         vec![UiEffect::HideWindow]
     }
 
-    fn on_clipboard_write_error(&mut self, msg: String) -> Vec<UiEffect> {
+    fn on_clipboard_error(&mut self, msg: String) -> Vec<UiEffect> {
         // Must NOT emit WriteClipboard to avoid infinite recursion.
         self.state = OverlayState::Error(msg);
         // Reset focus tracking so the newly shown error window doesn't
@@ -806,11 +806,11 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_write_error_transitions_to_error() {
+    fn clipboard_error_transitions_to_error() {
         let mut sm = new_sm();
         start_processing(&mut sm, "hello");
 
-        let effects = sm.handle(UiEvent::ClipboardWriteError("write failed".into()));
+        let effects = sm.handle(UiEvent::ClipboardError("write failed".into()));
 
         assert_eq!(*sm.state(), OverlayState::Error("write failed".into()));
         assert!(effects.contains(&UiEffect::ShowWindow));
@@ -1186,7 +1186,7 @@ mod tests {
         assert_eq!(*sm.state(), OverlayState::Hidden);
 
         // Clipboard read fails (e.g. copy_and_read timeout) → Error with no original_content.
-        let effects = sm.handle(UiEvent::ClipboardWriteError("timeout".into()));
+        let effects = sm.handle(UiEvent::ClipboardError("timeout".into()));
         assert_eq!(*sm.state(), OverlayState::Error("timeout".into()));
         assert!(effects.contains(&UiEffect::ShowWindow));
 
@@ -1210,7 +1210,7 @@ mod tests {
         assert_eq!(*sm.state(), OverlayState::Hidden);
 
         // Clipboard error shows error overlay.
-        sm.handle(UiEvent::ClipboardWriteError("read failed".into()));
+        sm.handle(UiEvent::ClipboardError("read failed".into()));
         assert_eq!(*sm.state(), OverlayState::Error("read failed".into()));
 
         // FocusLost should be ignored because has_been_focused was reset.
