@@ -209,6 +209,10 @@ mod tests {
         fn display_bounds_at_point(&self, _x: f64, _y: f64) -> Option<(f64, f64, f64, f64)> {
             None
         }
+
+        fn show_window(&self, _pos: Option<(f32, f32)>) -> bool { false }
+        fn hide_window(&self) -> bool { false }
+        fn reposition_window(&self, _x: f32, _y: f32) -> bool { false }
     }
 
     #[test]

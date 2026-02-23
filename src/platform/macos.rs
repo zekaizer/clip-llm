@@ -266,4 +266,18 @@ impl Platform for MacOsPlatform {
             Err(PlatformError::AccessibilityDenied)
         }
     }
+
+    fn show_window(&self, pos: Option<(f32, f32)>) -> bool {
+        configure_window_for_spaces();
+        show_and_focus_window(pos);
+        false // no egui Visible(true) sync needed on macOS
+    }
+
+    fn hide_window(&self) -> bool {
+        false // caller should use ViewportCommand::Visible(false)
+    }
+
+    fn reposition_window(&self, _x: f32, _y: f32) -> bool {
+        false // caller should use ViewportCommand::OuterPosition
+    }
 }
