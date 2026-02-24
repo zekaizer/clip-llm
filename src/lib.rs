@@ -92,6 +92,30 @@ impl RephraseLength {
     }
 }
 
+// -- Thinking mode --
+
+/// Per-mode thinking control.
+/// `Default` preserves the model's default behavior (no override sent).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ThinkingMode {
+    #[default]
+    Default,
+    ForceOn,
+    ForceOff,
+}
+
+impl ThinkingMode {
+    pub const ALL: &[Self] = &[Self::Default, Self::ForceOn, Self::ForceOff];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::ForceOn => "Think",
+            Self::ForceOff => "No Think",
+        }
+    }
+}
+
 /// Bundled rephrase parameters — passed as a single argument instead of (style, length) pairs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct RephraseParams {
@@ -132,6 +156,14 @@ impl ProcessMode {
             Self::Translate => "Translating...",
             Self::Rephrase => "Rephrasing...",
             Self::Summarize => "Summarizing...",
+        }
+    }
+
+    /// Default thinking mode for this processing mode.
+    pub fn default_thinking(self) -> ThinkingMode {
+        match self {
+            Self::Translate | Self::Rephrase => ThinkingMode::ForceOff,
+            Self::Summarize => ThinkingMode::Default,
         }
     }
 
