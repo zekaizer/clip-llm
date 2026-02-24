@@ -160,6 +160,11 @@ impl OverlayApp {
                     self.think_expanded = false;
                     ctx.memory_mut(|m| m.reset_areas());
                 }
+                UiEffect::PasteClipboard => {
+                    if let Err(e) = self.platform.paste_to_foreground() {
+                        error!("paste simulation failed: {e}");
+                    }
+                }
             }
         }
     }
@@ -383,6 +388,7 @@ impl OverlayApp {
                 UiEvent::UserChangeThinkingMode(thinking)
             }
             overlay::OverlayAction::CopyToClipboard => UiEvent::UserCopy,
+            overlay::OverlayAction::PasteReplace => UiEvent::UserPaste,
         };
         let effects = self.sm.handle(event);
         self.execute_effects(effects, ctx);
@@ -433,6 +439,7 @@ impl eframe::App for OverlayApp {
                 mode: self.sm.effective_thinking_mode(),
                 supported: self.sm.thinking_supported(),
             },
+            self.sm.auto_copy(),
             ctx,
         );
 

@@ -77,6 +77,8 @@ pub enum UiEvent {
     ClipboardError(String),
     /// User clicked the copy button in the result area.
     UserCopy,
+    /// User clicked the paste/replace button in the result area.
+    UserPaste,
 }
 
 /// Side effects that the adapter must execute after a state transition.
@@ -96,6 +98,8 @@ pub enum UiEffect {
     CaptureMousePosition,
     /// Reset egui Area stored sizing (needed on state variant change).
     ResetAreas,
+    /// Simulate paste (Cmd+V / Ctrl+V) into the previously focused app.
+    PasteClipboard,
 }
 
 // ---------------------------------------------------------------------------
@@ -266,6 +270,7 @@ impl StateMachine {
             UiEvent::FocusLost => self.on_focus_lost(),
             UiEvent::ClipboardError(msg) => self.on_clipboard_error(msg),
             UiEvent::UserCopy => self.on_user_copy(),
+            UiEvent::UserPaste => self.on_user_paste(),
         };
 
         self.check_invariants();
@@ -494,6 +499,19 @@ impl StateMachine {
     fn on_user_copy(&self) -> Vec<UiEffect> {
         if let OverlayState::Result(text) = &self.state {
             vec![UiEffect::WriteClipboard(text.clone())]
+        } else {
+            vec![]
+        }
+    }
+
+    fn on_user_paste(&mut self) -> Vec<UiEffect> {
+        if let OverlayState::Result(text) = &self.state {
+            let text = text.clone();
+            let mut effects = vec![UiEffect::WriteClipboard(text)];
+            self.reset_to_hidden();
+            effects.push(UiEffect::HideWindow);
+            effects.push(UiEffect::PasteClipboard);
+            effects
         } else {
             vec![]
         }
@@ -1593,6 +1611,40 @@ mod tests {
         // Processing state.
         start_processing(&mut sm, "hello");
         let effects = sm.handle(UiEvent::UserCopy);
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn user_paste_in_result_state() {
+        let mut sm = new_sm();
+        let effects = sm.handle(UiEvent::ContentReady {
+            content: ClipboardContent::text_only("hello".into()),
+            auto_copy: true,
+        });
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerResult {
+            text: "result".into(),
+            think_content: None,
+            request_id: rid,
+        });
+
+        let effects = sm.handle(UiEvent::UserPaste);
+        assert!(effects.contains(&UiEffect::WriteClipboard("result".into())));
+        assert!(effects.contains(&UiEffect::HideWindow));
+        assert!(effects.contains(&UiEffect::PasteClipboard));
+        assert_eq!(sm.state(), &OverlayState::Hidden);
+    }
+
+    #[test]
+    fn user_paste_not_in_result_state() {
+        let mut sm = new_sm();
+        // Hidden state.
+        let effects = sm.handle(UiEvent::UserPaste);
+        assert!(effects.is_empty());
+
+        // Processing state.
+        start_processing(&mut sm, "hello");
+        let effects = sm.handle(UiEvent::UserPaste);
         assert!(effects.is_empty());
     }
 }

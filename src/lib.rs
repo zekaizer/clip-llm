@@ -259,6 +259,9 @@ pub enum PlatformError {
 
     #[error("copy simulation failed: {0}")]
     CopyFailed(String),
+
+    #[error("paste simulation failed: {0}")]
+    PasteFailed(String),
 }
 
 #[derive(Debug, Error)]

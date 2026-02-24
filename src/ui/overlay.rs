@@ -34,6 +34,7 @@ pub enum OverlayAction {
     ChangeRephraseLength(RephraseLength),
     ChangeThinkingMode(ThinkingMode),
     CopyToClipboard,
+    PasteReplace,
 }
 
 pub struct OverlayOutput {
@@ -46,6 +47,7 @@ pub struct OverlayOutput {
 }
 
 /// Render the overlay panel. Returns action and desired viewport size.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     state: &OverlayState,
     mode: ProcessMode,
@@ -53,6 +55,7 @@ pub fn render(
     available_modes: &[ProcessMode],
     rephrase_params: RephraseParams,
     thinking: ThinkingState,
+    auto_copy: bool,
     ctx: &egui::Context,
 ) -> OverlayOutput {
     if matches!(state, OverlayState::Hidden) {
@@ -129,6 +132,7 @@ pub fn render(
                             text,
                             streaming.think_content,
                             streaming.think_expanded,
+                            auto_copy,
                             &mut action,
                         );
                     }
@@ -293,6 +297,7 @@ fn render_result(
     text: &str,
     think_content: Option<&str>,
     think_expanded: bool,
+    auto_copy: bool,
     action: &mut OverlayAction,
 ) {
     if let Some(content) = think_content {
@@ -300,7 +305,9 @@ fn render_result(
         ui.add_space(4.0);
     }
 
-    // Copy button: always rendered at top-right of result area.
+    // Action button: always rendered at top-right of result area.
+    // auto_copy (double-tap): paste/replace button (↩)
+    // !auto_copy (single-tap): copy button (📋)
     // Opacity changes on hover (subtle when idle, prominent when hovered).
     let result_top = ui.cursor().min;
     render_scrollable_text(ui, ("result", mode), text, MAX_RESULT_HEIGHT, false);
@@ -312,20 +319,23 @@ fn render_result(
     );
     let btn_rect = egui::Rect::from_min_size(btn_pos, btn_size);
 
-    // Check pointer over button area only.
     let hovered = ui.input(|i| {
         i.pointer.hover_pos().is_some_and(|p| btn_rect.contains(p))
     });
     let alpha = if hovered { 200 } else { 30 };
-    let copy_btn = egui::Button::new(
-        egui::RichText::new("\u{1f4cb}")
-            .size(14.0),
+    let icon = if auto_copy { "\u{21a9}" } else { "\u{1f4cb}" };
+    let btn = egui::Button::new(
+        egui::RichText::new(icon).size(14.0),
     )
     .fill(egui::Color32::from_rgba_unmultiplied(50, 50, 50, alpha))
     .corner_radius(4.0);
 
-    if ui.put(btn_rect, copy_btn).clicked() {
-        *action = OverlayAction::CopyToClipboard;
+    if ui.put(btn_rect, btn).clicked() {
+        *action = if auto_copy {
+            OverlayAction::PasteReplace
+        } else {
+            OverlayAction::CopyToClipboard
+        };
     }
 }
 

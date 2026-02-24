@@ -3,6 +3,9 @@ pub trait Platform {
     /// Simulate Cmd+C (macOS) or Ctrl+C (Windows) to copy selected text.
     fn simulate_copy(&self) -> Result<(), crate::PlatformError>;
 
+    /// Simulate Cmd+V (macOS) or Ctrl+V (Windows) to paste clipboard content.
+    fn simulate_paste(&self) -> Result<(), crate::PlatformError>;
+
     /// Check and prompt for required OS permissions (e.g. macOS Accessibility).
     fn check_accessibility(&self) -> Result<(), crate::PlatformError>;
 
@@ -25,6 +28,10 @@ pub trait Platform {
     /// Reposition the window using a direct native API call.
     /// Returns true if handled natively (caller must not send `OuterPosition`).
     fn reposition_window(&self, x: f32, y: f32) -> bool;
+
+    /// Paste clipboard content into the previously focused application.
+    /// Handles focus transfer, timing, key simulation, and platform-specific cleanup.
+    fn paste_to_foreground(&self) -> Result<(), crate::PlatformError>;
 }
 
 #[cfg(target_os = "macos")]

@@ -14,6 +14,8 @@ use crate::PlatformError;
 
 /// Virtual key code for 'C' on ANSI keyboards.
 const KEY_C: CGKeyCode = 0x08;
+/// Virtual key code for 'V' on ANSI keyboards.
+const KEY_V: CGKeyCode = 0x09;
 
 // Typed function pointer aliases for `objc_msgSend` transmute casts.
 type MsgSendBool = unsafe extern "C" fn(*mut c_void, *mut c_void, bool);
@@ -242,6 +244,26 @@ impl Platform for MacOsPlatform {
         Ok(())
     }
 
+    fn simulate_paste(&self) -> Result<(), PlatformError> {
+        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+            .map_err(|()| PlatformError::PasteFailed("failed to create CGEventSource".into()))?;
+
+        let key_down = CGEvent::new_keyboard_event(source.clone(), KEY_V, true)
+            .map_err(|()| PlatformError::PasteFailed("failed to create key-down event".into()))?;
+        key_down.set_flags(CGEventFlags::CGEventFlagCommand);
+
+        let key_up = CGEvent::new_keyboard_event(source, KEY_V, false)
+            .map_err(|()| PlatformError::PasteFailed("failed to create key-up event".into()))?;
+        key_up.set_flags(CGEventFlags::CGEventFlagCommand);
+
+        debug!("posting Cmd+V key events to HID");
+        key_down.post(CGEventTapLocation::HID);
+        thread::sleep(Duration::from_millis(KEY_EVENT_DELAY_MS));
+        key_up.post(CGEventTapLocation::HID);
+
+        Ok(())
+    }
+
     fn mouse_position(&self) -> Option<(f64, f64)> {
         // CGEvent.location() returns Quartz logical points (top-left origin).
         // This matches egui's OuterPosition coordinate system directly.
@@ -279,5 +301,23 @@ impl Platform for MacOsPlatform {
 
     fn reposition_window(&self, _x: f32, _y: f32) -> bool {
         false // caller should use ViewportCommand::OuterPosition
+    }
+
+    fn paste_to_foreground(&self) -> Result<(), PlatformError> {
+        // Deactivate this app so the OS activates the previously focused app.
+        // [NSApp hide:nil] is synchronous — the target app is foreground after this call.
+        unsafe {
+            let cls = objc_getClass(c"NSApplication".as_ptr());
+            let app = objc_msgSend(cls, sel_registerName(c"sharedApplication".as_ptr()));
+            if !app.is_null() {
+                let nil: *mut c_void = std::ptr::null_mut();
+                let msg_send_ptr: MsgSendPtr =
+                    std::mem::transmute(objc_msgSend as *const ());
+                msg_send_ptr(app, sel_registerName(c"hide:".as_ptr()), nil);
+                debug!("yielded focus via [NSApp hide:]");
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+        self.simulate_paste()
     }
 }
