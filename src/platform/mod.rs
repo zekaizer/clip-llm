@@ -25,6 +25,10 @@ pub trait Platform {
     /// Reposition the window using a direct native API call.
     /// Returns true if handled natively (caller must not send `OuterPosition`).
     fn reposition_window(&self, x: f32, y: f32) -> bool;
+
+    /// Paste clipboard content into the previously focused application.
+    /// Handles focus transfer, timing, key simulation, and platform-specific cleanup.
+    fn paste_to_foreground(&self) -> Result<(), crate::PlatformError>;
 }
 
 #[cfg(target_os = "macos")]

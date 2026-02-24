@@ -7,6 +7,20 @@ const OVERLAY_WIDTH: f32 = 480.0;
 const MAX_RESULT_HEIGHT: f32 = 260.0;
 /// Space around the frame for shadow rendering.
 const SHADOW_PAD: f32 = 20.0;
+/// Accent color for selected tab underlines.
+fn accent_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(108, 166, 255, 200)
+}
+/// Dimmed accent color for hover underlines and rephrase indent line.
+fn accent_color_dim() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(108, 166, 255, 80)
+}
+/// Action button: distance (px) at which the button becomes fully transparent.
+const ACTION_BTN_FADE_RADIUS: f32 = 80.0;
+/// Action button: maximum alpha value at zero distance from cursor.
+const ACTION_BTN_ALPHA_MAX: f32 = 200.0;
+/// Action button size (square).
+const ACTION_BTN_SIZE: f32 = 26.0;
 
 /// Streaming and think-block display state for Processing/Result rendering.
 pub struct StreamingState<'a> {
@@ -33,6 +47,8 @@ pub enum OverlayAction {
     ChangeRephraseStyle(RephraseStyle),
     ChangeRephraseLength(RephraseLength),
     ChangeThinkingMode(ThinkingMode),
+    CopyToClipboard,
+    PasteReplace,
 }
 
 pub struct OverlayOutput {
@@ -45,6 +61,7 @@ pub struct OverlayOutput {
 }
 
 /// Render the overlay panel. Returns action and desired viewport size.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     state: &OverlayState,
     mode: ProcessMode,
@@ -52,6 +69,7 @@ pub fn render(
     available_modes: &[ProcessMode],
     rephrase_params: RephraseParams,
     thinking: ThinkingState,
+    auto_copy: bool,
     ctx: &egui::Context,
 ) -> OverlayOutput {
     if matches!(state, OverlayState::Hidden) {
@@ -128,6 +146,7 @@ pub fn render(
                             text,
                             streaming.think_content,
                             streaming.think_expanded,
+                            auto_copy,
                             &mut action,
                         );
                     }
@@ -292,13 +311,55 @@ fn render_result(
     text: &str,
     think_content: Option<&str>,
     think_expanded: bool,
+    auto_copy: bool,
     action: &mut OverlayAction,
 ) {
     if let Some(content) = think_content {
         render_think_toggle(ui, think_expanded, content, action);
         ui.add_space(4.0);
     }
+
+    // Action button: always rendered at top-right of result area.
+    // auto_copy (double-tap): paste/replace button (↩)
+    // !auto_copy (single-tap): copy button (📋)
+    // Opacity changes on hover (subtle when idle, prominent when hovered).
+    let result_top = ui.cursor().min;
     render_scrollable_text(ui, ("result", mode), text, MAX_RESULT_HEIGHT, false);
+
+    let btn_size = egui::vec2(ACTION_BTN_SIZE, ACTION_BTN_SIZE);
+    let btn_pos = egui::pos2(
+        result_top.x + OVERLAY_WIDTH - btn_size.x - 2.0,
+        result_top.y + 2.0,
+    );
+    let btn_rect = egui::Rect::from_min_size(btn_pos, btn_size);
+
+    let alpha = ui.input(|i| {
+        i.pointer.hover_pos().map_or(0u8, |p| {
+            let dist = btn_rect.center().distance(p);
+            if dist >= ACTION_BTN_FADE_RADIUS {
+                0
+            } else {
+                ((1.0 - dist / ACTION_BTN_FADE_RADIUS) * ACTION_BTN_ALPHA_MAX) as u8
+            }
+        })
+    });
+    let icon = if auto_copy { "\u{21a9}" } else { "\u{1f4cb}" };
+    let btn = egui::Button::new(
+        egui::RichText::new(icon)
+            .size(14.0)
+            .color(egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha)),
+    )
+    .fill(egui::Color32::from_rgba_unmultiplied(50, 50, 50, alpha))
+    .stroke(egui::Stroke::NONE)
+    .corner_radius(4.0);
+
+    if ui.put(btn_rect, btn).clicked() {
+        *action = if auto_copy {
+            OverlayAction::PasteReplace
+        } else {
+            OverlayAction::CopyToClipboard
+        };
+    }
 }
 
 fn render_param_pills<T: Copy + PartialEq>(
@@ -344,23 +405,40 @@ fn render_rephrase_params(
     params: RephraseParams,
     action: &mut OverlayAction,
 ) {
-    render_param_pills(
-        ui,
-        "Style",
-        RephraseStyle::ALL,
-        params.style,
-        |s| s.label(),
-        OverlayAction::ChangeRephraseStyle,
-        action,
-    );
-    render_param_pills(
-        ui,
-        "Length",
-        RephraseLength::ALL,
-        params.length,
-        |l| l.label(),
-        OverlayAction::ChangeRephraseLength,
-        action,
+    // Capture the outer left edge before indent shifts the cursor.
+    let outer_left = ui.cursor().min.x;
+
+    let response = ui.indent(egui::Id::new("rephrase_params"), |ui| {
+        render_param_pills(
+            ui,
+            "Style",
+            RephraseStyle::ALL,
+            params.style,
+            |s| s.label(),
+            OverlayAction::ChangeRephraseStyle,
+            action,
+        );
+        render_param_pills(
+            ui,
+            "Length",
+            RephraseLength::ALL,
+            params.length,
+            |l| l.label(),
+            OverlayAction::ChangeRephraseLength,
+            action,
+        );
+    });
+
+    // Draw accent line on the left edge of the indented area.
+    let rect = response.response.rect;
+    let line_x = (outer_left + rect.left()) / 2.0;
+    ui.painter().rect_filled(
+        egui::Rect::from_min_size(
+            egui::pos2(line_x, rect.top() + 2.0),
+            egui::vec2(1.5, rect.height() - 4.0),
+        ),
+        0.75,
+        accent_color_dim(),
     );
 }
 
@@ -388,14 +466,27 @@ fn render_tab_bar(
                 });
 
             let button = egui::Button::new(text)
-                .fill(if is_selected {
-                    egui::Color32::from_rgba_unmultiplied(60, 60, 60, 200)
-                } else {
-                    egui::Color32::TRANSPARENT
-                })
+                .fill(egui::Color32::TRANSPARENT)
+                .stroke(egui::Stroke::NONE)
                 .corner_radius(6.0);
 
-            if ui.add(button).clicked() && !is_selected && is_available {
+            let response = ui.add(button);
+            let underline_color = if is_selected {
+                Some(accent_color())
+            } else if response.hovered() && is_available {
+                Some(accent_color_dim())
+            } else {
+                None
+            };
+            if let Some(color) = underline_color {
+                let rect = response.rect;
+                let underline = egui::Rect::from_min_size(
+                    egui::pos2(rect.left(), rect.bottom() - 2.0),
+                    egui::vec2(rect.width(), 2.0),
+                );
+                ui.painter().rect_filled(underline, 0.0, color);
+            }
+            if response.clicked() && !is_selected && is_available {
                 *action = OverlayAction::SwitchMode(mode);
             }
         }

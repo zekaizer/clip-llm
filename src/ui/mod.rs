@@ -132,6 +132,10 @@ impl OverlayApp {
                             self.sm.handle(UiEvent::ClipboardError(e.to_string()));
                         // ClipboardError never emits WriteClipboard — recursion safe.
                         self.execute_effects(err_effects, ctx);
+                        // Abort remaining effects: the state machine transitioned to
+                        // Error, so subsequent effects (e.g. PasteClipboard) from the
+                        // original chain are stale and must not execute.
+                        return;
                     } else {
                         info!(
                             "{} complete ({} chars), copied to clipboard",
@@ -160,6 +164,11 @@ impl OverlayApp {
                     self.think_expanded = false;
                     ctx.memory_mut(|m| m.reset_areas());
                 }
+                UiEffect::PasteClipboard => {
+                    if let Err(e) = self.platform.paste_to_foreground() {
+                        error!("paste simulation failed: {e}");
+                    }
+                }
             }
         }
     }
@@ -179,7 +188,7 @@ impl OverlayApp {
                 TapAction::SingleTap => {
                     info!("single-tap triggered, using clipboard content...");
                     let event = match self.clipboard.read_content() {
-                        Ok(content) => UiEvent::ContentReady(content),
+                        Ok(content) => UiEvent::ContentReady { content, auto_copy: false },
                         Err(e) => UiEvent::ClipboardError(e.to_string()),
                     };
                     let effects = self.sm.handle(event);
@@ -188,7 +197,7 @@ impl OverlayApp {
                 TapAction::DoubleTap => {
                     info!("double-tap triggered, copying selection...");
                     let event = match self.clipboard.copy_and_read(&self.platform) {
-                        Ok(content) => UiEvent::ContentReady(content),
+                        Ok(content) => UiEvent::ContentReady { content, auto_copy: true },
                         Err(e) => UiEvent::ClipboardError(e.to_string()),
                     };
                     let effects = self.sm.handle(event);
@@ -208,9 +217,10 @@ impl OverlayApp {
                 crate::diagnostics::ScenarioAction::ShowOverlay { mode, text } => {
                     // Switch mode first (no-op effects in Hidden state) before ContentReady.
                     self.sm.handle(UiEvent::UserSwitchMode(mode));
-                    let effects = self.sm.handle(UiEvent::ContentReady(
-                        crate::ClipboardContent::text_only(text),
-                    ));
+                    let effects = self.sm.handle(UiEvent::ContentReady {
+                        content: crate::ClipboardContent::text_only(text),
+                        auto_copy: true,
+                    });
                     self.execute_effects(effects, ctx);
                 }
                 crate::diagnostics::ScenarioAction::SwitchMode(mode) => {
@@ -381,6 +391,8 @@ impl OverlayApp {
             overlay::OverlayAction::ChangeThinkingMode(thinking) => {
                 UiEvent::UserChangeThinkingMode(thinking)
             }
+            overlay::OverlayAction::CopyToClipboard => UiEvent::UserCopy,
+            overlay::OverlayAction::PasteReplace => UiEvent::UserPaste,
         };
         let effects = self.sm.handle(event);
         self.execute_effects(effects, ctx);
@@ -431,6 +443,7 @@ impl eframe::App for OverlayApp {
                 mode: self.sm.effective_thinking_mode(),
                 supported: self.sm.thinking_supported(),
             },
+            self.sm.auto_copy(),
             ctx,
         );
 

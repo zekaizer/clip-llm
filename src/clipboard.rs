@@ -211,6 +211,7 @@ mod tests {
         fn show_window(&self, _pos: Option<(f32, f32)>) -> bool { false }
         fn hide_window(&self) -> bool { false }
         fn reposition_window(&self, _x: f32, _y: f32) -> bool { false }
+        fn paste_to_foreground(&self) -> Result<(), PlatformError> { Ok(()) }
     }
 
     #[test]
