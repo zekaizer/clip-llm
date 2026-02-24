@@ -132,6 +132,10 @@ impl OverlayApp {
                             self.sm.handle(UiEvent::ClipboardError(e.to_string()));
                         // ClipboardError never emits WriteClipboard — recursion safe.
                         self.execute_effects(err_effects, ctx);
+                        // Abort remaining effects: the state machine transitioned to
+                        // Error, so subsequent effects (e.g. PasteClipboard) from the
+                        // original chain are stale and must not execute.
+                        return;
                     } else {
                         info!(
                             "{} complete ({} chars), copied to clipboard",

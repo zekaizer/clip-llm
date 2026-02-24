@@ -196,10 +196,6 @@ mod tests {
             Ok(())
         }
 
-        fn simulate_paste(&self) -> Result<(), PlatformError> {
-            Ok(())
-        }
-
         fn check_accessibility(&self) -> Result<(), PlatformError> {
             Ok(())
         }

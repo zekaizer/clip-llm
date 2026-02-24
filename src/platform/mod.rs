@@ -3,9 +3,6 @@ pub trait Platform {
     /// Simulate Cmd+C (macOS) or Ctrl+C (Windows) to copy selected text.
     fn simulate_copy(&self) -> Result<(), crate::PlatformError>;
 
-    /// Simulate Cmd+V (macOS) or Ctrl+V (Windows) to paste clipboard content.
-    fn simulate_paste(&self) -> Result<(), crate::PlatformError>;
-
     /// Check and prompt for required OS permissions (e.g. macOS Accessibility).
     fn check_accessibility(&self) -> Result<(), crate::PlatformError>;
 

@@ -27,6 +27,8 @@ type MsgSendRetBool = unsafe extern "C" fn(*mut c_void, *mut c_void) -> bool;
 
 /// Delay between key-down and key-up events (ms).
 const KEY_EVENT_DELAY_MS: u64 = 50;
+/// Delay for WindowServer focus transfer after [NSApp hide:] (ms).
+const FOCUS_TRANSFER_DELAY_MS: u64 = 100;
 
 /// NSWindowCollectionBehavior flags.
 const NS_WINDOW_COLLECTION_BEHAVIOR_MOVE_TO_ACTIVE_SPACE: c_ulong = 1 << 1;
@@ -221,6 +223,29 @@ pub fn log_window_diagnostics() {
 
 pub struct MacOsPlatform;
 
+impl MacOsPlatform {
+    /// Simulate Cmd+V by posting CGEvent keyboard events to the HID system.
+    fn simulate_paste(&self) -> Result<(), PlatformError> {
+        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+            .map_err(|()| PlatformError::PasteFailed("failed to create CGEventSource".into()))?;
+
+        let key_down = CGEvent::new_keyboard_event(source.clone(), KEY_V, true)
+            .map_err(|()| PlatformError::PasteFailed("failed to create key-down event".into()))?;
+        key_down.set_flags(CGEventFlags::CGEventFlagCommand);
+
+        let key_up = CGEvent::new_keyboard_event(source, KEY_V, false)
+            .map_err(|()| PlatformError::PasteFailed("failed to create key-up event".into()))?;
+        key_up.set_flags(CGEventFlags::CGEventFlagCommand);
+
+        debug!("posting Cmd+V key events to HID");
+        key_down.post(CGEventTapLocation::HID);
+        thread::sleep(Duration::from_millis(KEY_EVENT_DELAY_MS));
+        key_up.post(CGEventTapLocation::HID);
+
+        Ok(())
+    }
+}
+
 impl Platform for MacOsPlatform {
     /// Simulate Cmd+C by posting CGEvent keyboard events to the HID system.
     /// Requires Accessibility permission.
@@ -237,26 +262,6 @@ impl Platform for MacOsPlatform {
         key_up.set_flags(CGEventFlags::CGEventFlagCommand);
 
         debug!("posting Cmd+C key events to HID");
-        key_down.post(CGEventTapLocation::HID);
-        thread::sleep(Duration::from_millis(KEY_EVENT_DELAY_MS));
-        key_up.post(CGEventTapLocation::HID);
-
-        Ok(())
-    }
-
-    fn simulate_paste(&self) -> Result<(), PlatformError> {
-        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
-            .map_err(|()| PlatformError::PasteFailed("failed to create CGEventSource".into()))?;
-
-        let key_down = CGEvent::new_keyboard_event(source.clone(), KEY_V, true)
-            .map_err(|()| PlatformError::PasteFailed("failed to create key-down event".into()))?;
-        key_down.set_flags(CGEventFlags::CGEventFlagCommand);
-
-        let key_up = CGEvent::new_keyboard_event(source, KEY_V, false)
-            .map_err(|()| PlatformError::PasteFailed("failed to create key-up event".into()))?;
-        key_up.set_flags(CGEventFlags::CGEventFlagCommand);
-
-        debug!("posting Cmd+V key events to HID");
         key_down.post(CGEventTapLocation::HID);
         thread::sleep(Duration::from_millis(KEY_EVENT_DELAY_MS));
         key_up.post(CGEventTapLocation::HID);
@@ -305,7 +310,9 @@ impl Platform for MacOsPlatform {
 
     fn paste_to_foreground(&self) -> Result<(), PlatformError> {
         // Deactivate this app so the OS activates the previously focused app.
-        // [NSApp hide:nil] is synchronous — the target app is foreground after this call.
+        // [NSApp hide:nil] itself is synchronous, but the WindowServer IPC for
+        // focus transfer to the target app is asynchronous — the target needs
+        // time to become first responder before it can receive key events.
         unsafe {
             let cls = objc_getClass(c"NSApplication".as_ptr());
             let app = objc_msgSend(cls, sel_registerName(c"sharedApplication".as_ptr()));
@@ -317,7 +324,8 @@ impl Platform for MacOsPlatform {
                 debug!("yielded focus via [NSApp hide:]");
             }
         }
-        thread::sleep(Duration::from_millis(100));
+        // Wait for WindowServer focus transfer to complete.
+        thread::sleep(Duration::from_millis(FOCUS_TRANSFER_DELAY_MS));
         self.simulate_paste()
     }
 }

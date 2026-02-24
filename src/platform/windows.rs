@@ -17,8 +17,45 @@ use crate::PlatformError;
 
 /// Delay between key events (ms).
 const KEY_EVENT_DELAY_MS: u64 = 50;
+/// Delay for OS focus transfer after SW_HIDE (ms).
+const FOCUS_TRANSFER_DELAY_MS: u64 = 100;
 
 pub struct WindowsPlatform;
+
+impl WindowsPlatform {
+    fn simulate_paste(&self) -> Result<(), PlatformError> {
+        debug!("posting Ctrl+V key events via SendInput");
+
+        let inputs = [
+            // Release any held modifier keys.
+            make_key_input(VK_SHIFT, KEYEVENTF_KEYUP),
+            make_key_input(VK_CONTROL, KEYEVENTF_KEYUP),
+            // Clean Ctrl+V
+            make_key_input(VK_CONTROL, 0),
+            make_key_input(VK_V, 0),
+            make_key_input(VK_V, KEYEVENTF_KEYUP),
+            make_key_input(VK_CONTROL, KEYEVENTF_KEYUP),
+        ];
+
+        let sent = unsafe {
+            SendInput(
+                inputs.len() as u32,
+                inputs.as_ptr(),
+                std::mem::size_of::<INPUT>() as i32,
+            )
+        };
+
+        if sent != inputs.len() as u32 {
+            return Err(PlatformError::PasteFailed(format!(
+                "SendInput returned {sent}, expected {}",
+                inputs.len()
+            )));
+        }
+
+        thread::sleep(Duration::from_millis(KEY_EVENT_DELAY_MS));
+        Ok(())
+    }
+}
 
 impl Platform for WindowsPlatform {
     /// Simulate Ctrl+C by sending keyboard input via SendInput.
@@ -48,39 +85,6 @@ impl Platform for WindowsPlatform {
 
         if sent != inputs.len() as u32 {
             return Err(PlatformError::CopyFailed(format!(
-                "SendInput returned {sent}, expected {}",
-                inputs.len()
-            )));
-        }
-
-        thread::sleep(Duration::from_millis(KEY_EVENT_DELAY_MS));
-        Ok(())
-    }
-
-    fn simulate_paste(&self) -> Result<(), PlatformError> {
-        debug!("posting Ctrl+V key events via SendInput");
-
-        let inputs = [
-            // Release any held modifier keys.
-            make_key_input(VK_SHIFT, KEYEVENTF_KEYUP),
-            make_key_input(VK_CONTROL, KEYEVENTF_KEYUP),
-            // Clean Ctrl+V
-            make_key_input(VK_CONTROL, 0),
-            make_key_input(VK_V, 0),
-            make_key_input(VK_V, KEYEVENTF_KEYUP),
-            make_key_input(VK_CONTROL, KEYEVENTF_KEYUP),
-        ];
-
-        let sent = unsafe {
-            SendInput(
-                inputs.len() as u32,
-                inputs.as_ptr(),
-                std::mem::size_of::<INPUT>() as i32,
-            )
-        };
-
-        if sent != inputs.len() as u32 {
-            return Err(PlatformError::PasteFailed(format!(
                 "SendInput returned {sent}, expected {}",
                 inputs.len()
             )));
@@ -151,21 +155,30 @@ impl Platform for WindowsPlatform {
     }
 
     fn paste_to_foreground(&self) -> Result<(), PlatformError> {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            ShowWindow, ShowWindowAsync, SW_HIDE, SW_SHOWNA,
+        };
+
+        let hwnd = find_clip_llm_hwnd();
+
         // SW_HIDE transfers foreground to the previous app. move_window_offscreen()
         // alone keeps us as foreground, so SendInput would target the overlay.
-        if let Some(hwnd) = find_clip_llm_hwnd() {
-            use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
-            unsafe { ShowWindow(hwnd, SW_HIDE); }
+        if let Some(h) = hwnd {
+            unsafe { ShowWindow(h, SW_HIDE); }
             debug!("yielded focus via ShowWindow(SW_HIDE)");
+        } else {
+            warn!("paste_to_foreground: window not found, paste may target wrong app");
         }
-        thread::sleep(Duration::from_millis(100));
+
+        // Wait for the target app to become foreground and ready for input.
+        thread::sleep(Duration::from_millis(FOCUS_TRANSFER_DELAY_MS));
         let result = self.simulate_paste();
+
         // Restore offscreen-but-visible state to avoid eframe CPU spin (egui#5229).
         // SW_HIDE triggers ControlFlow::Poll; SW_SHOWNA at (-32000,-32000) restores Wait.
         // Do NOT use show_no_activate() — it repositions to cursor.
-        if let Some(hwnd) = find_clip_llm_hwnd() {
-            use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindowAsync, SW_SHOWNA};
-            unsafe { ShowWindowAsync(hwnd, SW_SHOWNA); }
+        if let Some(h) = hwnd {
+            unsafe { ShowWindowAsync(h, SW_SHOWNA); }
         }
         result
     }
