@@ -330,9 +330,9 @@ static TRAY_QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// Decode the embedded tray icon PNG into an RGBA `tray_icon::Icon`.
 fn load_tray_icon() -> tray_icon::Icon {
     let png_bytes = include_bytes!("../../assets/tray-icon-32.png");
-    let decoder = png::Decoder::new(png_bytes.as_slice());
+    let decoder = png::Decoder::new(std::io::Cursor::new(png_bytes.as_slice()));
     let mut reader = decoder.read_info().expect("invalid tray icon PNG");
-    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let mut buf = vec![0u8; reader.output_buffer_size().expect("unknown output buffer size")];
     let info = reader.next_frame(&mut buf).expect("failed to decode tray icon");
     buf.truncate(info.buffer_size());
     tray_icon::Icon::from_rgba(buf, info.width, info.height).expect("invalid RGBA icon data")

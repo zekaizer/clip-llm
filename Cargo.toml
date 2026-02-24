@@ -1,27 +1,27 @@
 [package]
 name = "clip-llm"
 version = "0.8.0"
-edition = "2021"
+edition = "2024"
 authors = ["Luke Lee <zekaizer@gmail.com>"]
 
 [dependencies]
-global-hotkey = "0.6"
+global-hotkey = "0.7"
 arboard = "3"
-reqwest = { version = "0.12", features = ["rustls-tls", "json"], default-features = false }
+reqwest = { version = "0.13", features = ["rustls", "json"], default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 regex = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu"] }
-egui-wgpu = "0.31"
-wgpu = "24"
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "wgpu"] }
+egui-wgpu = "0.33"
+wgpu = "27"
 tokio = { version = "1", features = ["rt", "macros", "sync"] }
 zstd = "0.13"
-png = "0.17"
+png = "0.18"
 base64 = "0.22"
-tray-icon = "0.19"
+tray-icon = "0.21"
 image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
 chrono = { version = "0.4", optional = true, default-features = false, features = ["clock"] }
 
@@ -37,4 +37,4 @@ core-foundation = "0.10"
 winit = { version = "0.30", default-features = false }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }

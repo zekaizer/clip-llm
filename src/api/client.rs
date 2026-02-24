@@ -172,14 +172,12 @@ impl SseParser {
                 continue;
             }
 
-            if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) {
-                if let Some(choice) = chunk.choices.first() {
-                    if let Some(content) = &choice.delta.content {
-                        if !content.is_empty() {
-                            events.push(SseEvent::Content(content.clone()));
-                        }
-                    }
-                }
+            if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data)
+                && let Some(choice) = chunk.choices.first()
+                && let Some(content) = &choice.delta.content
+                && !content.is_empty()
+            {
+                events.push(SseEvent::Content(content.clone()));
             }
         }
 

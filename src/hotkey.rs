@@ -48,11 +48,11 @@ impl HotkeyDetector {
     /// otherwise returns `Pending`.
     pub fn on_press(&mut self) -> TapAction {
         let now = Instant::now();
-        if let Some(last) = self.last_press.take() {
-            if now.duration_since(last) <= DOUBLE_TAP_TIMEOUT {
-                debug!("double-tap detected");
-                return TapAction::DoubleTap;
-            }
+        if let Some(last) = self.last_press.take()
+            && now.duration_since(last) <= DOUBLE_TAP_TIMEOUT
+        {
+            debug!("double-tap detected");
+            return TapAction::DoubleTap;
         }
         // First tap or timeout expired — record and wait.
         self.last_press = Some(now);
@@ -69,12 +69,12 @@ impl HotkeyDetector {
     /// Returns `true` when a first tap was recorded and the timeout has elapsed,
     /// confirming a single-tap action.
     pub fn check_timeout(&mut self) -> bool {
-        if let Some(last) = self.last_press {
-            if last.elapsed() > DOUBLE_TAP_TIMEOUT {
-                self.last_press = None;
-                debug!("single-tap confirmed (timeout elapsed)");
-                return true;
-            }
+        if let Some(last) = self.last_press
+            && last.elapsed() > DOUBLE_TAP_TIMEOUT
+        {
+            self.last_press = None;
+            debug!("single-tap confirmed (timeout elapsed)");
+            return true;
         }
         false
     }
