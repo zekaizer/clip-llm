@@ -273,6 +273,7 @@ impl StateMachine {
         self.original_content = Some(content.clone());
         self.cache.clear();
         self.mode_thinking.clear();
+        self.rephrase_params = RephraseParams::default();
         self.streaming_text.clear();
         self.think_started = false;
         self.think_content = None;
