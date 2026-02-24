@@ -4,10 +4,12 @@ System-wide LLM clipboard assistant. Captures text via global hotkey, sends it t
 
 ## Features
 
-- **Global hotkey** — `Ctrl+Shift+C` single-tap (clipboard) / double-tap (copy selection) to trigger
-- **Translate / Correct / Summarize** — three processing modes, switchable via tab bar
-- **Per-mode response caching** — instant tab switching without redundant API calls
-- **Floating overlay** — draggable popup with streaming response display
+- **Global hotkey** — `Ctrl+Shift+C` single-tap (read clipboard) / double-tap (copy selection + auto-paste result back)
+- **Translate / Rephrase / Summarize** — three processing modes with per-mode response caching
+- **Rephrase parameters** — style (Correct / Casual / Formal / Business / Technical) and length (Terse / Brief / Same / Detailed / Full)
+- **Vision support** — paste images from clipboard for summarization via multimodal API
+- **Thinking mode** — toggle Think / NoThink per mode; model capability auto-detected at startup
+- **Floating overlay** — draggable popup with streaming response, proximity-fade action button
 - **OpenAI-compatible API** — works with vLLM or any `/v1/chat/completions` endpoint
 - **Single binary, cross-platform** — macOS & Windows 11, no runtime dependencies
 
@@ -33,3 +35,8 @@ System-wide LLM clipboard assistant. Captures text via global hotkey, sends it t
 | `DIAG_MOCK` | *(unset)* | Use mock LLM responses (requires `--features diagnostics`) |
 
 See [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) for detailed specifications.
+
+## Inspired By
+
+- [DeepL](https://www.deepl.com/) — hotkey-triggered floating overlay UX
+- [PowerToys Advanced Paste](https://learn.microsoft.com/en-us/windows/powertoys/advanced-paste) — AI-powered clipboard transformation pipeline
