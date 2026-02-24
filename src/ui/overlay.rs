@@ -7,6 +7,20 @@ const OVERLAY_WIDTH: f32 = 480.0;
 const MAX_RESULT_HEIGHT: f32 = 260.0;
 /// Space around the frame for shadow rendering.
 const SHADOW_PAD: f32 = 20.0;
+/// Accent color for selected tab underlines.
+fn accent_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(108, 166, 255, 200)
+}
+/// Dimmed accent color for hover underlines and rephrase indent line.
+fn accent_color_dim() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(108, 166, 255, 80)
+}
+/// Action button: distance (px) at which the button becomes fully transparent.
+const ACTION_BTN_FADE_RADIUS: f32 = 80.0;
+/// Action button: maximum alpha value at zero distance from cursor.
+const ACTION_BTN_ALPHA_MAX: f32 = 200.0;
+/// Action button size (square).
+const ACTION_BTN_SIZE: f32 = 26.0;
 
 /// Streaming and think-block display state for Processing/Result rendering.
 pub struct StreamingState<'a> {
@@ -312,9 +326,9 @@ fn render_result(
     let result_top = ui.cursor().min;
     render_scrollable_text(ui, ("result", mode), text, MAX_RESULT_HEIGHT, false);
 
-    let btn_size = egui::vec2(26.0, 26.0);
+    let btn_size = egui::vec2(ACTION_BTN_SIZE, ACTION_BTN_SIZE);
     let btn_pos = egui::pos2(
-        result_top.x + OVERLAY_WIDTH - btn_size.x - 16.0,
+        result_top.x + OVERLAY_WIDTH - btn_size.x - 2.0,
         result_top.y + 2.0,
     );
     let btn_rect = egui::Rect::from_min_size(btn_pos, btn_size);
@@ -322,12 +336,10 @@ fn render_result(
     let alpha = ui.input(|i| {
         i.pointer.hover_pos().map_or(0u8, |p| {
             let dist = btn_rect.center().distance(p);
-            // Fade radius (px): alpha=200 at dist=0, alpha=0 at dist>=fade_radius.
-            let fade_radius = 80.0;
-            if dist >= fade_radius {
+            if dist >= ACTION_BTN_FADE_RADIUS {
                 0
             } else {
-                ((1.0 - dist / fade_radius) * 200.0) as u8
+                ((1.0 - dist / ACTION_BTN_FADE_RADIUS) * ACTION_BTN_ALPHA_MAX) as u8
             }
         })
     });
@@ -393,7 +405,8 @@ fn render_rephrase_params(
     params: RephraseParams,
     action: &mut OverlayAction,
 ) {
-    let accent_color = egui::Color32::from_rgba_unmultiplied(108, 166, 255, 80);
+    // Capture the outer left edge before indent shifts the cursor.
+    let outer_left = ui.cursor().min.x;
 
     let response = ui.indent(egui::Id::new("rephrase_params"), |ui| {
         render_param_pills(
@@ -416,16 +429,16 @@ fn render_rephrase_params(
         );
     });
 
-    // Draw accent line on the left edge of the indented area
+    // Draw accent line on the left edge of the indented area.
     let rect = response.response.rect;
-    let indent = ui.spacing().indent;
+    let line_x = (outer_left + rect.left()) / 2.0;
     ui.painter().rect_filled(
         egui::Rect::from_min_size(
-            egui::pos2(rect.left() - indent / 2.0, rect.top() + 2.0),
+            egui::pos2(line_x, rect.top() + 2.0),
             egui::vec2(1.5, rect.height() - 4.0),
         ),
         0.75,
-        accent_color,
+        accent_color_dim(),
     );
 }
 
@@ -459,9 +472,9 @@ fn render_tab_bar(
 
             let response = ui.add(button);
             let underline_color = if is_selected {
-                Some(egui::Color32::from_rgba_unmultiplied(108, 166, 255, 200))
+                Some(accent_color())
             } else if response.hovered() && is_available {
-                Some(egui::Color32::from_rgba_unmultiplied(108, 166, 255, 80))
+                Some(accent_color_dim())
             } else {
                 None
             };
