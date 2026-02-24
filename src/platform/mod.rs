@@ -67,7 +67,7 @@ pub fn poll_tray_quit(_ctx: &eframe::egui::Context) {
 pub fn pre_show_callback() -> Box<dyn Fn() + Send> {
     #[cfg(target_os = "windows")]
     {
-        Box::new(|| windows::show_no_activate())
+        Box::new(windows::show_no_activate)
     }
     #[cfg(not(target_os = "windows"))]
     {

@@ -448,8 +448,8 @@ impl eframe::App for OverlayApp {
             ctx,
         );
 
-        self.update_viewport(ctx, output.desired_size);
         self.handle_overlay_action(ctx, output.action);
+        self.update_viewport(ctx, output.desired_size);
 
         // Diagnostics: record frame data + flush stale screenshots.
         #[cfg(feature = "diagnostics")]

@@ -356,7 +356,7 @@ impl StateMachine {
         if self.auto_copy {
             effects.push(UiEffect::WriteClipboard(text));
         }
-        effects.extend([UiEffect::ResetAreas, UiEffect::ShowWindow]);
+        effects.push(UiEffect::ResetAreas);
         effects
     }
 
@@ -369,7 +369,7 @@ impl StateMachine {
         }
         self.think_started = false;
         self.state = OverlayState::Error(message);
-        vec![UiEffect::ResetAreas, UiEffect::ShowWindow]
+        vec![UiEffect::ResetAreas]
     }
 
     /// Resets all transient state and transitions to Hidden.
@@ -382,6 +382,7 @@ impl StateMachine {
         self.think_content = None;
         self.has_been_focused = false;
         self.auto_copy = false;
+        self.user_repositioned = false;
     }
 
     fn on_close(&mut self) -> Vec<UiEffect> {
@@ -698,7 +699,7 @@ mod tests {
 
         assert_eq!(*sm.state(), OverlayState::Result("translated".into()));
         assert!(effects.contains(&UiEffect::WriteClipboard("translated".into())));
-        assert!(effects.contains(&UiEffect::ShowWindow));
+        assert!(!effects.contains(&UiEffect::ShowWindow));
         assert!(effects.contains(&UiEffect::ResetAreas));
     }
 
@@ -714,7 +715,7 @@ mod tests {
         });
 
         assert_eq!(*sm.state(), OverlayState::Error("fail".into()));
-        assert!(effects.contains(&UiEffect::ShowWindow));
+        assert!(!effects.contains(&UiEffect::ShowWindow));
         assert!(effects.contains(&UiEffect::ResetAreas));
         // Must NOT contain WriteClipboard.
         assert!(!effects.iter().any(|e| matches!(e, UiEffect::WriteClipboard(_))));
