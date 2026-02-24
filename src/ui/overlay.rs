@@ -437,14 +437,27 @@ fn render_tab_bar(
                 });
 
             let button = egui::Button::new(text)
-                .fill(if is_selected {
-                    egui::Color32::from_rgba_unmultiplied(60, 60, 60, 200)
-                } else {
-                    egui::Color32::TRANSPARENT
-                })
+                .fill(egui::Color32::TRANSPARENT)
+                .stroke(egui::Stroke::NONE)
                 .corner_radius(6.0);
 
-            if ui.add(button).clicked() && !is_selected && is_available {
+            let response = ui.add(button);
+            let underline_color = if is_selected {
+                Some(egui::Color32::from_rgba_unmultiplied(108, 166, 255, 200))
+            } else if response.hovered() && is_available {
+                Some(egui::Color32::from_rgba_unmultiplied(108, 166, 255, 80))
+            } else {
+                None
+            };
+            if let Some(color) = underline_color {
+                let rect = response.rect;
+                let underline = egui::Rect::from_min_size(
+                    egui::pos2(rect.left(), rect.bottom() - 2.0),
+                    egui::vec2(rect.width(), 2.0),
+                );
+                ui.painter().rect_filled(underline, 0.0, color);
+            }
+            if response.clicked() && !is_selected && is_available {
                 *action = OverlayAction::SwitchMode(mode);
             }
         }
