@@ -2,6 +2,7 @@
 name = "clip-llm"
 version = "0.7.1"
 edition = "2021"
+authors = ["Luke Lee <zekaizer@gmail.com>"]
 
 [dependencies]
 global-hotkey = "0.6"
