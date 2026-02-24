@@ -348,6 +348,7 @@ impl StateMachine {
         if !matches!(self.state, OverlayState::Processing) {
             return vec![];
         }
+        self.think_started = false;
         self.state = OverlayState::Error(message);
         vec![UiEffect::ResetAreas, UiEffect::ShowWindow]
     }
