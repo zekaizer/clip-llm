@@ -92,6 +92,26 @@ impl RephraseLength {
     }
 }
 
+// -- Thinking mode --
+
+/// Per-mode thinking control: explicitly enable or disable thinking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ThinkingMode {
+    Think,
+    NoThink,
+}
+
+impl ThinkingMode {
+    pub const ALL: &[Self] = &[Self::Think, Self::NoThink];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Think => "Think",
+            Self::NoThink => "No Think",
+        }
+    }
+}
+
 /// Bundled rephrase parameters — passed as a single argument instead of (style, length) pairs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct RephraseParams {
@@ -132,6 +152,14 @@ impl ProcessMode {
             Self::Translate => "Translating...",
             Self::Rephrase => "Rephrasing...",
             Self::Summarize => "Summarizing...",
+        }
+    }
+
+    /// Default thinking mode for this processing mode.
+    pub fn default_thinking(self) -> ThinkingMode {
+        match self {
+            Self::Translate | Self::Rephrase => ThinkingMode::NoThink,
+            Self::Summarize => ThinkingMode::Think,
         }
     }
 

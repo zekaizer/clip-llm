@@ -31,6 +31,7 @@ Runs 7 test scenarios automatically (short text, long scroll, mode switch, error
 
 ## Workflow
 
+- Before starting work, check open GitHub issues with `gh issue list` to understand current priorities and context.
 - Create a feature branch per feature: `phase<N>-<feature>` (e.g. `phase1-api-client`, `phase2-sse-streaming`).
 - Create a fix branch per bug fix: `fix-<description>` (e.g. `fix-macos-hotkey-events`).
 - Merge with `--no-ff` to create a merge commit. Exception: single-commit branches can be fast-forward merged.

@@ -10,7 +10,7 @@ use tracing::{error, info};
 use crate::clipboard::ClipboardManager;
 use crate::hotkey::{TapAction, TapEvent};
 use crate::platform::{NativePlatform, Platform};
-use crate::worker::{WorkerCommand, WorkerResponse};
+use crate::worker::{ProcessTask, WorkerCommand, WorkerResponse};
 
 pub use state_machine::OverlayState;
 use state_machine::{StateMachine, UiEffect, UiEvent};
@@ -108,17 +108,19 @@ impl OverlayApp {
                     content,
                     mode,
                     rephrase_params,
+                    thinking_mode,
                     request_id,
                 } => {
                     let text_len = content.text.as_ref().map_or(0, |t| t.len());
                     let img_count = content.images.len();
                     info!("starting {} ({} chars, {} images)", mode.label(), text_len, img_count);
-                    let _ = self.cmd_tx.send(WorkerCommand::Process {
+                    let _ = self.cmd_tx.send(WorkerCommand::Process(ProcessTask {
                         content,
                         mode,
                         rephrase_params,
+                        thinking_mode,
                         request_id,
-                    });
+                    }));
                 }
                 UiEffect::SendCancel => {
                     let _ = self.cmd_tx.send(WorkerCommand::Cancel);
@@ -252,6 +254,9 @@ impl OverlayApp {
                 WorkerResponse::ThinkStarted { request_id } => {
                     UiEvent::ThinkStarted { request_id }
                 }
+                WorkerResponse::ThinkingProbeResult { supported } => {
+                    UiEvent::ThinkingProbeResult(supported)
+                }
             };
             let effects = self.sm.handle(event);
             self.execute_effects(effects, ctx);
@@ -373,6 +378,9 @@ impl OverlayApp {
             overlay::OverlayAction::ChangeRephraseLength(length) => {
                 UiEvent::UserChangeRephraseLength(length)
             }
+            overlay::OverlayAction::ChangeThinkingMode(thinking) => {
+                UiEvent::UserChangeThinkingMode(thinking)
+            }
         };
         let effects = self.sm.handle(event);
         self.execute_effects(effects, ctx);
@@ -419,6 +427,10 @@ impl eframe::App for OverlayApp {
             },
             self.sm.available_modes(),
             self.sm.rephrase_params(),
+            overlay::ThinkingState {
+                mode: self.sm.effective_thinking_mode(),
+                supported: self.sm.thinking_supported(),
+            },
             ctx,
         );
 

@@ -11,7 +11,8 @@ pub fn extract_first_think_content(text: &str) -> Option<String> {
     THINK_CAPTURE_RE
         .captures(text)
         .and_then(|c| c.get(1))
-        .map(|m| m.as_str().to_string())
+        .map(|m| m.as_str().trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Strip `<think>...</think>` blocks from LLM response.
@@ -65,9 +66,13 @@ impl ThinkBlockFilter {
         }
     }
 
-    /// Returns `true` while inside a `<think>…</think>` block.
-    pub fn is_thinking(&self) -> bool {
-        matches!(self.state, ThinkState::InsideThink)
+    /// Returns `true` when inside a think block AND non-whitespace content
+    /// has been accumulated. Use this to delay `ThinkStarted` notifications
+    /// until meaningful content is detected (avoids UI flicker for empty blocks).
+    pub fn has_think_content(&self) -> bool {
+        self.state == ThinkState::InsideThink
+            && (self.think_content.contains(|c: char| !c.is_whitespace())
+                || self.pending.contains(|c: char| !c.is_whitespace()))
     }
 
     /// Take the accumulated think-block content, leaving it empty.
@@ -327,5 +332,55 @@ mod tests {
     fn nested_markup_inside_think_block() {
         let input = "<think><b>bold reasoning</b></think>answer";
         assert_eq!(strip_think_blocks(input), "answer");
+    }
+
+    // --- has_think_content tests ---
+
+    #[test]
+    fn has_think_content_false_before_think_tag() {
+        let filter = ThinkBlockFilter::new();
+        assert!(!filter.has_think_content());
+    }
+
+    #[test]
+    fn has_think_content_false_just_after_open_tag() {
+        let mut filter = ThinkBlockFilter::new();
+        filter.feed("<think>");
+        // Inside think block but no content yet.
+        assert!(!filter.has_think_content());
+    }
+
+    #[test]
+    fn has_think_content_false_for_whitespace_only() {
+        let mut filter = ThinkBlockFilter::new();
+        filter.feed("<think>");
+        filter.feed("   \n\n  ");
+        assert!(!filter.has_think_content());
+    }
+
+    #[test]
+    fn has_think_content_true_with_non_whitespace() {
+        let mut filter = ThinkBlockFilter::new();
+        filter.feed("<think>");
+        filter.feed("  reasoning");
+        assert!(filter.has_think_content());
+    }
+
+    #[test]
+    fn has_think_content_true_via_pending_only() {
+        let mut filter = ThinkBlockFilter::new();
+        filter.feed("<think>");
+        // Feed a short string that stays entirely in pending buffer
+        // (pending holds up to CLOSE_TAG.len()-1 = 7 bytes).
+        filter.feed("hello");
+        assert!(filter.has_think_content());
+    }
+
+    #[test]
+    fn has_think_content_false_after_close_tag() {
+        let mut filter = ThinkBlockFilter::new();
+        filter.feed("<think>reasoning</think>");
+        // After close tag, no longer inside think block.
+        assert!(!filter.has_think_content());
     }
 }

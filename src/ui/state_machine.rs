@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::{ClipboardContent, ProcessMode, RephraseLength, RephraseParams, RephraseStyle};
+use crate::{ClipboardContent, ProcessMode, RephraseLength, RephraseParams, RephraseStyle, ThinkingMode};
 
 // ---------------------------------------------------------------------------
 // OverlayState
@@ -60,6 +60,10 @@ pub enum UiEvent {
     UserChangeRephraseStyle(RephraseStyle),
     /// User changed the rephrase length parameter.
     UserChangeRephraseLength(RephraseLength),
+    /// User changed the thinking mode for the current ProcessMode.
+    UserChangeThinkingMode(ThinkingMode),
+    /// Worker reported thinking probe result.
+    ThinkingProbeResult(bool),
     /// User started dragging the overlay.
     UserStartDrag,
     /// Window gained focus.
@@ -79,6 +83,7 @@ pub enum UiEffect {
         content: ClipboardContent,
         mode: ProcessMode,
         rephrase_params: RephraseParams,
+        thinking_mode: ThinkingMode,
         request_id: u64,
     },
     SendCancel,
@@ -105,11 +110,15 @@ pub struct StateMachine {
     current_request_id: u64,
     /// Current rephrase parameters (style + length); affects system prompt for Rephrase mode.
     rephrase_params: RephraseParams,
+    /// Per-mode thinking override. Missing entry = use ProcessMode::default_thinking().
+    mode_thinking: HashMap<ProcessMode, ThinkingMode>,
+    /// Whether thinking control is available (from probe result).
+    thinking_supported: bool,
     /// True after the user drags the overlay; suppresses auto-repositioning.
     user_repositioned: bool,
     /// True once the window has received focus after show_window.
     has_been_focused: bool,
-    /// Result cache: maps system_prompt string → (text, think_content).
+    /// Result cache: maps cache_key → (text, think_content).
     /// Valid only for the current original content.
     cache: HashMap<String, (String, Option<String>)>,
     /// Accumulated visible streaming text (displayed during Processing).
@@ -126,6 +135,8 @@ impl StateMachine {
             state: OverlayState::Hidden,
             mode,
             rephrase_params: RephraseParams::default(),
+            mode_thinking: HashMap::new(),
+            thinking_supported: false,
             original_content: None,
             next_request_id: 0,
             current_request_id: 0,
@@ -150,6 +161,18 @@ impl StateMachine {
 
     pub fn rephrase_params(&self) -> RephraseParams {
         self.rephrase_params
+    }
+
+    /// Effective thinking mode for the current ProcessMode.
+    pub fn effective_thinking_mode(&self) -> ThinkingMode {
+        self.mode_thinking
+            .get(&self.mode)
+            .copied()
+            .unwrap_or_else(|| self.mode.default_thinking())
+    }
+
+    pub fn thinking_supported(&self) -> bool {
+        self.thinking_supported
     }
 
     pub fn streaming_text(&self) -> &str {
@@ -213,6 +236,11 @@ impl StateMachine {
             UiEvent::UserSwitchMode(mode) => self.on_switch_mode(mode),
             UiEvent::UserChangeRephraseStyle(style) => self.on_change_rephrase_style(style),
             UiEvent::UserChangeRephraseLength(length) => self.on_change_rephrase_length(length),
+            UiEvent::UserChangeThinkingMode(mode) => self.on_change_thinking_mode(mode),
+            UiEvent::ThinkingProbeResult(supported) => {
+                self.thinking_supported = supported;
+                vec![]
+            }
             UiEvent::UserStartDrag => {
                 self.user_repositioned = true;
                 vec![]
@@ -244,6 +272,8 @@ impl StateMachine {
 
         self.original_content = Some(content.clone());
         self.cache.clear();
+        self.mode_thinking.clear();
+        self.rephrase_params = RephraseParams::default();
         self.streaming_text.clear();
         self.think_started = false;
         self.think_content = None;
@@ -259,6 +289,7 @@ impl StateMachine {
                 content,
                 mode: self.mode,
                 rephrase_params: self.rephrase_params,
+                thinking_mode: self.effective_thinking_mode(),
                 request_id: self.current_request_id,
             },
         ];
@@ -317,6 +348,7 @@ impl StateMachine {
         if !matches!(self.state, OverlayState::Processing) {
             return vec![];
         }
+        self.think_started = false;
         self.state = OverlayState::Error(message);
         vec![UiEffect::ResetAreas, UiEffect::ShowWindow]
     }
@@ -384,6 +416,7 @@ impl StateMachine {
                             content,
                             mode: self.mode,
                             rephrase_params: self.rephrase_params,
+                            thinking_mode: self.effective_thinking_mode(),
                             request_id: self.current_request_id,
                         },
                     ]
@@ -408,6 +441,7 @@ impl StateMachine {
                             content,
                             mode: self.mode,
                             rephrase_params: self.rephrase_params,
+                            thinking_mode: self.effective_thinking_mode(),
                             request_id: self.current_request_id,
                         },
                         UiEffect::ResetAreas,
@@ -446,9 +480,13 @@ impl StateMachine {
         vec![UiEffect::ResetAreas, UiEffect::ShowWindow]
     }
 
-    /// Cache key for the current mode + rephrase params combination.
+    /// Cache key for the current mode + rephrase params + thinking mode combination.
     fn cache_key(&self) -> String {
-        self.mode.system_prompt(self.rephrase_params)
+        format!(
+            "{}|{:?}",
+            self.mode.system_prompt(self.rephrase_params),
+            self.effective_thinking_mode(),
+        )
     }
 
     fn on_change_rephrase_style(&mut self, style: RephraseStyle) -> Vec<UiEffect> {
@@ -467,11 +505,24 @@ impl StateMachine {
         self.on_rephrase_params_changed()
     }
 
+    fn on_change_thinking_mode(&mut self, thinking: ThinkingMode) -> Vec<UiEffect> {
+        if self.effective_thinking_mode() == thinking {
+            return vec![];
+        }
+        self.mode_thinking.insert(self.mode, thinking);
+        self.on_params_changed()
+    }
+
     /// Re-process or serve from cache when rephrase params change (Rephrase mode only).
     fn on_rephrase_params_changed(&mut self) -> Vec<UiEffect> {
         if self.mode != ProcessMode::Rephrase {
             return vec![];
         }
+        self.on_params_changed()
+    }
+
+    /// Common logic for re-processing after params (rephrase or thinking) change.
+    fn on_params_changed(&mut self) -> Vec<UiEffect> {
         let key = self.cache_key();
         match &self.state {
             OverlayState::Processing => {
@@ -493,6 +544,7 @@ impl StateMachine {
                             content,
                             mode: self.mode,
                             rephrase_params: self.rephrase_params,
+                            thinking_mode: self.effective_thinking_mode(),
                             request_id: self.current_request_id,
                         },
                     ]
@@ -514,6 +566,7 @@ impl StateMachine {
                             content,
                             mode: self.mode,
                             rephrase_params: self.rephrase_params,
+                            thinking_mode: self.effective_thinking_mode(),
                             request_id: self.current_request_id,
                         },
                         UiEffect::ResetAreas,
@@ -1302,5 +1355,130 @@ mod tests {
         let effects = sm.handle(UiEvent::FocusLost);
         assert!(effects.is_empty());
         assert_eq!(*sm.state(), OverlayState::Error("read failed".into()));
+    }
+
+    // === Thinking mode tests ===
+
+    #[test]
+    fn thinking_probe_result_updates_supported() {
+        let mut sm = new_sm();
+        assert!(!sm.thinking_supported());
+
+        sm.handle(UiEvent::ThinkingProbeResult(true));
+        assert!(sm.thinking_supported());
+
+        sm.handle(UiEvent::ThinkingProbeResult(false));
+        assert!(!sm.thinking_supported());
+    }
+
+    #[test]
+    fn effective_thinking_mode_defaults_per_process_mode() {
+        let mut sm = new_sm(); // Translate mode
+        assert_eq!(sm.effective_thinking_mode(), ThinkingMode::NoThink);
+
+        sm.handle(UiEvent::UserSwitchMode(ProcessMode::Summarize));
+        assert_eq!(sm.effective_thinking_mode(), ThinkingMode::Think);
+    }
+
+    #[test]
+    fn change_thinking_mode_triggers_reprocess() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        let _rid = last_request_id(&effects);
+
+        // Change thinking to Think (default is NoThink for Translate).
+        let effects = sm.handle(UiEvent::UserChangeThinkingMode(ThinkingMode::Think));
+        assert!(effects.iter().any(|e| matches!(e, UiEffect::SendCancel)));
+        assert!(effects.iter().any(|e| matches!(e, UiEffect::SendProcess { thinking_mode: ThinkingMode::Think, .. })));
+        assert_eq!(sm.effective_thinking_mode(), ThinkingMode::Think);
+    }
+
+    #[test]
+    fn change_thinking_mode_same_value_is_noop() {
+        let mut sm = new_sm();
+        start_processing(&mut sm, "hello");
+
+        // NoThink is already default for Translate — should be no-op.
+        let effects = sm.handle(UiEvent::UserChangeThinkingMode(ThinkingMode::NoThink));
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn change_thinking_mode_from_result_reprocesses() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerResult {
+            text: "ok".into(),
+            think_content: None,
+            request_id: rid,
+        });
+
+        let effects = sm.handle(UiEvent::UserChangeThinkingMode(ThinkingMode::Think));
+        assert_eq!(*sm.state(), OverlayState::Processing);
+        assert!(effects.iter().any(|e| matches!(e, UiEffect::SendProcess { thinking_mode: ThinkingMode::Think, .. })));
+    }
+
+    #[test]
+    fn mode_thinking_cleared_on_content_ready() {
+        let mut sm = new_sm();
+        start_processing(&mut sm, "hello");
+
+        // Override thinking for Translate.
+        sm.handle(UiEvent::UserChangeThinkingMode(ThinkingMode::Think));
+        assert_eq!(sm.effective_thinking_mode(), ThinkingMode::Think);
+
+        // New content ready — should reset to default.
+        start_processing(&mut sm, "world");
+        assert_eq!(sm.effective_thinking_mode(), ThinkingMode::NoThink);
+    }
+
+    #[test]
+    fn thinking_mode_per_process_mode_independent() {
+        let mut sm = new_sm();
+        start_processing(&mut sm, "hello");
+
+        // Set Translate to Think.
+        sm.handle(UiEvent::UserChangeThinkingMode(ThinkingMode::Think));
+        assert_eq!(sm.effective_thinking_mode(), ThinkingMode::Think);
+
+        // Switch to Summarize — should use Summarize's default (Think).
+        sm.handle(UiEvent::UserSwitchMode(ProcessMode::Summarize));
+        assert_eq!(sm.effective_thinking_mode(), ThinkingMode::Think);
+
+        // Switch back to Translate — override should still be active.
+        sm.handle(UiEvent::UserSwitchMode(ProcessMode::Translate));
+        assert_eq!(sm.effective_thinking_mode(), ThinkingMode::Think);
+    }
+
+    #[test]
+    fn think_started_cleared_on_error() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+
+        sm.handle(UiEvent::ThinkStarted { request_id: rid });
+        assert!(sm.think_started());
+
+        sm.handle(UiEvent::WorkerError {
+            message: "fail".into(),
+            request_id: rid,
+        });
+        assert!(!sm.think_started());
+    }
+
+    #[test]
+    fn rephrase_params_reset_on_content_ready() {
+        let mut sm = new_sm();
+        sm.handle(UiEvent::UserSwitchMode(ProcessMode::Rephrase));
+        start_processing(&mut sm, "hello");
+
+        // Change length.
+        sm.handle(UiEvent::UserChangeRephraseLength(RephraseLength::Terse));
+        assert_eq!(sm.rephrase_params().length, RephraseLength::Terse);
+
+        // New content — should reset to default.
+        start_processing(&mut sm, "world");
+        assert_eq!(sm.rephrase_params().length, RephraseLength::default());
     }
 }

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 use tracing::{debug, info, warn};
 
-use crate::{ApiError, ClipboardContent, ProcessMode, RephraseParams};
+use crate::{ApiError, ClipboardContent, ProcessMode, RephraseParams, ThinkingMode};
 
 // Defaults — overridable via environment variables.
 const DEFAULT_API_ENDPOINT: &str = "http://localhost:8000/v1";
@@ -27,6 +27,13 @@ struct ChatRequest<'a> {
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<ChatTemplateKwargs>,
+}
+
+#[derive(Serialize)]
+struct ChatTemplateKwargs {
+    enable_thinking: bool,
 }
 
 #[derive(Serialize)]
@@ -182,6 +189,17 @@ impl SseParser {
 
 // -- Client --
 
+/// How thinking mode is controlled for the current model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingControlMethod {
+    /// Model supports `chat_template_kwargs: { enable_thinking }`.
+    ChatTemplateKwargs,
+    /// Model supports `/think` and `/no_think` tags in the system prompt.
+    SystemPromptTag,
+    /// Model does not support controllable thinking.
+    Unsupported,
+}
+
 struct LlmClientInner {
     client: Client,
     streaming_client: Client,
@@ -189,6 +207,7 @@ struct LlmClientInner {
     model: String,
     api_key: Option<String>,
     supports_vision: OnceCell<bool>,
+    thinking_control: OnceCell<ThinkingControlMethod>,
 }
 
 /// Minimal 1x1 transparent PNG for vision probe (67 bytes).
@@ -455,6 +474,58 @@ mod tests {
             _ => panic!("expected Parts"),
         }
     }
+
+    // --- resolve_thinking tests ---
+
+    #[test]
+    fn resolve_thinking_unsupported_returns_none() {
+        let (prefix, kwargs) = LlmClient::resolve_thinking(
+            ThinkingMode::Think,
+            ThinkingControlMethod::Unsupported,
+        );
+        assert!(prefix.is_none());
+        assert!(kwargs.is_none());
+    }
+
+    #[test]
+    fn resolve_thinking_think_with_kwargs() {
+        let (prefix, kwargs) = LlmClient::resolve_thinking(
+            ThinkingMode::Think,
+            ThinkingControlMethod::ChatTemplateKwargs,
+        );
+        assert!(prefix.is_none());
+        assert!(kwargs.unwrap().enable_thinking);
+    }
+
+    #[test]
+    fn resolve_thinking_nothink_with_kwargs() {
+        let (prefix, kwargs) = LlmClient::resolve_thinking(
+            ThinkingMode::NoThink,
+            ThinkingControlMethod::ChatTemplateKwargs,
+        );
+        assert!(prefix.is_none());
+        assert!(!kwargs.unwrap().enable_thinking);
+    }
+
+    #[test]
+    fn resolve_thinking_think_with_prompt_tag() {
+        let (prefix, kwargs) = LlmClient::resolve_thinking(
+            ThinkingMode::Think,
+            ThinkingControlMethod::SystemPromptTag,
+        );
+        assert_eq!(prefix.unwrap(), "/think\n");
+        assert!(kwargs.is_none());
+    }
+
+    #[test]
+    fn resolve_thinking_nothink_with_prompt_tag() {
+        let (prefix, kwargs) = LlmClient::resolve_thinking(
+            ThinkingMode::NoThink,
+            ThinkingControlMethod::SystemPromptTag,
+        );
+        assert_eq!(prefix.unwrap(), "/no_think\n");
+        assert!(kwargs.is_none());
+    }
 }
 
 impl LlmClient {
@@ -482,6 +553,7 @@ impl LlmClient {
             model,
             api_key,
             supports_vision: OnceCell::new(),
+            thinking_control: OnceCell::new(),
         })))
     }
 
@@ -510,6 +582,7 @@ impl LlmClient {
             temperature: 0.0,
             max_tokens: 1,
             stream: None,
+            chat_template_kwargs: None,
         };
 
         info!("probing model vision support...");
@@ -529,6 +602,136 @@ impl LlmClient {
             Err(e) => {
                 warn!("vision probe failed (will retry): {e}");
                 false
+            }
+        }
+    }
+
+    /// Probe whether the model supports controllable thinking mode.
+    /// Tries `chat_template_kwargs` first, then falls back to system prompt tag.
+    /// Result is cached in `OnceCell`. Network errors skip caching (retry next time).
+    pub async fn probe_thinking(&self) -> ThinkingControlMethod {
+        let inner = &self.0;
+        if let Some(&cached) = inner.thinking_control.get() {
+            return cached;
+        }
+
+        info!("probing model thinking support...");
+
+        // Step 1: try chat_template_kwargs with enable_thinking=true
+        let method = match self.probe_thinking_kwargs(inner).await {
+            Some(method) => method,
+            None => return ThinkingControlMethod::Unsupported, // network error, don't cache
+        };
+
+        info!("thinking control method: {method:?}");
+        let _ = inner.thinking_control.set(method);
+        method
+    }
+
+    /// Try `chat_template_kwargs: { enable_thinking: true }`.
+    /// Returns `None` on network error (caller should not cache).
+    async fn probe_thinking_kwargs(&self, inner: &LlmClientInner) -> Option<ThinkingControlMethod> {
+        let body = ChatRequest {
+            model: &inner.model,
+            messages: vec![Message {
+                role: "user",
+                content: MessageContent::Text("Say hi."),
+            }],
+            temperature: 0.0,
+            max_tokens: 128,
+            stream: None,
+            chat_template_kwargs: Some(ChatTemplateKwargs { enable_thinking: true }),
+        };
+
+        let mut req = inner.client.post(&inner.endpoint).json(&body);
+        if let Some(key) = &inner.api_key {
+            req = req.bearer_auth(key);
+        }
+
+        match req.send().await {
+            Ok(resp) if resp.status().is_success() => {
+                // HTTP 200 + kwargs accepted = model supports chat_template_kwargs.
+                // Don't require <think> in the response — the model may skip thinking
+                // for trivial prompts even with enable_thinking=true.
+                Some(ThinkingControlMethod::ChatTemplateKwargs)
+            }
+            Ok(resp) if resp.status().is_server_error() => {
+                // 5xx: transient server error — don't cache, retry next time.
+                warn!(
+                    "thinking kwargs probe got {} (will retry)",
+                    resp.status().as_u16()
+                );
+                None
+            }
+            Ok(_) => {
+                // 4xx: server rejected the kwargs field — try prompt tag fallback.
+                self.probe_thinking_prompt_tag(inner).await
+            }
+            Err(e) => {
+                warn!("thinking probe failed (will retry): {e}");
+                None
+            }
+        }
+    }
+
+    /// Fallback: try `/think` tag in the system prompt.
+    /// Returns `None` on network error.
+    async fn probe_thinking_prompt_tag(
+        &self,
+        inner: &LlmClientInner,
+    ) -> Option<ThinkingControlMethod> {
+        let body = ChatRequest {
+            model: &inner.model,
+            messages: vec![
+                Message {
+                    role: "system",
+                    content: MessageContent::Text("/think"),
+                },
+                Message {
+                    role: "user",
+                    content: MessageContent::Text("Say hi."),
+                },
+            ],
+            temperature: 0.0,
+            max_tokens: 128,
+            stream: None,
+            chat_template_kwargs: None,
+        };
+
+        let mut req = inner.client.post(&inner.endpoint).json(&body);
+        if let Some(key) = &inner.api_key {
+            req = req.bearer_auth(key);
+        }
+
+        match req.send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let text = resp.text().await.unwrap_or_default();
+                if let Ok(chat) = serde_json::from_str::<ChatResponse>(&text) {
+                    let content = chat
+                        .choices
+                        .first()
+                        .map(|c| c.message.content.as_str())
+                        .unwrap_or("");
+                    if content.contains("<think>") {
+                        Some(ThinkingControlMethod::SystemPromptTag)
+                    } else {
+                        Some(ThinkingControlMethod::Unsupported)
+                    }
+                } else {
+                    Some(ThinkingControlMethod::Unsupported)
+                }
+            }
+            Ok(resp) if resp.status().is_server_error() => {
+                warn!(
+                    "thinking prompt-tag probe got {} (will retry)",
+                    resp.status().as_u16()
+                );
+                None
+            }
+            Ok(_) => Some(ThinkingControlMethod::Unsupported),
+            Err(e) => {
+                warn!("thinking prompt-tag probe failed (will retry): {e}");
+                None
             }
         }
     }
@@ -567,19 +770,52 @@ impl LlmClient {
         MessageContent::Parts(parts)
     }
 
-    /// Build and send a chat completion request. Probes vision support, constructs
-    /// the request body, applies auth, and returns the raw response.
+    /// Resolve thinking mode into API-level controls based on probe result.
+    fn resolve_thinking(
+        thinking_mode: ThinkingMode,
+        control: ThinkingControlMethod,
+    ) -> (Option<&'static str>, Option<ChatTemplateKwargs>) {
+        match (thinking_mode, control) {
+            (_, ThinkingControlMethod::Unsupported) => (None, None),
+            (ThinkingMode::Think, ThinkingControlMethod::ChatTemplateKwargs) => {
+                (None, Some(ChatTemplateKwargs { enable_thinking: true }))
+            }
+            (ThinkingMode::NoThink, ThinkingControlMethod::ChatTemplateKwargs) => {
+                (None, Some(ChatTemplateKwargs { enable_thinking: false }))
+            }
+            (ThinkingMode::Think, ThinkingControlMethod::SystemPromptTag) => {
+                (Some("/think\n"), None)
+            }
+            (ThinkingMode::NoThink, ThinkingControlMethod::SystemPromptTag) => {
+                (Some("/no_think\n"), None)
+            }
+        }
+    }
+
+    /// Build and send a chat completion request. Probes vision and thinking support,
+    /// constructs the request body, applies auth, and returns the raw response.
     /// `stream=true` uses the no-timeout streaming client; `false` uses the regular client.
     async fn build_and_send(
         &self,
         content: &ClipboardContent,
         mode: ProcessMode,
         rephrase_params: RephraseParams,
+        thinking_mode: ThinkingMode,
         stream: bool,
     ) -> Result<reqwest::Response, ApiError> {
         let inner = &self.0;
         let vision = self.probe_vision().await;
-        let sys_prompt = mode.system_prompt(rephrase_params);
+        let thinking_control = self.probe_thinking().await;
+        let (sys_prefix, template_kwargs) =
+            Self::resolve_thinking(thinking_mode, thinking_control);
+
+        let base_prompt = mode.system_prompt(rephrase_params);
+        let sys_prompt = if let Some(prefix) = sys_prefix {
+            format!("{prefix}{base_prompt}")
+        } else {
+            base_prompt
+        };
+
         let body = ChatRequest {
             model: &inner.model,
             messages: vec![
@@ -595,6 +831,7 @@ impl LlmClient {
             temperature: TEMPERATURE,
             max_tokens: MAX_TOKENS,
             stream: if stream { Some(true) } else { None },
+            chat_template_kwargs: template_kwargs,
         };
 
         let client = if stream { &inner.streaming_client } else { &inner.client };
@@ -612,12 +849,15 @@ impl LlmClient {
         content: &ClipboardContent,
         mode: ProcessMode,
         rephrase_params: RephraseParams,
+        thinking_mode: ThinkingMode,
     ) -> Result<String, ApiError> {
         let inner = &self.0;
         info!("sending request to {}", inner.endpoint);
         debug!("model={}, temperature={}, max_tokens={}", inner.model, TEMPERATURE, MAX_TOKENS);
 
-        let resp = self.build_and_send(content, mode, rephrase_params, false).await?;
+        let resp = self
+            .build_and_send(content, mode, rephrase_params, thinking_mode, false)
+            .await?;
         let chat: ChatResponse = resp.json().await?;
 
         let resp_content = chat
@@ -644,9 +884,11 @@ impl LlmClient {
         content: &ClipboardContent,
         mode: ProcessMode,
         rephrase_params: RephraseParams,
+        thinking_mode: ThinkingMode,
     ) -> Result<reqwest::Response, ApiError> {
         let inner = &self.0;
         info!("sending streaming request to {}", inner.endpoint);
-        self.build_and_send(content, mode, rephrase_params, true).await
+        self.build_and_send(content, mode, rephrase_params, thinking_mode, true)
+            .await
     }
 }
