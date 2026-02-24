@@ -102,7 +102,7 @@ pub fn render(
 
                 render_tab_bar(
                     ui, mode, available_modes,
-                    thinking.mode, thinking.supported,
+                    thinking,
                     &mut action,
                 );
 
@@ -368,8 +368,7 @@ fn render_tab_bar(
     ui: &mut egui::Ui,
     current: ProcessMode,
     available_modes: &[ProcessMode],
-    thinking_mode: ThinkingMode,
-    thinking_supported: bool,
+    thinking: ThinkingState,
     action: &mut OverlayAction,
 ) {
     ui.horizontal(|ui| {
@@ -402,11 +401,11 @@ fn render_tab_bar(
         }
 
         // Thinking pill (right side) — hidden when model doesn't support thinking control.
-        if thinking_supported {
+        if thinking.supported {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Render in reverse order (right-to-left layout reverses visual order)
                 for &tm in ThinkingMode::ALL.iter().rev() {
-                    let is_selected = tm == thinking_mode;
+                    let is_selected = tm == thinking.mode;
 
                     let text = egui::RichText::new(tm.label())
                         .size(11.0)

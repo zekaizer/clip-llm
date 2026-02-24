@@ -39,7 +39,7 @@ pub enum WorkerResponse {
     Complete { result: String, think_content: Option<String>, request_id: u64 },
     Error { message: String, request_id: u64 },
     /// One-shot: thinking control capability from probe (sent once at startup).
-    ThinkingProbeComplete { supported: bool },
+    ThinkingProbeResult { supported: bool },
 }
 
 /// Strip think blocks from raw LLM output and build the appropriate response.
@@ -313,7 +313,7 @@ mod tests {
             WorkerResponse::ThinkStarted { .. } => "ThinkStarted",
             WorkerResponse::Complete { .. } => "Complete",
             WorkerResponse::Error { .. } => "Error",
-            WorkerResponse::ThinkingProbeComplete { .. } => "ThinkingProbeComplete",
+            WorkerResponse::ThinkingProbeResult { .. } => "ThinkingProbeResult",
         }
     }
 
@@ -387,7 +387,7 @@ pub fn spawn_worker(
             let thinking_method = llm.probe_thinking().await;
             let supported =
                 thinking_method != crate::api::client::ThinkingControlMethod::Unsupported;
-            let _ = resp_tx.send(WorkerResponse::ThinkingProbeComplete { supported });
+            let _ = resp_tx.send(WorkerResponse::ThinkingProbeResult { supported });
 
             let mut cancel_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
 

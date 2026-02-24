@@ -254,7 +254,7 @@ impl OverlayApp {
                 WorkerResponse::ThinkStarted { request_id } => {
                     UiEvent::ThinkStarted { request_id }
                 }
-                WorkerResponse::ThinkingProbeComplete { supported } => {
+                WorkerResponse::ThinkingProbeResult { supported } => {
                     UiEvent::ThinkingProbeResult(supported)
                 }
             };

@@ -66,11 +66,6 @@ impl ThinkBlockFilter {
         }
     }
 
-    /// Returns `true` while inside a `<think>…</think>` block.
-    pub fn is_thinking(&self) -> bool {
-        matches!(self.state, ThinkState::InsideThink)
-    }
-
     /// Returns `true` when inside a think block AND non-whitespace content
     /// has been accumulated. Use this to delay `ThinkStarted` notifications
     /// until meaningful content is detected (avoids UI flicker for empty blocks).
