@@ -46,23 +46,23 @@ pub fn run(
             }
         };
 
-        if let Some(event) = event {
-            if event.state == HotKeyState::Pressed {
-                match detector.on_press() {
-                    TapAction::Pending => {
-                        // Capture mouse position at first key press.
-                        pending_mouse_pos = mouse_pos_fn();
-                    }
-                    TapAction::DoubleTap => {
-                        pre_show();
-                        let _ = tap_tx.send(TapEvent {
-                            action: TapAction::DoubleTap,
-                            mouse_pos: pending_mouse_pos.take(),
-                        });
-                        ctx.request_repaint();
-                    }
-                    TapAction::SingleTap => unreachable!("on_press never returns SingleTap"),
+        if let Some(event) = event
+            && event.state == HotKeyState::Pressed
+        {
+            match detector.on_press() {
+                TapAction::Pending => {
+                    // Capture mouse position at first key press.
+                    pending_mouse_pos = mouse_pos_fn();
                 }
+                TapAction::DoubleTap => {
+                    pre_show();
+                    let _ = tap_tx.send(TapEvent {
+                        action: TapAction::DoubleTap,
+                        mouse_pos: pending_mouse_pos.take(),
+                    });
+                    ctx.request_repaint();
+                }
+                TapAction::SingleTap => unreachable!("on_press never returns SingleTap"),
             }
         }
 

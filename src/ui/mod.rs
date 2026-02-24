@@ -316,10 +316,10 @@ impl OverlayApp {
     /// Delegates to the platform for native DPI-safe repositioning (e.g. Windows SetWindowPos
     /// bypasses winit's per-monitor scaling). Falls back to ViewportCommand::OuterPosition.
     fn reposition_window(&self, ctx: &egui::Context, win_size: egui::Vec2) {
-        if let Some(pos) = self.calculate_centered_position(win_size) {
-            if !self.platform.reposition_window(pos.x, pos.y) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
-            }
+        if let Some(pos) = self.calculate_centered_position(win_size)
+            && !self.platform.reposition_window(pos.x, pos.y)
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
         }
     }
 

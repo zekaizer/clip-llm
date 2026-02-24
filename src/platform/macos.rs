@@ -36,12 +36,12 @@ const NS_WINDOW_COLLECTION_BEHAVIOR_TRANSIENT: c_ulong = 1 << 3;
 const NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY: c_ulong = 1 << 8;
 
 #[link(name = "AppKit", kind = "framework")]
-extern "C" {
+unsafe extern "C" {
     fn AXIsProcessTrusted() -> bool;
 }
 
 #[link(name = "objc", kind = "dylib")]
-extern "C" {
+unsafe extern "C" {
     fn objc_getClass(name: *const c_char) -> *mut c_void;
     fn sel_registerName(name: *const c_char) -> *mut c_void;
     fn objc_msgSend(obj: *mut c_void, sel: *mut c_void) -> *mut c_void;
@@ -50,19 +50,21 @@ extern "C" {
 /// Get the first NSWindow from [NSApp windows].
 /// Returns null if unavailable.
 unsafe fn get_app_window() -> *mut c_void {
-    let cls = objc_getClass(c"NSApplication".as_ptr());
-    if cls.is_null() {
-        return std::ptr::null_mut();
+    unsafe {
+        let cls = objc_getClass(c"NSApplication".as_ptr());
+        if cls.is_null() {
+            return std::ptr::null_mut();
+        }
+        let app = objc_msgSend(cls, sel_registerName(c"sharedApplication".as_ptr()));
+        if app.is_null() {
+            return std::ptr::null_mut();
+        }
+        let windows = objc_msgSend(app, sel_registerName(c"windows".as_ptr()));
+        if windows.is_null() {
+            return std::ptr::null_mut();
+        }
+        objc_msgSend(windows, sel_registerName(c"firstObject".as_ptr()))
     }
-    let app = objc_msgSend(cls, sel_registerName(c"sharedApplication".as_ptr()));
-    if app.is_null() {
-        return std::ptr::null_mut();
-    }
-    let windows = objc_msgSend(app, sel_registerName(c"windows".as_ptr()));
-    if windows.is_null() {
-        return std::ptr::null_mut();
-    }
-    objc_msgSend(windows, sel_registerName(c"firstObject".as_ptr()))
 }
 
 /// Configure the NSWindow for overlay use:
@@ -148,7 +150,7 @@ pub fn show_and_focus_window(position: Option<(f32, f32)>) {
 }
 
 
-extern "C" {
+unsafe extern "C" {
     fn CGMainDisplayID() -> u32;
     fn CGGetDisplaysWithPoint(
         point: CGPoint,

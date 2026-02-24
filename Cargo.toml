@@ -1,7 +1,7 @@
 [package]
 name = "clip-llm"
 version = "0.8.0"
-edition = "2021"
+edition = "2024"
 authors = ["Luke Lee <zekaizer@gmail.com>"]
 
 [dependencies]

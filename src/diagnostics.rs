@@ -228,22 +228,22 @@ impl DiagCollector {
         // If we've been waiting for more than 30 frames, dump without screenshot.
         if self.pending_screenshot {
             // Check if transition context is old enough (compare frame counter).
-            if let Some(ref tctx) = self.transition_ctx {
-                if self.frame_counter.saturating_sub(tctx.frame) > 30 {
-                    warn!("diag: screenshot timed out, dumping JSON only");
-                    self.pending_screenshot = false;
-                    self.dump_counter += 1;
+            if let Some(ref tctx) = self.transition_ctx
+                && self.frame_counter.saturating_sub(tctx.frame) > 30
+            {
+                warn!("diag: screenshot timed out, dumping JSON only");
+                self.pending_screenshot = false;
+                self.dump_counter += 1;
 
-                    if let Some(tctx) = self.transition_ctx.take() {
-                        let prefix = format!(
-                            "{:03}_{}_to_{}",
-                            self.dump_counter, tctx.from, tctx.to
-                        );
-                        let json_path = self.dump_dir.join(format!("{prefix}.json"));
-                        if let Ok(json) = serde_json::to_string_pretty(&tctx) {
-                            let _ = std::fs::write(&json_path, json);
-                            info!("diag: saved {} (no screenshot)", json_path.display());
-                        }
+                if let Some(tctx) = self.transition_ctx.take() {
+                    let prefix = format!(
+                        "{:03}_{}_to_{}",
+                        self.dump_counter, tctx.from, tctx.to
+                    );
+                    let json_path = self.dump_dir.join(format!("{prefix}.json"));
+                    if let Ok(json) = serde_json::to_string_pretty(&tctx) {
+                        let _ = std::fs::write(&json_path, json);
+                        info!("diag: saved {} (no screenshot)", json_path.display());
                     }
                 }
             }
@@ -432,12 +432,12 @@ impl DiagScenarioRunner {
             RunnerPhase::WaitingForResult => {
                 if overlay_state == "Result" || overlay_state == "Error" {
                     // Check if we need a mode switch.
-                    if let Some(scenario) = self.scenarios.front() {
-                        if let Some(switch_mode) = scenario.switch_to {
-                            info!("diag: switching mode to {}", switch_mode.label());
-                            self.phase = RunnerPhase::WaitingForSwitchResult;
-                            return ScenarioAction::SwitchMode(switch_mode);
-                        }
+                    if let Some(scenario) = self.scenarios.front()
+                        && let Some(switch_mode) = scenario.switch_to
+                    {
+                        info!("diag: switching mode to {}", switch_mode.label());
+                        self.phase = RunnerPhase::WaitingForSwitchResult;
+                        return ScenarioAction::SwitchMode(switch_mode);
                     }
 
                     self.delay_until = Instant::now() + RESULT_DISPLAY;
