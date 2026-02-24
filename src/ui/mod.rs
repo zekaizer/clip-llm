@@ -275,6 +275,7 @@ impl OverlayApp {
 
     // -- Focus handling --
 
+    #[cfg(not(feature = "diagnostics"))]
     fn check_focus_lost(&mut self, ctx: &egui::Context) {
         if matches!(self.sm.state(), OverlayState::Hidden) {
             return;

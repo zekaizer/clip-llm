@@ -214,6 +214,7 @@ async fn run_mock_streaming(
             info!("worker: mock {} complete ({} chars)", mode.label(), mock.len());
             let _ = resp_tx.send(WorkerResponse::Complete {
                 result: mock,
+                think_content: None,
                 request_id,
             });
         }
