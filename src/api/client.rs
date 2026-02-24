@@ -724,17 +724,17 @@ impl LlmClient {
         control: ThinkingControlMethod,
     ) -> (Option<&'static str>, Option<ChatTemplateKwargs>) {
         match (thinking_mode, control) {
-            (ThinkingMode::Default, _) | (_, ThinkingControlMethod::Unsupported) => (None, None),
-            (ThinkingMode::ForceOn, ThinkingControlMethod::ChatTemplateKwargs) => {
+            (_, ThinkingControlMethod::Unsupported) => (None, None),
+            (ThinkingMode::Think, ThinkingControlMethod::ChatTemplateKwargs) => {
                 (None, Some(ChatTemplateKwargs { enable_thinking: true }))
             }
-            (ThinkingMode::ForceOff, ThinkingControlMethod::ChatTemplateKwargs) => {
+            (ThinkingMode::NoThink, ThinkingControlMethod::ChatTemplateKwargs) => {
                 (None, Some(ChatTemplateKwargs { enable_thinking: false }))
             }
-            (ThinkingMode::ForceOn, ThinkingControlMethod::SystemPromptTag) => {
+            (ThinkingMode::Think, ThinkingControlMethod::SystemPromptTag) => {
                 (Some("/think\n"), None)
             }
-            (ThinkingMode::ForceOff, ThinkingControlMethod::SystemPromptTag) => {
+            (ThinkingMode::NoThink, ThinkingControlMethod::SystemPromptTag) => {
                 (Some("/no_think\n"), None)
             }
         }
