@@ -71,6 +71,15 @@ impl ThinkBlockFilter {
         matches!(self.state, ThinkState::InsideThink)
     }
 
+    /// Returns `true` when inside a think block AND non-whitespace content
+    /// has been accumulated. Use this to delay `ThinkStarted` notifications
+    /// until meaningful content is detected (avoids UI flicker for empty blocks).
+    pub fn has_think_content(&self) -> bool {
+        self.state == ThinkState::InsideThink
+            && (self.think_content.contains(|c: char| !c.is_whitespace())
+                || self.pending.contains(|c: char| !c.is_whitespace()))
+    }
+
     /// Take the accumulated think-block content, leaving it empty.
     /// Only meaningful after the close tag has been processed.
     pub fn take_think_content(&mut self) -> String {

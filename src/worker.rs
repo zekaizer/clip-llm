@@ -144,7 +144,7 @@ async fn run_streaming(
                         SseEvent::Content(token) => {
                             full_content.push_str(&token);
                             let visible = filter.feed(&token);
-                            if filter.is_thinking() && !think_notified {
+                            if filter.has_think_content() && !think_notified {
                                 think_notified = true;
                                 let _ = resp_tx.send(WorkerResponse::ThinkStarted { request_id });
                             }
