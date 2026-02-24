@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::{ClipboardContent, ProcessMode, RephraseLength, RephraseParams, RephraseStyle};
+use crate::{ClipboardContent, ProcessMode, RephraseLength, RephraseParams, RephraseStyle, ThinkingMode};
 
 // ---------------------------------------------------------------------------
 // OverlayState
@@ -60,6 +60,10 @@ pub enum UiEvent {
     UserChangeRephraseStyle(RephraseStyle),
     /// User changed the rephrase length parameter.
     UserChangeRephraseLength(RephraseLength),
+    /// User changed the thinking mode for the current ProcessMode.
+    UserChangeThinkingMode(ThinkingMode),
+    /// Worker reported thinking probe result.
+    ThinkingProbeResult(bool),
     /// User started dragging the overlay.
     UserStartDrag,
     /// Window gained focus.
@@ -79,6 +83,7 @@ pub enum UiEffect {
         content: ClipboardContent,
         mode: ProcessMode,
         rephrase_params: RephraseParams,
+        thinking_mode: ThinkingMode,
         request_id: u64,
     },
     SendCancel,
@@ -105,11 +110,15 @@ pub struct StateMachine {
     current_request_id: u64,
     /// Current rephrase parameters (style + length); affects system prompt for Rephrase mode.
     rephrase_params: RephraseParams,
+    /// Per-mode thinking override. Missing entry = use ProcessMode::default_thinking().
+    mode_thinking: HashMap<ProcessMode, ThinkingMode>,
+    /// Whether thinking control is available (from probe result).
+    thinking_supported: bool,
     /// True after the user drags the overlay; suppresses auto-repositioning.
     user_repositioned: bool,
     /// True once the window has received focus after show_window.
     has_been_focused: bool,
-    /// Result cache: maps system_prompt string → (text, think_content).
+    /// Result cache: maps cache_key → (text, think_content).
     /// Valid only for the current original content.
     cache: HashMap<String, (String, Option<String>)>,
     /// Accumulated visible streaming text (displayed during Processing).
@@ -126,6 +135,8 @@ impl StateMachine {
             state: OverlayState::Hidden,
             mode,
             rephrase_params: RephraseParams::default(),
+            mode_thinking: HashMap::new(),
+            thinking_supported: false,
             original_content: None,
             next_request_id: 0,
             current_request_id: 0,
@@ -150,6 +161,18 @@ impl StateMachine {
 
     pub fn rephrase_params(&self) -> RephraseParams {
         self.rephrase_params
+    }
+
+    /// Effective thinking mode for the current ProcessMode.
+    pub fn effective_thinking_mode(&self) -> ThinkingMode {
+        self.mode_thinking
+            .get(&self.mode)
+            .copied()
+            .unwrap_or_else(|| self.mode.default_thinking())
+    }
+
+    pub fn thinking_supported(&self) -> bool {
+        self.thinking_supported
     }
 
     pub fn streaming_text(&self) -> &str {
@@ -213,6 +236,11 @@ impl StateMachine {
             UiEvent::UserSwitchMode(mode) => self.on_switch_mode(mode),
             UiEvent::UserChangeRephraseStyle(style) => self.on_change_rephrase_style(style),
             UiEvent::UserChangeRephraseLength(length) => self.on_change_rephrase_length(length),
+            UiEvent::UserChangeThinkingMode(mode) => self.on_change_thinking_mode(mode),
+            UiEvent::ThinkingProbeResult(supported) => {
+                self.thinking_supported = supported;
+                vec![]
+            }
             UiEvent::UserStartDrag => {
                 self.user_repositioned = true;
                 vec![]
@@ -259,6 +287,7 @@ impl StateMachine {
                 content,
                 mode: self.mode,
                 rephrase_params: self.rephrase_params,
+                thinking_mode: self.effective_thinking_mode(),
                 request_id: self.current_request_id,
             },
         ];
@@ -384,6 +413,7 @@ impl StateMachine {
                             content,
                             mode: self.mode,
                             rephrase_params: self.rephrase_params,
+                            thinking_mode: self.effective_thinking_mode(),
                             request_id: self.current_request_id,
                         },
                     ]
@@ -408,6 +438,7 @@ impl StateMachine {
                             content,
                             mode: self.mode,
                             rephrase_params: self.rephrase_params,
+                            thinking_mode: self.effective_thinking_mode(),
                             request_id: self.current_request_id,
                         },
                         UiEffect::ResetAreas,
@@ -446,9 +477,13 @@ impl StateMachine {
         vec![UiEffect::ResetAreas, UiEffect::ShowWindow]
     }
 
-    /// Cache key for the current mode + rephrase params combination.
+    /// Cache key for the current mode + rephrase params + thinking mode combination.
     fn cache_key(&self) -> String {
-        self.mode.system_prompt(self.rephrase_params)
+        format!(
+            "{}|{:?}",
+            self.mode.system_prompt(self.rephrase_params),
+            self.effective_thinking_mode(),
+        )
     }
 
     fn on_change_rephrase_style(&mut self, style: RephraseStyle) -> Vec<UiEffect> {
@@ -467,11 +502,24 @@ impl StateMachine {
         self.on_rephrase_params_changed()
     }
 
+    fn on_change_thinking_mode(&mut self, thinking: ThinkingMode) -> Vec<UiEffect> {
+        if self.effective_thinking_mode() == thinking {
+            return vec![];
+        }
+        self.mode_thinking.insert(self.mode, thinking);
+        self.on_params_changed()
+    }
+
     /// Re-process or serve from cache when rephrase params change (Rephrase mode only).
     fn on_rephrase_params_changed(&mut self) -> Vec<UiEffect> {
         if self.mode != ProcessMode::Rephrase {
             return vec![];
         }
+        self.on_params_changed()
+    }
+
+    /// Common logic for re-processing after params (rephrase or thinking) change.
+    fn on_params_changed(&mut self) -> Vec<UiEffect> {
         let key = self.cache_key();
         match &self.state {
             OverlayState::Processing => {
@@ -493,6 +541,7 @@ impl StateMachine {
                             content,
                             mode: self.mode,
                             rephrase_params: self.rephrase_params,
+                            thinking_mode: self.effective_thinking_mode(),
                             request_id: self.current_request_id,
                         },
                     ]
@@ -514,6 +563,7 @@ impl StateMachine {
                             content,
                             mode: self.mode,
                             rephrase_params: self.rephrase_params,
+                            thinking_mode: self.effective_thinking_mode(),
                             request_id: self.current_request_id,
                         },
                         UiEffect::ResetAreas,

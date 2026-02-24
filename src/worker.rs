@@ -6,7 +6,7 @@ use tracing::{debug, error, info};
 
 use crate::api::client::{LlmClient, SseEvent, SseParser};
 use crate::api::response::{extract_first_think_content, strip_think_blocks, ThinkBlockFilter};
-use crate::{ClipboardContent, ProcessMode, RephraseParams};
+use crate::{ClipboardContent, ProcessMode, RephraseParams, ThinkingMode};
 
 /// Runtime configuration resolved from environment variables once at worker startup.
 #[derive(Copy, Clone)]
@@ -23,6 +23,7 @@ pub enum WorkerCommand {
         content: ClipboardContent,
         mode: ProcessMode,
         rephrase_params: RephraseParams,
+        thinking_mode: ThinkingMode,
         request_id: u64,
     },
     Cancel,
@@ -34,6 +35,8 @@ pub enum WorkerResponse {
     ThinkStarted { request_id: u64 },
     Complete { result: String, think_content: Option<String>, request_id: u64 },
     Error { message: String, request_id: u64 },
+    /// One-shot: thinking control capability from probe (sent once at startup).
+    ThinkingProbeComplete { supported: bool },
 }
 
 /// Strip think blocks from raw LLM output and build the appropriate response.
@@ -62,17 +65,19 @@ fn make_complete_response(
 }
 
 /// Non-streaming LLM request: single request/response with cancellation support.
+#[allow(clippy::too_many_arguments)]
 async fn run_non_streaming(
     llm: LlmClient,
     content: ClipboardContent,
     mode: ProcessMode,
     rephrase_params: RephraseParams,
+    thinking_mode: ThinkingMode,
     request_id: u64,
     resp_tx: mpsc::Sender<WorkerResponse>,
     mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
     let result = tokio::select! {
-        r = llm.complete(&content, mode, rephrase_params) => r,
+        r = llm.complete(&content, mode, rephrase_params, thinking_mode) => r,
         _ = &mut cancel_rx => {
             debug!("worker: request cancelled during connect");
             return;
@@ -92,17 +97,19 @@ async fn run_non_streaming(
 }
 
 /// Streaming LLM request: SSE parsing loop with incremental delta delivery.
+#[allow(clippy::too_many_arguments)]
 async fn run_streaming(
     llm: LlmClient,
     content: ClipboardContent,
     mode: ProcessMode,
     rephrase_params: RephraseParams,
+    thinking_mode: ThinkingMode,
     request_id: u64,
     resp_tx: mpsc::Sender<WorkerResponse>,
     mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
     let resp = tokio::select! {
-        r = llm.complete_stream(&content, mode, rephrase_params) => r,
+        r = llm.complete_stream(&content, mode, rephrase_params, thinking_mode) => r,
         _ = &mut cancel_rx => {
             debug!("worker: request cancelled during connect");
             return;
@@ -232,6 +239,7 @@ fn dispatch_process(
     content: ClipboardContent,
     mode: ProcessMode,
     rephrase_params: RephraseParams,
+    thinking_mode: ThinkingMode,
     request_id: u64,
     llm: &LlmClient,
     resp_tx: &mpsc::Sender<WorkerResponse>,
@@ -265,13 +273,13 @@ fn dispatch_process(
             "worker: starting stream {} ({} chars, {} images)",
             mode.label(), text_for_log.len(), content.images.len(),
         );
-        tokio::spawn(run_streaming(llm, content, mode, rephrase_params, request_id, resp_tx, c_rx));
+        tokio::spawn(run_streaming(llm, content, mode, rephrase_params, thinking_mode, request_id, resp_tx, c_rx));
     } else {
         info!(
             "worker: starting {} ({} chars, {} images, no-stream)",
             mode.label(), text_for_log.len(), content.images.len(),
         );
-        tokio::spawn(run_non_streaming(llm, content, mode, rephrase_params, request_id, resp_tx, c_rx));
+        tokio::spawn(run_non_streaming(llm, content, mode, rephrase_params, thinking_mode, request_id, resp_tx, c_rx));
     }
 }
 
@@ -311,6 +319,7 @@ mod tests {
             WorkerResponse::ThinkStarted { .. } => "ThinkStarted",
             WorkerResponse::Complete { .. } => "Complete",
             WorkerResponse::Error { .. } => "Error",
+            WorkerResponse::ThinkingProbeComplete { .. } => "ThinkingProbeComplete",
         }
     }
 
@@ -379,16 +388,20 @@ pub fn spawn_worker(
         };
 
         rt.block_on(async move {
-            // Probe vision support eagerly so it doesn't delay the first user request.
+            // Probe vision and thinking support eagerly so they don't delay the first request.
             llm.probe_vision().await;
+            let thinking_method = llm.probe_thinking().await;
+            let supported =
+                thinking_method != crate::api::client::ThinkingControlMethod::Unsupported;
+            let _ = resp_tx.send(WorkerResponse::ThinkingProbeComplete { supported });
 
             let mut cancel_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
 
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
-                    WorkerCommand::Process { content, mode, rephrase_params, request_id } => {
+                    WorkerCommand::Process { content, mode, rephrase_params, thinking_mode, request_id } => {
                         dispatch_process(
-                            content, mode, rephrase_params, request_id,
+                            content, mode, rephrase_params, thinking_mode, request_id,
                             &llm, &resp_tx, &mut cancel_tx, &config,
                         );
                     }

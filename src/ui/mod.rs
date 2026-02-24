@@ -108,6 +108,7 @@ impl OverlayApp {
                     content,
                     mode,
                     rephrase_params,
+                    thinking_mode,
                     request_id,
                 } => {
                     let text_len = content.text.as_ref().map_or(0, |t| t.len());
@@ -117,6 +118,7 @@ impl OverlayApp {
                         content,
                         mode,
                         rephrase_params,
+                        thinking_mode,
                         request_id,
                     });
                 }
@@ -251,6 +253,9 @@ impl OverlayApp {
                 }
                 WorkerResponse::ThinkStarted { request_id } => {
                     UiEvent::ThinkStarted { request_id }
+                }
+                WorkerResponse::ThinkingProbeComplete { supported } => {
+                    UiEvent::ThinkingProbeResult(supported)
                 }
             };
             let effects = self.sm.handle(event);
