@@ -172,7 +172,7 @@ impl ProcessMode {
         }
     }
 
-    pub fn system_prompt(self, params: RephraseParams) -> String {
+    pub fn system_prompt(self, params: RephraseParams, image_only: bool) -> String {
         match self {
             Self::Translate => format!(
                 "You are a {PRIMARY_LANG}↔{SECONDARY_LANG} translator for software engineering text. \
@@ -221,6 +221,18 @@ impl ProcessMode {
                      Output the rewritten text only — no preamble, labels, answers, or markdown."
                 )
             }
+            Self::Summarize if image_only => format!(
+                "You are an image analyst for software engineering content. \
+                 Describe and summarize the given image(s) in {PRIMARY_LANG}. \
+                 Rules: \
+                 - Always output in {PRIMARY_LANG}. \
+                 - Keep technical terms, proper nouns, UI labels, and code references intact (do not translate them). \
+                 - Keep the total output under 1000 characters. \
+                 - STRICT: Describe ONLY what is visible in the image. \
+                 Do not infer, speculate, or add information not present. \
+                 - Focus on: text content, UI elements, diagrams, code snippets, error messages, or data shown. \
+                 - Use plain prose. No markdown template required."
+            ),
             Self::Summarize => format!(
                 "You are a text summarizer for software engineering content. \
                  Produce a concise summary in {PRIMARY_LANG} that captures the key points \
@@ -271,6 +283,9 @@ pub enum ApiError {
 
     #[error("empty response from model")]
     EmptyResponse,
+
+    #[error("no usable content: image-only clipboard but model lacks vision support")]
+    NoUsableContent,
 
     #[error("request cancelled")]
     Cancelled,

@@ -530,7 +530,7 @@ impl StateMachine {
     fn cache_key(&self) -> String {
         format!(
             "{}|{:?}",
-            self.mode.system_prompt(self.rephrase_params),
+            self.mode.system_prompt(self.rephrase_params, false),
             self.effective_thinking_mode(),
         )
     }

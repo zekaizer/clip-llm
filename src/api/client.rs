@@ -809,7 +809,17 @@ impl LlmClient {
         let (sys_prefix, template_kwargs) =
             Self::resolve_thinking(thinking_mode, thinking_control);
 
-        let base_prompt = mode.system_prompt(rephrase_params);
+        let has_text = content.text.as_ref().is_some_and(|t| !t.trim().is_empty());
+        let use_images =
+            mode == ProcessMode::Summarize && vision && content.has_images();
+        let image_only = use_images && !has_text;
+
+        // Image-only clipboard but model lacks vision — nothing useful to send.
+        if !has_text && content.has_images() && !vision {
+            return Err(ApiError::NoUsableContent);
+        }
+
+        let base_prompt = mode.system_prompt(rephrase_params, image_only);
         let sys_prompt = if let Some(prefix) = sys_prefix {
             format!("{prefix}{base_prompt}")
         } else {
