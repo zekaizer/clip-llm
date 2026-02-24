@@ -474,6 +474,58 @@ mod tests {
             _ => panic!("expected Parts"),
         }
     }
+
+    // --- resolve_thinking tests ---
+
+    #[test]
+    fn resolve_thinking_unsupported_returns_none() {
+        let (prefix, kwargs) = LlmClient::resolve_thinking(
+            ThinkingMode::Think,
+            ThinkingControlMethod::Unsupported,
+        );
+        assert!(prefix.is_none());
+        assert!(kwargs.is_none());
+    }
+
+    #[test]
+    fn resolve_thinking_think_with_kwargs() {
+        let (prefix, kwargs) = LlmClient::resolve_thinking(
+            ThinkingMode::Think,
+            ThinkingControlMethod::ChatTemplateKwargs,
+        );
+        assert!(prefix.is_none());
+        assert!(kwargs.unwrap().enable_thinking);
+    }
+
+    #[test]
+    fn resolve_thinking_nothink_with_kwargs() {
+        let (prefix, kwargs) = LlmClient::resolve_thinking(
+            ThinkingMode::NoThink,
+            ThinkingControlMethod::ChatTemplateKwargs,
+        );
+        assert!(prefix.is_none());
+        assert!(!kwargs.unwrap().enable_thinking);
+    }
+
+    #[test]
+    fn resolve_thinking_think_with_prompt_tag() {
+        let (prefix, kwargs) = LlmClient::resolve_thinking(
+            ThinkingMode::Think,
+            ThinkingControlMethod::SystemPromptTag,
+        );
+        assert_eq!(prefix.unwrap(), "/think\n");
+        assert!(kwargs.is_none());
+    }
+
+    #[test]
+    fn resolve_thinking_nothink_with_prompt_tag() {
+        let (prefix, kwargs) = LlmClient::resolve_thinking(
+            ThinkingMode::NoThink,
+            ThinkingControlMethod::SystemPromptTag,
+        );
+        assert_eq!(prefix.unwrap(), "/no_think\n");
+        assert!(kwargs.is_none());
+    }
 }
 
 impl LlmClient {

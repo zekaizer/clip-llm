@@ -1356,4 +1356,129 @@ mod tests {
         assert!(effects.is_empty());
         assert_eq!(*sm.state(), OverlayState::Error("read failed".into()));
     }
+
+    // === Thinking mode tests ===
+
+    #[test]
+    fn thinking_probe_result_updates_supported() {
+        let mut sm = new_sm();
+        assert!(!sm.thinking_supported());
+
+        sm.handle(UiEvent::ThinkingProbeResult(true));
+        assert!(sm.thinking_supported());
+
+        sm.handle(UiEvent::ThinkingProbeResult(false));
+        assert!(!sm.thinking_supported());
+    }
+
+    #[test]
+    fn effective_thinking_mode_defaults_per_process_mode() {
+        let mut sm = new_sm(); // Translate mode
+        assert_eq!(sm.effective_thinking_mode(), ThinkingMode::NoThink);
+
+        sm.handle(UiEvent::UserSwitchMode(ProcessMode::Summarize));
+        assert_eq!(sm.effective_thinking_mode(), ThinkingMode::Think);
+    }
+
+    #[test]
+    fn change_thinking_mode_triggers_reprocess() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        let _rid = last_request_id(&effects);
+
+        // Change thinking to Think (default is NoThink for Translate).
+        let effects = sm.handle(UiEvent::UserChangeThinkingMode(ThinkingMode::Think));
+        assert!(effects.iter().any(|e| matches!(e, UiEffect::SendCancel)));
+        assert!(effects.iter().any(|e| matches!(e, UiEffect::SendProcess { thinking_mode: ThinkingMode::Think, .. })));
+        assert_eq!(sm.effective_thinking_mode(), ThinkingMode::Think);
+    }
+
+    #[test]
+    fn change_thinking_mode_same_value_is_noop() {
+        let mut sm = new_sm();
+        start_processing(&mut sm, "hello");
+
+        // NoThink is already default for Translate — should be no-op.
+        let effects = sm.handle(UiEvent::UserChangeThinkingMode(ThinkingMode::NoThink));
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn change_thinking_mode_from_result_reprocesses() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerResult {
+            text: "ok".into(),
+            think_content: None,
+            request_id: rid,
+        });
+
+        let effects = sm.handle(UiEvent::UserChangeThinkingMode(ThinkingMode::Think));
+        assert_eq!(*sm.state(), OverlayState::Processing);
+        assert!(effects.iter().any(|e| matches!(e, UiEffect::SendProcess { thinking_mode: ThinkingMode::Think, .. })));
+    }
+
+    #[test]
+    fn mode_thinking_cleared_on_content_ready() {
+        let mut sm = new_sm();
+        start_processing(&mut sm, "hello");
+
+        // Override thinking for Translate.
+        sm.handle(UiEvent::UserChangeThinkingMode(ThinkingMode::Think));
+        assert_eq!(sm.effective_thinking_mode(), ThinkingMode::Think);
+
+        // New content ready — should reset to default.
+        start_processing(&mut sm, "world");
+        assert_eq!(sm.effective_thinking_mode(), ThinkingMode::NoThink);
+    }
+
+    #[test]
+    fn thinking_mode_per_process_mode_independent() {
+        let mut sm = new_sm();
+        start_processing(&mut sm, "hello");
+
+        // Set Translate to Think.
+        sm.handle(UiEvent::UserChangeThinkingMode(ThinkingMode::Think));
+        assert_eq!(sm.effective_thinking_mode(), ThinkingMode::Think);
+
+        // Switch to Summarize — should use Summarize's default (Think).
+        sm.handle(UiEvent::UserSwitchMode(ProcessMode::Summarize));
+        assert_eq!(sm.effective_thinking_mode(), ThinkingMode::Think);
+
+        // Switch back to Translate — override should still be active.
+        sm.handle(UiEvent::UserSwitchMode(ProcessMode::Translate));
+        assert_eq!(sm.effective_thinking_mode(), ThinkingMode::Think);
+    }
+
+    #[test]
+    fn think_started_cleared_on_error() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+
+        sm.handle(UiEvent::ThinkStarted { request_id: rid });
+        assert!(sm.think_started());
+
+        sm.handle(UiEvent::WorkerError {
+            message: "fail".into(),
+            request_id: rid,
+        });
+        assert!(!sm.think_started());
+    }
+
+    #[test]
+    fn rephrase_params_reset_on_content_ready() {
+        let mut sm = new_sm();
+        sm.handle(UiEvent::UserSwitchMode(ProcessMode::Rephrase));
+        start_processing(&mut sm, "hello");
+
+        // Change length.
+        sm.handle(UiEvent::UserChangeRephraseLength(RephraseLength::Terse));
+        assert_eq!(sm.rephrase_params().length, RephraseLength::Terse);
+
+        // New content — should reset to default.
+        start_processing(&mut sm, "world");
+        assert_eq!(sm.rephrase_params().length, RephraseLength::default());
+    }
 }

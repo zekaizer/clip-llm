@@ -333,4 +333,54 @@ mod tests {
         let input = "<think><b>bold reasoning</b></think>answer";
         assert_eq!(strip_think_blocks(input), "answer");
     }
+
+    // --- has_think_content tests ---
+
+    #[test]
+    fn has_think_content_false_before_think_tag() {
+        let filter = ThinkBlockFilter::new();
+        assert!(!filter.has_think_content());
+    }
+
+    #[test]
+    fn has_think_content_false_just_after_open_tag() {
+        let mut filter = ThinkBlockFilter::new();
+        filter.feed("<think>");
+        // Inside think block but no content yet.
+        assert!(!filter.has_think_content());
+    }
+
+    #[test]
+    fn has_think_content_false_for_whitespace_only() {
+        let mut filter = ThinkBlockFilter::new();
+        filter.feed("<think>");
+        filter.feed("   \n\n  ");
+        assert!(!filter.has_think_content());
+    }
+
+    #[test]
+    fn has_think_content_true_with_non_whitespace() {
+        let mut filter = ThinkBlockFilter::new();
+        filter.feed("<think>");
+        filter.feed("  reasoning");
+        assert!(filter.has_think_content());
+    }
+
+    #[test]
+    fn has_think_content_true_via_pending_only() {
+        let mut filter = ThinkBlockFilter::new();
+        filter.feed("<think>");
+        // Feed a short string that stays entirely in pending buffer
+        // (pending holds up to CLOSE_TAG.len()-1 = 7 bytes).
+        filter.feed("hello");
+        assert!(filter.has_think_content());
+    }
+
+    #[test]
+    fn has_think_content_false_after_close_tag() {
+        let mut filter = ThinkBlockFilter::new();
+        filter.feed("<think>reasoning</think>");
+        // After close tag, no longer inside think block.
+        assert!(!filter.has_think_content());
+    }
 }
