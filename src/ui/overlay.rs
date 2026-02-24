@@ -319,15 +319,26 @@ fn render_result(
     );
     let btn_rect = egui::Rect::from_min_size(btn_pos, btn_size);
 
-    let hovered = ui.input(|i| {
-        i.pointer.hover_pos().is_some_and(|p| btn_rect.contains(p))
+    let alpha = ui.input(|i| {
+        i.pointer.hover_pos().map_or(0u8, |p| {
+            let dist = btn_rect.center().distance(p);
+            // Fade radius (px): alpha=200 at dist=0, alpha=0 at dist>=fade_radius.
+            let fade_radius = 80.0;
+            if dist >= fade_radius {
+                0
+            } else {
+                ((1.0 - dist / fade_radius) * 200.0) as u8
+            }
+        })
     });
-    let alpha = if hovered { 200 } else { 30 };
     let icon = if auto_copy { "\u{21a9}" } else { "\u{1f4cb}" };
     let btn = egui::Button::new(
-        egui::RichText::new(icon).size(14.0),
+        egui::RichText::new(icon)
+            .size(14.0)
+            .color(egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha)),
     )
     .fill(egui::Color32::from_rgba_unmultiplied(50, 50, 50, alpha))
+    .stroke(egui::Stroke::NONE)
     .corner_radius(4.0);
 
     if ui.put(btn_rect, btn).clicked() {
