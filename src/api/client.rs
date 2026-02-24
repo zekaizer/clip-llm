@@ -598,25 +598,21 @@ impl LlmClient {
 
         match req.send().await {
             Ok(resp) if resp.status().is_success() => {
-                let text = resp.text().await.unwrap_or_default();
-                if let Ok(chat) = serde_json::from_str::<ChatResponse>(&text) {
-                    let content = chat
-                        .choices
-                        .first()
-                        .map(|c| c.message.content.as_str())
-                        .unwrap_or("");
-                    if content.contains("<think>") {
-                        Some(ThinkingControlMethod::ChatTemplateKwargs)
-                    } else {
-                        // kwargs accepted but no think block — try prompt tag
-                        self.probe_thinking_prompt_tag(inner).await
-                    }
-                } else {
-                    Some(ThinkingControlMethod::Unsupported)
-                }
+                // HTTP 200 + kwargs accepted = model supports chat_template_kwargs.
+                // Don't require <think> in the response — the model may skip thinking
+                // for trivial prompts even with enable_thinking=true.
+                Some(ThinkingControlMethod::ChatTemplateKwargs)
+            }
+            Ok(resp) if resp.status().is_server_error() => {
+                // 5xx: transient server error — don't cache, retry next time.
+                warn!(
+                    "thinking kwargs probe got {} (will retry)",
+                    resp.status().as_u16()
+                );
+                None
             }
             Ok(_) => {
-                // HTTP error (4xx for unsupported field) — try prompt tag
+                // 4xx: server rejected the kwargs field — try prompt tag fallback.
                 self.probe_thinking_prompt_tag(inner).await
             }
             Err(e) => {
@@ -672,6 +668,13 @@ impl LlmClient {
                 } else {
                     Some(ThinkingControlMethod::Unsupported)
                 }
+            }
+            Ok(resp) if resp.status().is_server_error() => {
+                warn!(
+                    "thinking prompt-tag probe got {} (will retry)",
+                    resp.status().as_u16()
+                );
+                None
             }
             Ok(_) => Some(ThinkingControlMethod::Unsupported),
             Err(e) => {
