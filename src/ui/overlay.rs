@@ -393,23 +393,39 @@ fn render_rephrase_params(
     params: RephraseParams,
     action: &mut OverlayAction,
 ) {
-    render_param_pills(
-        ui,
-        "Style",
-        RephraseStyle::ALL,
-        params.style,
-        |s| s.label(),
-        OverlayAction::ChangeRephraseStyle,
-        action,
-    );
-    render_param_pills(
-        ui,
-        "Length",
-        RephraseLength::ALL,
-        params.length,
-        |l| l.label(),
-        OverlayAction::ChangeRephraseLength,
-        action,
+    let accent_color = egui::Color32::from_rgba_unmultiplied(108, 166, 255, 80);
+
+    let response = ui.indent(egui::Id::new("rephrase_params"), |ui| {
+        render_param_pills(
+            ui,
+            "Style",
+            RephraseStyle::ALL,
+            params.style,
+            |s| s.label(),
+            OverlayAction::ChangeRephraseStyle,
+            action,
+        );
+        render_param_pills(
+            ui,
+            "Length",
+            RephraseLength::ALL,
+            params.length,
+            |l| l.label(),
+            OverlayAction::ChangeRephraseLength,
+            action,
+        );
+    });
+
+    // Draw accent line on the left edge of the indented area
+    let rect = response.response.rect;
+    let indent = ui.spacing().indent;
+    ui.painter().rect_filled(
+        egui::Rect::from_min_size(
+            egui::pos2(rect.left() - indent / 2.0, rect.top() + 2.0),
+            egui::vec2(1.5, rect.height() - 4.0),
+        ),
+        0.75,
+        accent_color,
     );
 }
 
