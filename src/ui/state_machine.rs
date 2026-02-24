@@ -43,7 +43,8 @@ impl OverlayState {
 #[derive(Debug, Clone)]
 pub enum UiEvent {
     /// Clipboard content ready for processing.
-    ContentReady(ClipboardContent),
+    /// `auto_copy`: when true, auto-copy the result to clipboard (double-tap behavior).
+    ContentReady { content: ClipboardContent, auto_copy: bool },
     /// Worker completed successfully.
     WorkerResult { text: String, think_content: Option<String>, request_id: u64 },
     /// Worker detected a think block beginning (streaming only).
@@ -74,6 +75,8 @@ pub enum UiEvent {
     StreamDelta { text: String, request_id: u64 },
     /// Clipboard operation failed (read or write).
     ClipboardError(String),
+    /// User clicked the copy button in the result area.
+    UserCopy,
 }
 
 /// Side effects that the adapter must execute after a state transition.
@@ -127,6 +130,9 @@ pub struct StateMachine {
     think_started: bool,
     /// Think block content for the current mode (set on WorkerResult).
     think_content: Option<String>,
+    /// Whether the current session should auto-copy results to clipboard.
+    /// Set by ContentReady (true for double-tap, false for single-tap).
+    auto_copy: bool,
 }
 
 impl StateMachine {
@@ -146,6 +152,7 @@ impl StateMachine {
             streaming_text: String::new(),
             think_started: false,
             think_content: None,
+            auto_copy: false,
         }
     }
 
@@ -191,6 +198,10 @@ impl StateMachine {
         self.user_repositioned
     }
 
+    pub fn auto_copy(&self) -> bool {
+        self.auto_copy
+    }
+
     pub fn current_request_id(&self) -> u64 {
         self.current_request_id
     }
@@ -222,7 +233,7 @@ impl StateMachine {
 
     pub fn handle(&mut self, event: UiEvent) -> Vec<UiEffect> {
         let effects = match event {
-            UiEvent::ContentReady(content) => self.on_content_ready(content),
+            UiEvent::ContentReady { content, auto_copy } => self.on_content_ready(content, auto_copy),
             UiEvent::WorkerResult { text, think_content, request_id } => {
                 self.on_worker_result(text, think_content, request_id)
             }
@@ -254,6 +265,7 @@ impl StateMachine {
             }
             UiEvent::FocusLost => self.on_focus_lost(),
             UiEvent::ClipboardError(msg) => self.on_clipboard_error(msg),
+            UiEvent::UserCopy => self.on_user_copy(),
         };
 
         self.check_invariants();
@@ -262,7 +274,7 @@ impl StateMachine {
 
     // -- Private transition handlers --
 
-    fn on_content_ready(&mut self, content: ClipboardContent) -> Vec<UiEffect> {
+    fn on_content_ready(&mut self, content: ClipboardContent, auto_copy: bool) -> Vec<UiEffect> {
         let old_state = self.state.clone();
 
         // Image-only content: auto-switch to Summarize.
@@ -277,6 +289,7 @@ impl StateMachine {
         self.streaming_text.clear();
         self.think_started = false;
         self.think_content = None;
+        self.auto_copy = auto_copy;
         self.next_request_id += 1;
         self.current_request_id = self.next_request_id;
         self.state = OverlayState::Processing;
@@ -334,11 +347,12 @@ impl StateMachine {
         self.think_content = think_content.clone();
         self.cache.insert(self.cache_key(), (text.clone(), think_content));
         self.state = OverlayState::Result(text.clone());
-        vec![
-            UiEffect::WriteClipboard(text),
-            UiEffect::ResetAreas,
-            UiEffect::ShowWindow,
-        ]
+        let mut effects = Vec::new();
+        if self.auto_copy {
+            effects.push(UiEffect::WriteClipboard(text));
+        }
+        effects.extend([UiEffect::ResetAreas, UiEffect::ShowWindow]);
+        effects
     }
 
     fn on_worker_error(&mut self, message: String, request_id: u64) -> Vec<UiEffect> {
@@ -362,6 +376,7 @@ impl StateMachine {
         self.think_started = false;
         self.think_content = None;
         self.has_been_focused = false;
+        self.auto_copy = false;
     }
 
     fn on_close(&mut self) -> Vec<UiEffect> {
@@ -460,7 +475,12 @@ impl StateMachine {
     fn apply_cached_result(&mut self, text: String, think_content: Option<String>) -> Vec<UiEffect> {
         self.think_content = think_content;
         self.state = OverlayState::Result(text.clone());
-        vec![UiEffect::WriteClipboard(text), UiEffect::ResetAreas]
+        let mut effects = Vec::new();
+        if self.auto_copy {
+            effects.push(UiEffect::WriteClipboard(text));
+        }
+        effects.push(UiEffect::ResetAreas);
+        effects
     }
 
     fn on_focus_lost(&mut self) -> Vec<UiEffect> {
@@ -469,6 +489,14 @@ impl StateMachine {
         }
         self.reset_to_hidden();
         vec![UiEffect::HideWindow]
+    }
+
+    fn on_user_copy(&self) -> Vec<UiEffect> {
+        if let OverlayState::Result(text) = &self.state {
+            vec![UiEffect::WriteClipboard(text.clone())]
+        } else {
+            vec![]
+        }
     }
 
     fn on_clipboard_error(&mut self, msg: String) -> Vec<UiEffect> {
@@ -604,8 +632,12 @@ mod tests {
     }
 
     /// Helper: feed ContentReady with text-only content and return the effects.
+    /// Uses `auto_copy: true` (double-tap) to preserve existing test behavior.
     fn start_processing(sm: &mut StateMachine, text: &str) -> Vec<UiEffect> {
-        sm.handle(UiEvent::ContentReady(ClipboardContent::text_only(text.to_string())))
+        sm.handle(UiEvent::ContentReady {
+            content: ClipboardContent::text_only(text.to_string()),
+            auto_copy: true,
+        })
     }
 
     /// Helper: get the request_id from the last SendProcess effect.
@@ -1125,7 +1157,7 @@ mod tests {
         // Cache now has Translate → "translated"
 
         // New content arrives → cache cleared, re-processes
-        let effects = sm.handle(UiEvent::ContentReady(ClipboardContent::text_only("world".into())));
+        let effects = sm.handle(UiEvent::ContentReady { content: ClipboardContent::text_only("world".into()), auto_copy: true });
         assert_eq!(*sm.state(), OverlayState::Processing);
         assert!(effects.iter().any(|e| matches!(e, UiEffect::SendProcess { .. })));
     }
@@ -1146,7 +1178,7 @@ mod tests {
         assert_eq!(*sm.state(), OverlayState::Hidden);
 
         // Re-enter with same text: should go to Processing (not cached)
-        let effects = sm.handle(UiEvent::ContentReady(ClipboardContent::text_only("hello".into())));
+        let effects = sm.handle(UiEvent::ContentReady { content: ClipboardContent::text_only("hello".into()), auto_copy: true });
         assert_eq!(*sm.state(), OverlayState::Processing);
         assert!(effects.iter().any(|e| matches!(e, UiEffect::SendProcess { .. })));
     }
@@ -1262,7 +1294,7 @@ mod tests {
         let mut sm = new_sm(); // starts in Translate mode
         assert_eq!(sm.mode(), ProcessMode::Translate);
 
-        let effects = sm.handle(UiEvent::ContentReady(image_only_content()));
+        let effects = sm.handle(UiEvent::ContentReady { content: image_only_content(), auto_copy: true });
 
         assert_eq!(sm.mode(), ProcessMode::Summarize);
         assert_eq!(*sm.state(), OverlayState::Processing);
@@ -1275,7 +1307,7 @@ mod tests {
     #[test]
     fn image_only_available_modes_only_summarize() {
         let mut sm = new_sm();
-        sm.handle(UiEvent::ContentReady(image_only_content()));
+        sm.handle(UiEvent::ContentReady { content: image_only_content(), auto_copy: true });
 
         assert_eq!(sm.available_modes(), &[ProcessMode::Summarize]);
     }
@@ -1283,7 +1315,7 @@ mod tests {
     #[test]
     fn text_and_image_keeps_mode() {
         let mut sm = new_sm(); // Translate mode
-        sm.handle(UiEvent::ContentReady(text_and_image_content()));
+        sm.handle(UiEvent::ContentReady { content: text_and_image_content(), auto_copy: true });
 
         assert_eq!(sm.mode(), ProcessMode::Translate);
         assert_eq!(sm.available_modes(), ProcessMode::ALL);
@@ -1300,7 +1332,7 @@ mod tests {
     #[test]
     fn mode_switch_blocked_when_image_only() {
         let mut sm = new_sm();
-        sm.handle(UiEvent::ContentReady(image_only_content()));
+        sm.handle(UiEvent::ContentReady { content: image_only_content(), auto_copy: true });
         assert_eq!(sm.mode(), ProcessMode::Summarize);
 
         // Try switching to Translate — should be blocked.
@@ -1480,5 +1512,87 @@ mod tests {
         // New content — should reset to default.
         start_processing(&mut sm, "world");
         assert_eq!(sm.rephrase_params().length, RephraseLength::default());
+    }
+
+    // === Auto-copy (single-tap vs double-tap) tests ===
+
+    #[test]
+    fn single_tap_no_auto_copy() {
+        let mut sm = new_sm();
+        let effects = sm.handle(UiEvent::ContentReady {
+            content: ClipboardContent::text_only("hello".into()),
+            auto_copy: false,
+        });
+        assert!(!sm.auto_copy());
+        let rid = last_request_id(&effects);
+
+        let effects = sm.handle(UiEvent::WorkerResult {
+            text: "result".into(),
+            think_content: None,
+            request_id: rid,
+        });
+        assert_eq!(*sm.state(), OverlayState::Result("result".into()));
+        assert!(!effects.iter().any(|e| matches!(e, UiEffect::WriteClipboard(_))));
+    }
+
+    #[test]
+    fn single_tap_cached_no_auto_copy() {
+        let mut sm = new_sm();
+        // Single-tap session.
+        let effects = sm.handle(UiEvent::ContentReady {
+            content: ClipboardContent::text_only("hello".into()),
+            auto_copy: false,
+        });
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerResult {
+            text: "translated".into(),
+            think_content: None,
+            request_id: rid,
+        });
+
+        // Switch mode → reprocess.
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Rephrase));
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerResult {
+            text: "rephrased".into(),
+            think_content: None,
+            request_id: rid,
+        });
+
+        // Switch back to Translate — cache hit.
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Translate));
+        assert_eq!(*sm.state(), OverlayState::Result("translated".into()));
+        assert!(!effects.iter().any(|e| matches!(e, UiEffect::WriteClipboard(_))));
+    }
+
+    #[test]
+    fn user_copy_in_result_state() {
+        let mut sm = new_sm();
+        let effects = sm.handle(UiEvent::ContentReady {
+            content: ClipboardContent::text_only("hello".into()),
+            auto_copy: false,
+        });
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerResult {
+            text: "result".into(),
+            think_content: None,
+            request_id: rid,
+        });
+
+        let effects = sm.handle(UiEvent::UserCopy);
+        assert!(effects.contains(&UiEffect::WriteClipboard("result".into())));
+    }
+
+    #[test]
+    fn user_copy_not_in_result_state() {
+        let mut sm = new_sm();
+        // Hidden state.
+        let effects = sm.handle(UiEvent::UserCopy);
+        assert!(effects.is_empty());
+
+        // Processing state.
+        start_processing(&mut sm, "hello");
+        let effects = sm.handle(UiEvent::UserCopy);
+        assert!(effects.is_empty());
     }
 }

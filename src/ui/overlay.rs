@@ -33,6 +33,7 @@ pub enum OverlayAction {
     ChangeRephraseStyle(RephraseStyle),
     ChangeRephraseLength(RephraseLength),
     ChangeThinkingMode(ThinkingMode),
+    CopyToClipboard,
 }
 
 pub struct OverlayOutput {
@@ -298,7 +299,34 @@ fn render_result(
         render_think_toggle(ui, think_expanded, content, action);
         ui.add_space(4.0);
     }
+
+    // Copy button: always rendered at top-right of result area.
+    // Opacity changes on hover (subtle when idle, prominent when hovered).
+    let result_top = ui.cursor().min;
     render_scrollable_text(ui, ("result", mode), text, MAX_RESULT_HEIGHT, false);
+
+    let btn_size = egui::vec2(26.0, 26.0);
+    let btn_pos = egui::pos2(
+        result_top.x + OVERLAY_WIDTH - btn_size.x - 16.0,
+        result_top.y + 2.0,
+    );
+    let btn_rect = egui::Rect::from_min_size(btn_pos, btn_size);
+
+    // Check pointer over button area only.
+    let hovered = ui.input(|i| {
+        i.pointer.hover_pos().is_some_and(|p| btn_rect.contains(p))
+    });
+    let alpha = if hovered { 200 } else { 30 };
+    let copy_btn = egui::Button::new(
+        egui::RichText::new("\u{1f4cb}")
+            .size(14.0),
+    )
+    .fill(egui::Color32::from_rgba_unmultiplied(50, 50, 50, alpha))
+    .corner_radius(4.0);
+
+    if ui.put(btn_rect, copy_btn).clicked() {
+        *action = OverlayAction::CopyToClipboard;
+    }
 }
 
 fn render_param_pills<T: Copy + PartialEq>(
