@@ -417,7 +417,7 @@ mod tests {
     #[test]
     fn build_user_content_text_only() {
         let content = ClipboardContent::text_only("hello".into());
-        let mc = LlmClient::build_user_content(&content, ProcessMode::Summarize, true);
+        let mc = LlmClient::build_user_content(&content, false);
         assert_eq!(mc, MessageContent::Text("hello"));
     }
 
@@ -427,7 +427,7 @@ mod tests {
             text: Some("caption".into()),
             images: vec![Arc::new(vec![0x89, 0x50])],
         };
-        let mc = LlmClient::build_user_content(&content, ProcessMode::Summarize, true);
+        let mc = LlmClient::build_user_content(&content, true);
         match mc {
             MessageContent::Parts(parts) => {
                 assert_eq!(parts.len(), 2);
@@ -439,22 +439,13 @@ mod tests {
     }
 
     #[test]
-    fn build_user_content_with_image_translate_ignores_image() {
+    fn build_user_content_no_images_returns_text() {
         let content = ClipboardContent {
             text: Some("hello".into()),
             images: vec![Arc::new(vec![0x89])],
         };
-        let mc = LlmClient::build_user_content(&content, ProcessMode::Translate, true);
-        assert_eq!(mc, MessageContent::Text("hello"));
-    }
-
-    #[test]
-    fn build_user_content_no_vision_ignores_image() {
-        let content = ClipboardContent {
-            text: Some("hello".into()),
-            images: vec![Arc::new(vec![0x89])],
-        };
-        let mc = LlmClient::build_user_content(&content, ProcessMode::Summarize, false);
+        // use_images=false: caller decided not to include images.
+        let mc = LlmClient::build_user_content(&content, false);
         assert_eq!(mc, MessageContent::Text("hello"));
     }
 
@@ -464,10 +455,27 @@ mod tests {
             text: None,
             images: vec![Arc::new(vec![0x89, 0x50])],
         };
-        let mc = LlmClient::build_user_content(&content, ProcessMode::Summarize, true);
+        let mc = LlmClient::build_user_content(&content, true);
         match mc {
             MessageContent::Parts(parts) => {
                 // Only image part, no text part since text is None.
+                assert_eq!(parts.len(), 1);
+                assert!(matches!(&parts[0], ContentPart::ImageUrl { .. }));
+            }
+            _ => panic!("expected Parts"),
+        }
+    }
+
+    #[test]
+    fn build_user_content_empty_text_with_image() {
+        let content = ClipboardContent {
+            text: Some("".into()),
+            images: vec![Arc::new(vec![0x89, 0x50])],
+        };
+        let mc = LlmClient::build_user_content(&content, true);
+        match mc {
+            MessageContent::Parts(parts) => {
+                // Empty text should be omitted, only image part.
                 assert_eq!(parts.len(), 1);
                 assert!(matches!(&parts[0], ContentPart::ImageUrl { .. }));
             }
@@ -740,12 +748,8 @@ impl LlmClient {
     /// otherwise plain text.
     fn build_user_content<'a>(
         content: &'a ClipboardContent,
-        mode: ProcessMode,
-        vision: bool,
+        use_images: bool,
     ) -> MessageContent<'a> {
-        let use_images =
-            mode == ProcessMode::Summarize && vision && content.has_images();
-
         let text = content.text.as_deref().unwrap_or("");
 
         if !use_images {
@@ -809,13 +813,12 @@ impl LlmClient {
         let (sys_prefix, template_kwargs) =
             Self::resolve_thinking(thinking_mode, thinking_control);
 
-        let has_text = content.text.as_ref().is_some_and(|t| !t.trim().is_empty());
         let use_images =
             mode == ProcessMode::Summarize && vision && content.has_images();
-        let image_only = use_images && !has_text;
+        let image_only = use_images && !content.has_text();
 
         // Image-only clipboard but model lacks vision — nothing useful to send.
-        if !has_text && content.has_images() && !vision {
+        if !content.has_text() && content.has_images() && !vision {
             return Err(ApiError::NoUsableContent);
         }
 
@@ -835,7 +838,7 @@ impl LlmClient {
                 },
                 Message {
                     role: "user",
-                    content: Self::build_user_content(content, mode, vision),
+                    content: Self::build_user_content(content, use_images),
                 },
             ],
             temperature: TEMPERATURE,

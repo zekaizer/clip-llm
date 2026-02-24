@@ -33,6 +33,10 @@ impl ClipboardContent {
         self.text.is_none() && self.images.is_empty()
     }
 
+    pub fn has_text(&self) -> bool {
+        self.text.as_ref().is_some_and(|t| !t.trim().is_empty())
+    }
+
     pub fn has_images(&self) -> bool {
         !self.images.is_empty()
     }
@@ -350,6 +354,32 @@ mod tests {
         };
         assert!(!content.is_empty());
         assert!(content.has_images());
+    }
+
+    // -- has_text tests --
+
+    #[test]
+    fn has_text_with_content() {
+        let content = ClipboardContent::text_only("hello".into());
+        assert!(content.has_text());
+    }
+
+    #[test]
+    fn has_text_none() {
+        let content = ClipboardContent { text: None, images: vec![] };
+        assert!(!content.has_text());
+    }
+
+    #[test]
+    fn has_text_whitespace_only() {
+        let content = ClipboardContent { text: Some("  \n ".into()), images: vec![] };
+        assert!(!content.has_text());
+    }
+
+    #[test]
+    fn has_text_empty_string() {
+        let content = ClipboardContent { text: Some("".into()), images: vec![] };
+        assert!(!content.has_text());
     }
 
     // -- rgba_to_png tests --
