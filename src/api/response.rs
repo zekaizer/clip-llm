@@ -11,7 +11,8 @@ pub fn extract_first_think_content(text: &str) -> Option<String> {
     THINK_CAPTURE_RE
         .captures(text)
         .and_then(|c| c.get(1))
-        .map(|m| m.as_str().to_string())
+        .map(|m| m.as_str().trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Strip `<think>...</think>` blocks from LLM response.

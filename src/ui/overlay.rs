@@ -401,35 +401,34 @@ fn render_tab_bar(
             }
         }
 
-        // Thinking pill (right side)
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // Render in reverse order (right-to-left layout reverses visual order)
-            for &tm in ThinkingMode::ALL.iter().rev() {
-                let is_selected = tm == thinking_mode;
-                let disabled = !thinking_supported;
+        // Thinking pill (right side) — hidden when model doesn't support thinking control.
+        if thinking_supported {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Render in reverse order (right-to-left layout reverses visual order)
+                for &tm in ThinkingMode::ALL.iter().rev() {
+                    let is_selected = tm == thinking_mode;
 
-                let text = egui::RichText::new(tm.label())
-                    .size(11.0)
-                    .color(if disabled {
-                        egui::Color32::from_gray(50)
-                    } else if is_selected {
-                        egui::Color32::WHITE
-                    } else {
-                        egui::Color32::from_gray(80)
-                    });
+                    let text = egui::RichText::new(tm.label())
+                        .size(11.0)
+                        .color(if is_selected {
+                            egui::Color32::WHITE
+                        } else {
+                            egui::Color32::from_gray(80)
+                        });
 
-                let button = egui::Button::new(text)
-                    .fill(if is_selected && !disabled {
-                        egui::Color32::from_rgba_unmultiplied(50, 50, 50, 200)
-                    } else {
-                        egui::Color32::TRANSPARENT
-                    })
-                    .corner_radius(4.0);
+                    let button = egui::Button::new(text)
+                        .fill(if is_selected {
+                            egui::Color32::from_rgba_unmultiplied(50, 50, 50, 200)
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        })
+                        .corner_radius(4.0);
 
-                if ui.add(button).clicked() && !is_selected && !disabled {
-                    *action = OverlayAction::ChangeThinkingMode(tm);
+                    if ui.add(button).clicked() && !is_selected {
+                        *action = OverlayAction::ChangeThinkingMode(tm);
+                    }
                 }
-            }
-        });
+            });
+        }
     });
 }
