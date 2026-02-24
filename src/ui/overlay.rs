@@ -1,7 +1,7 @@
 use eframe::egui;
 
 use super::state_machine::OverlayState;
-use crate::{ProcessMode, RephraseLength, RephraseParams, RephraseStyle};
+use crate::{ProcessMode, RephraseLength, RephraseParams, RephraseStyle, ThinkingMode};
 
 const OVERLAY_WIDTH: f32 = 480.0;
 const MAX_RESULT_HEIGHT: f32 = 260.0;
@@ -16,6 +16,12 @@ pub struct StreamingState<'a> {
     pub think_expanded: bool,
 }
 
+/// Thinking mode state for UI rendering.
+pub struct ThinkingState {
+    pub mode: ThinkingMode,
+    pub supported: bool,
+}
+
 /// Action requested by the overlay UI.
 pub enum OverlayAction {
     None,
@@ -26,6 +32,7 @@ pub enum OverlayAction {
     ToggleThink,
     ChangeRephraseStyle(RephraseStyle),
     ChangeRephraseLength(RephraseLength),
+    ChangeThinkingMode(ThinkingMode),
 }
 
 pub struct OverlayOutput {
@@ -44,6 +51,7 @@ pub fn render(
     streaming: StreamingState<'_>,
     available_modes: &[ProcessMode],
     rephrase_params: RephraseParams,
+    thinking: ThinkingState,
     ctx: &egui::Context,
 ) -> OverlayOutput {
     if matches!(state, OverlayState::Hidden) {
@@ -92,7 +100,11 @@ pub fn render(
             frame.show(ui, |ui| {
                 ui.set_width(OVERLAY_WIDTH);
 
-                render_tab_bar(ui, mode, available_modes, &mut action);
+                render_tab_bar(
+                    ui, mode, available_modes,
+                    thinking.mode, thinking.supported,
+                    &mut action,
+                );
 
                 // Rephrase parameter rows (style + length), shown when Rephrase is active.
                 if mode == ProcessMode::Rephrase && !matches!(state, OverlayState::Hidden) {
@@ -356,9 +368,12 @@ fn render_tab_bar(
     ui: &mut egui::Ui,
     current: ProcessMode,
     available_modes: &[ProcessMode],
+    thinking_mode: ThinkingMode,
+    thinking_supported: bool,
     action: &mut OverlayAction,
 ) {
     ui.horizontal(|ui| {
+        // Mode tabs (left side)
         for &mode in ProcessMode::ALL {
             let is_available = available_modes.contains(&mode);
             let is_selected = mode == current && is_available;
@@ -385,5 +400,36 @@ fn render_tab_bar(
                 *action = OverlayAction::SwitchMode(mode);
             }
         }
+
+        // Thinking pill (right side)
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // Render in reverse order (right-to-left layout reverses visual order)
+            for &tm in ThinkingMode::ALL.iter().rev() {
+                let is_selected = tm == thinking_mode;
+                let disabled = !thinking_supported;
+
+                let text = egui::RichText::new(tm.label())
+                    .size(11.0)
+                    .color(if disabled {
+                        egui::Color32::from_gray(50)
+                    } else if is_selected {
+                        egui::Color32::WHITE
+                    } else {
+                        egui::Color32::from_gray(80)
+                    });
+
+                let button = egui::Button::new(text)
+                    .fill(if is_selected && !disabled {
+                        egui::Color32::from_rgba_unmultiplied(50, 50, 50, 200)
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    })
+                    .corner_radius(4.0);
+
+                if ui.add(button).clicked() && !is_selected && !disabled {
+                    *action = OverlayAction::ChangeThinkingMode(tm);
+                }
+            }
+        });
     });
 }

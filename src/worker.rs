@@ -18,14 +18,17 @@ struct WorkerConfig {
     use_mock: bool,
 }
 
+/// Bundled parameters for a single LLM processing request.
+pub struct ProcessTask {
+    pub content: ClipboardContent,
+    pub mode: ProcessMode,
+    pub rephrase_params: RephraseParams,
+    pub thinking_mode: ThinkingMode,
+    pub request_id: u64,
+}
+
 pub enum WorkerCommand {
-    Process {
-        content: ClipboardContent,
-        mode: ProcessMode,
-        rephrase_params: RephraseParams,
-        thinking_mode: ThinkingMode,
-        request_id: u64,
-    },
+    Process(ProcessTask),
     Cancel,
 }
 
@@ -65,17 +68,13 @@ fn make_complete_response(
 }
 
 /// Non-streaming LLM request: single request/response with cancellation support.
-#[allow(clippy::too_many_arguments)]
 async fn run_non_streaming(
     llm: LlmClient,
-    content: ClipboardContent,
-    mode: ProcessMode,
-    rephrase_params: RephraseParams,
-    thinking_mode: ThinkingMode,
-    request_id: u64,
+    task: ProcessTask,
     resp_tx: mpsc::Sender<WorkerResponse>,
     mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
+    let ProcessTask { content, mode, rephrase_params, thinking_mode, request_id } = task;
     let result = tokio::select! {
         r = llm.complete(&content, mode, rephrase_params, thinking_mode) => r,
         _ = &mut cancel_rx => {
@@ -97,17 +96,13 @@ async fn run_non_streaming(
 }
 
 /// Streaming LLM request: SSE parsing loop with incremental delta delivery.
-#[allow(clippy::too_many_arguments)]
 async fn run_streaming(
     llm: LlmClient,
-    content: ClipboardContent,
-    mode: ProcessMode,
-    rephrase_params: RephraseParams,
-    thinking_mode: ThinkingMode,
-    request_id: u64,
+    task: ProcessTask,
     resp_tx: mpsc::Sender<WorkerResponse>,
     mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
+    let ProcessTask { content, mode, rephrase_params, thinking_mode, request_id } = task;
     let resp = tokio::select! {
         r = llm.complete_stream(&content, mode, rephrase_params, thinking_mode) => r,
         _ = &mut cancel_rx => {
@@ -234,13 +229,8 @@ async fn run_mock_streaming(
 
 /// Handle a Process command: cancel any in-flight request, then spawn the
 /// appropriate async task (mock / non-streaming / streaming).
-#[allow(clippy::too_many_arguments)]
 fn dispatch_process(
-    content: ClipboardContent,
-    mode: ProcessMode,
-    rephrase_params: RephraseParams,
-    thinking_mode: ThinkingMode,
-    request_id: u64,
+    task: ProcessTask,
     llm: &LlmClient,
     resp_tx: &mpsc::Sender<WorkerResponse>,
     cancel_tx: &mut Option<tokio::sync::oneshot::Sender<()>>,
@@ -257,29 +247,33 @@ fn dispatch_process(
 
     let llm = llm.clone();
     let resp_tx = resp_tx.clone();
-    let text_for_log = content.text.as_deref().unwrap_or("");
 
     // Mock mode: simulate streaming with canned responses.
     #[cfg(feature = "diagnostics")]
     if config.use_mock {
-        let mock_text = text_for_log.to_owned();
+        let mode = task.mode;
+        let request_id = task.request_id;
+        let mock_text = task.content.text.unwrap_or_default();
         info!("worker: mock streaming {} ({} chars)", mode.label(), mock_text.len());
         tokio::spawn(run_mock_streaming(mock_text, mode, request_id, resp_tx, c_rx));
         return;
     }
 
+    let text_len = task.content.text.as_ref().map_or(0, |t| t.len());
+    let img_count = task.content.images.len();
+
     if config.streaming {
         info!(
             "worker: starting stream {} ({} chars, {} images)",
-            mode.label(), text_for_log.len(), content.images.len(),
+            task.mode.label(), text_len, img_count,
         );
-        tokio::spawn(run_streaming(llm, content, mode, rephrase_params, thinking_mode, request_id, resp_tx, c_rx));
+        tokio::spawn(run_streaming(llm, task, resp_tx, c_rx));
     } else {
         info!(
             "worker: starting {} ({} chars, {} images, no-stream)",
-            mode.label(), text_for_log.len(), content.images.len(),
+            task.mode.label(), text_len, img_count,
         );
-        tokio::spawn(run_non_streaming(llm, content, mode, rephrase_params, thinking_mode, request_id, resp_tx, c_rx));
+        tokio::spawn(run_non_streaming(llm, task, resp_tx, c_rx));
     }
 }
 
@@ -399,11 +393,8 @@ pub fn spawn_worker(
 
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
-                    WorkerCommand::Process { content, mode, rephrase_params, thinking_mode, request_id } => {
-                        dispatch_process(
-                            content, mode, rephrase_params, thinking_mode, request_id,
-                            &llm, &resp_tx, &mut cancel_tx, &config,
-                        );
+                    WorkerCommand::Process(task) => {
+                        dispatch_process(task, &llm, &resp_tx, &mut cancel_tx, &config);
                     }
                     WorkerCommand::Cancel => {
                         if let Some(tx) = cancel_tx.take() {
