@@ -204,6 +204,7 @@ struct LlmClientInner {
     endpoint: String,
     model: String,
     api_key: Option<String>,
+    custom_headers: Vec<(String, String)>,
     supports_vision: OnceCell<bool>,
     thinking_control: OnceCell<ThinkingControlMethod>,
 }
@@ -534,6 +535,19 @@ mod tests {
     }
 }
 
+impl LlmClientInner {
+    /// Apply authentication headers (Bearer token and custom headers) to a request.
+    fn apply_auth(&self, mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Some(key) = &self.api_key {
+            req = req.bearer_auth(key);
+        }
+        for (name, value) in &self.custom_headers {
+            req = req.header(name, value);
+        }
+        req
+    }
+}
+
 impl LlmClient {
     pub fn new() -> Result<Self, ApiError> {
         let base = env::var("CLIP_LLM_API_ENDPOINT")
@@ -542,8 +556,28 @@ impl LlmClient {
         let model =
             env::var("CLIP_LLM_MODEL").unwrap_or_else(|_| DEFAULT_MODEL_NAME.to_string());
         let api_key = env::var("CLIP_LLM_API_KEY").ok();
+        let custom_headers: Vec<(String, String)> = env::var("CLIP_LLM_CUSTOM_HEADERS")
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|pair| {
+                let pair = pair.trim();
+                if pair.is_empty() {
+                    return None;
+                }
+                let (key, value) = pair.split_once(':')?;
+                Some((key.trim().to_string(), value.trim().to_string()))
+            })
+            .collect();
 
-        info!("endpoint={endpoint}, model={model}, api_key={}", if api_key.is_some() { "set" } else { "unset" });
+        info!(
+            "endpoint={endpoint}, model={model}, api_key={}, custom_headers={}",
+            if api_key.is_some() { "set" } else { "unset" },
+            if custom_headers.is_empty() {
+                "none".to_string()
+            } else {
+                custom_headers.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(",")
+            },
+        );
 
         let client = Client::builder()
             .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
@@ -558,6 +592,7 @@ impl LlmClient {
             endpoint,
             model,
             api_key,
+            custom_headers,
             supports_vision: OnceCell::new(),
             thinking_control: OnceCell::new(),
         })))
@@ -592,10 +627,7 @@ impl LlmClient {
         };
 
         info!("probing model vision support...");
-        let mut req = inner.client.post(&inner.endpoint).json(&body);
-        if let Some(key) = &inner.api_key {
-            req = req.bearer_auth(key);
-        }
+        let req = inner.apply_auth(inner.client.post(&inner.endpoint).json(&body));
 
         match req.send().await {
             Ok(resp) => {
@@ -649,10 +681,7 @@ impl LlmClient {
             chat_template_kwargs: Some(ChatTemplateKwargs { enable_thinking: true }),
         };
 
-        let mut req = inner.client.post(&inner.endpoint).json(&body);
-        if let Some(key) = &inner.api_key {
-            req = req.bearer_auth(key);
-        }
+        let req = inner.apply_auth(inner.client.post(&inner.endpoint).json(&body));
 
         match req.send().await {
             Ok(resp) if resp.status().is_success() => {
@@ -704,10 +733,7 @@ impl LlmClient {
             chat_template_kwargs: None,
         };
 
-        let mut req = inner.client.post(&inner.endpoint).json(&body);
-        if let Some(key) = &inner.api_key {
-            req = req.bearer_auth(key);
-        }
+        let req = inner.apply_auth(inner.client.post(&inner.endpoint).json(&body));
 
         match req.send().await {
             Ok(resp) if resp.status().is_success() => {
@@ -846,10 +872,7 @@ impl LlmClient {
         };
 
         let client = if stream { &inner.streaming_client } else { &inner.client };
-        let mut req = client.post(&inner.endpoint).json(&body);
-        if let Some(key) = &inner.api_key {
-            req = req.bearer_auth(key);
-        }
+        let req = inner.apply_auth(client.post(&inner.endpoint).json(&body));
         Ok(req.send().await?.error_for_status()?)
     }
 
