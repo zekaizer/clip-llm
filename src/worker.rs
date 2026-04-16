@@ -2,7 +2,7 @@ use std::sync::mpsc;
 use std::thread;
 
 use tokio::sync::mpsc as tokio_mpsc;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, trace};
 
 use crate::api::client::{LlmClient, SseEvent, SseParser};
 use crate::api::response::{extract_first_think_content, strip_think_blocks, ThinkBlockFilter};
@@ -139,9 +139,11 @@ async fn run_streaming(
 
         match chunk {
             Ok(Some(bytes)) => {
+                trace!("SSE raw chunk ({} bytes):\n{}", bytes.len(), String::from_utf8_lossy(&bytes));
                 for event in parser.feed(&bytes) {
                     match event {
                         SseEvent::Content(token) => {
+                            trace!("SSE token: {token:?}");
                             full_content.push_str(&token);
                             let visible = filter.feed(&token);
                             if filter.has_think_content() && !think_notified {
@@ -156,6 +158,7 @@ async fn run_streaming(
                             }
                         }
                         SseEvent::Done => {
+                            trace!("SSE stream done, full content ({} chars):\n{full_content}", full_content.len());
                             let r = make_complete_response(
                                 &full_content, mode, request_id, "stream complete",
                             );
@@ -166,6 +169,7 @@ async fn run_streaming(
                 }
             }
             Ok(None) => {
+                trace!("SSE stream ended (no more chunks), full content ({} chars):\n{full_content}", full_content.len());
                 let r = make_complete_response(
                     &full_content, mode, request_id, "stream ended",
                 );
