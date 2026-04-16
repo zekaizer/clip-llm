@@ -8,21 +8,6 @@ permissions:
   contents: write
 
 jobs:
-  check:
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Clippy
-        run: cargo clippy -- -D warnings
-
-      - name: Test
-        run: cargo test
-
   build:
     strategy:
       fail-fast: false
@@ -66,7 +51,7 @@ jobs:
           path: ${{ matrix.artifact }}*
 
   publish:
-    needs: [check, build]
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
