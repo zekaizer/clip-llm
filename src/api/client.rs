@@ -628,10 +628,10 @@ impl LlmClient {
         };
 
         info!("probing model vision support...");
-        if tracing::enabled!(tracing::Level::TRACE) {
-            if let Ok(json) = serde_json::to_string_pretty(&body) {
-                trace!("vision probe request:\n{json}");
-            }
+        if tracing::enabled!(tracing::Level::TRACE)
+            && let Ok(json) = serde_json::to_string_pretty(&body)
+        {
+            trace!("vision probe request:\n{json}");
         }
         let req = inner.apply_auth(inner.client.post(&inner.endpoint).json(&body));
 
@@ -687,10 +687,10 @@ impl LlmClient {
             chat_template_kwargs: Some(ChatTemplateKwargs { enable_thinking: true }),
         };
 
-        if tracing::enabled!(tracing::Level::TRACE) {
-            if let Ok(json) = serde_json::to_string_pretty(&body) {
-                trace!("thinking kwargs probe request:\n{json}");
-            }
+        if tracing::enabled!(tracing::Level::TRACE)
+            && let Ok(json) = serde_json::to_string_pretty(&body)
+        {
+            trace!("thinking kwargs probe request:\n{json}");
         }
         let req = inner.apply_auth(inner.client.post(&inner.endpoint).json(&body));
 
@@ -746,10 +746,10 @@ impl LlmClient {
             chat_template_kwargs: None,
         };
 
-        if tracing::enabled!(tracing::Level::TRACE) {
-            if let Ok(json) = serde_json::to_string_pretty(&body) {
-                trace!("thinking prompt-tag probe request:\n{json}");
-            }
+        if tracing::enabled!(tracing::Level::TRACE)
+            && let Ok(json) = serde_json::to_string_pretty(&body)
+        {
+            trace!("thinking prompt-tag probe request:\n{json}");
         }
         let req = inner.apply_auth(inner.client.post(&inner.endpoint).json(&body));
 
@@ -890,10 +890,10 @@ impl LlmClient {
             chat_template_kwargs: template_kwargs,
         };
 
-        if tracing::enabled!(tracing::Level::TRACE) {
-            if let Ok(json) = serde_json::to_string_pretty(&body) {
-                trace!("LLM request body:\n{json}");
-            }
+        if tracing::enabled!(tracing::Level::TRACE)
+            && let Ok(json) = serde_json::to_string_pretty(&body)
+        {
+            trace!("LLM request body:\n{json}");
         }
         let client = if stream { &inner.streaming_client } else { &inner.client };
         let req = inner.apply_auth(client.post(&inner.endpoint).json(&body));
@@ -919,7 +919,10 @@ impl LlmClient {
         let text = resp.text().await?;
         if tracing::enabled!(tracing::Level::TRACE) {
             if let Ok(pretty) = serde_json::from_str::<serde_json::Value>(&text) {
-                trace!("LLM response:\n{}", serde_json::to_string_pretty(&pretty).unwrap_or_default());
+                trace!(
+                    "LLM response:\n{}",
+                    serde_json::to_string_pretty(&pretty).unwrap_or_default()
+                );
             } else {
                 trace!("LLM response (raw):\n{text}");
             }
