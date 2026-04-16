@@ -558,6 +558,7 @@ impl LlmClient {
         let api_key = env::var("CLIP_LLM_API_KEY").ok();
         let custom_headers: Vec<(String, String)> = env::var("CLIP_LLM_CUSTOM_HEADERS")
             .unwrap_or_default()
+            .trim_matches('"')
             .split(',')
             .filter_map(|pair| {
                 let pair = pair.trim();
