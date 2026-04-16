@@ -5,7 +5,7 @@ use std::time::Duration;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::{ApiError, ClipboardContent, ProcessMode, RephraseParams, ThinkingMode};
 
@@ -628,6 +628,11 @@ impl LlmClient {
         };
 
         info!("probing model vision support...");
+        if tracing::enabled!(tracing::Level::TRACE) {
+            if let Ok(json) = serde_json::to_string_pretty(&body) {
+                trace!("vision probe request:\n{json}");
+            }
+        }
         let req = inner.apply_auth(inner.client.post(&inner.endpoint).json(&body));
 
         match req.send().await {
@@ -682,10 +687,16 @@ impl LlmClient {
             chat_template_kwargs: Some(ChatTemplateKwargs { enable_thinking: true }),
         };
 
+        if tracing::enabled!(tracing::Level::TRACE) {
+            if let Ok(json) = serde_json::to_string_pretty(&body) {
+                trace!("thinking kwargs probe request:\n{json}");
+            }
+        }
         let req = inner.apply_auth(inner.client.post(&inner.endpoint).json(&body));
 
         match req.send().await {
             Ok(resp) if resp.status().is_success() => {
+                trace!("thinking kwargs probe response: HTTP {}", resp.status().as_u16());
                 // HTTP 200 + kwargs accepted = model supports chat_template_kwargs.
                 // Don't require <think> in the response — the model may skip thinking
                 // for trivial prompts even with enable_thinking=true.
@@ -699,7 +710,8 @@ impl LlmClient {
                 );
                 None
             }
-            Ok(_) => {
+            Ok(resp) => {
+                trace!("thinking kwargs probe rejected: HTTP {}", resp.status().as_u16());
                 // 4xx: server rejected the kwargs field — try prompt tag fallback.
                 self.probe_thinking_prompt_tag(inner).await
             }
@@ -734,11 +746,17 @@ impl LlmClient {
             chat_template_kwargs: None,
         };
 
+        if tracing::enabled!(tracing::Level::TRACE) {
+            if let Ok(json) = serde_json::to_string_pretty(&body) {
+                trace!("thinking prompt-tag probe request:\n{json}");
+            }
+        }
         let req = inner.apply_auth(inner.client.post(&inner.endpoint).json(&body));
 
         match req.send().await {
             Ok(resp) if resp.status().is_success() => {
                 let text = resp.text().await.unwrap_or_default();
+                trace!("thinking prompt-tag probe response:\n{text}");
                 if let Ok(chat) = serde_json::from_str::<ChatResponse>(&text) {
                     let content = chat
                         .choices
@@ -872,6 +890,11 @@ impl LlmClient {
             chat_template_kwargs: template_kwargs,
         };
 
+        if tracing::enabled!(tracing::Level::TRACE) {
+            if let Ok(json) = serde_json::to_string_pretty(&body) {
+                trace!("LLM request body:\n{json}");
+            }
+        }
         let client = if stream { &inner.streaming_client } else { &inner.client };
         let req = inner.apply_auth(client.post(&inner.endpoint).json(&body));
         Ok(req.send().await?.error_for_status()?)
@@ -893,7 +916,15 @@ impl LlmClient {
         let resp = self
             .build_and_send(content, mode, rephrase_params, thinking_mode, false)
             .await?;
-        let chat: ChatResponse = resp.json().await?;
+        let text = resp.text().await?;
+        if tracing::enabled!(tracing::Level::TRACE) {
+            if let Ok(pretty) = serde_json::from_str::<serde_json::Value>(&text) {
+                trace!("LLM response:\n{}", serde_json::to_string_pretty(&pretty).unwrap_or_default());
+            } else {
+                trace!("LLM response (raw):\n{text}");
+            }
+        }
+        let chat: ChatResponse = serde_json::from_str(&text).map_err(|_| ApiError::EmptyResponse)?;
 
         let resp_content = chat
             .choices
