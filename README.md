@@ -30,6 +30,7 @@ System-wide LLM clipboard assistant. Captures text via global hotkey, sends it t
 | `CLIP_LLM_API_ENDPOINT` | `http://localhost:8000/v1` | LLM API base URL |
 | `CLIP_LLM_MODEL` | `MiniMaxAI/MiniMax-M2.5` | Model name for chat completions |
 | `CLIP_LLM_API_KEY` | *(none)* | Bearer token for API auth (optional) |
+| `CLIP_LLM_CUSTOM_HEADERS` | *(none)* | Custom HTTP headers, comma-separated `Key:Value` pairs (e.g. `X-Dep-Ticket:abc,User-Id:u1`) |
 | `CLIP_LLM_NO_STREAM` | *(unset)* | Disable SSE streaming when set |
 | `RUST_LOG` | `clip_llm=info` | Log level filter ([`tracing_subscriber::EnvFilter`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html)) |
 | `DIAG_MOCK` | *(unset)* | Use mock LLM responses (requires `--features diagnostics`) |
