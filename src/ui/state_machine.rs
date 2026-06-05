@@ -370,11 +370,17 @@ impl StateMachine {
         self.state = OverlayState::Processing;
         self.user_repositioned = false;
         self.has_been_focused = false;
-        // Single-tap results are not written to the clipboard, so losing them on
-        // focus loss would be data loss — start pinned (stays open). Double-tap
-        // results are already in the clipboard, so start unpinned (auto-hide).
-        // The user can toggle either via the pin button.
-        self.pinned = !auto_copy;
+        // Default pin state per trigger type, from config
+        // ([ui].single_tap_pinned / double_tap_pinned; both default false =
+        // auto-hide on focus loss). A single-tap result is not in the clipboard,
+        // so set single_tap_pinned=true to keep it open. The user can also toggle
+        // the pin button at runtime.
+        let cfg = crate::config::get();
+        self.pinned = if auto_copy {
+            cfg.ui_double_tap_pinned()
+        } else {
+            cfg.ui_single_tap_pinned()
+        };
 
         let mut effects = vec![
             UiEffect::CaptureMousePosition,
@@ -1124,9 +1130,10 @@ mod tests {
     }
 
     #[test]
-    fn focus_lost_keeps_single_tap_result() {
+    fn focus_lost_hides_unpinned_single_tap_result() {
         let mut sm = new_sm();
-        // Single-tap: result is NOT auto-copied to the clipboard.
+        // Single-tap: with the default config ([ui].single_tap_pinned = false) the
+        // result starts unpinned, so focus loss auto-hides it like a double-tap.
         let effects = sm.handle(UiEvent::ContentReady {
             content: ClipboardContent::text_only("hello".into()),
             auto_copy: false,
@@ -1134,12 +1141,11 @@ mod tests {
         let rid = last_request_id(&effects);
         sm.handle(UiEvent::WorkerResult { text: "translated".into(), think_content: None, request_id: rid });
         sm.handle(UiEvent::FocusGained);
-        assert_eq!(*sm.state(), OverlayState::Result("translated".into()));
+        assert!(!sm.pinned());
 
-        // Clicking away must NOT destroy the result (no clipboard copy happened).
         let effects = sm.handle(UiEvent::FocusLost);
-        assert!(effects.is_empty());
-        assert_eq!(*sm.state(), OverlayState::Result("translated".into()));
+        assert_eq!(*sm.state(), OverlayState::Hidden);
+        assert!(effects.contains(&UiEffect::HideWindow));
     }
 
     #[test]
@@ -2003,20 +2009,21 @@ mod tests {
     // === Pin (keep-open) ===
 
     #[test]
-    fn single_tap_starts_pinned_double_tap_unpinned() {
+    fn tap_results_start_unpinned_by_default() {
+        // Default config: [ui].single_tap_pinned and double_tap_pinned both false.
         let mut sm = new_sm();
         sm.handle(UiEvent::ContentReady {
             content: ClipboardContent::text_only("hi".into()),
             auto_copy: false,
         });
-        assert!(sm.pinned(), "single-tap (not auto-copied) starts pinned");
+        assert!(!sm.pinned(), "single-tap starts unpinned by default");
 
         let mut sm2 = new_sm();
         sm2.handle(UiEvent::ContentReady {
             content: ClipboardContent::text_only("hi".into()),
             auto_copy: true,
         });
-        assert!(!sm2.pinned(), "double-tap (auto-copied) starts unpinned");
+        assert!(!sm2.pinned(), "double-tap starts unpinned by default");
     }
 
     #[test]
@@ -2046,7 +2053,7 @@ mod tests {
     }
 
     #[test]
-    fn unpinning_single_tap_result_allows_focus_loss_hide() {
+    fn pinning_single_tap_result_keeps_it_open() {
         let mut sm = new_sm();
         let effects = sm.handle(UiEvent::ContentReady {
             content: ClipboardContent::text_only("hi".into()),
@@ -2055,13 +2062,13 @@ mod tests {
         let rid = last_request_id(&effects);
         sm.handle(UiEvent::WorkerResult { text: "out".into(), think_content: None, request_id: rid });
         sm.handle(UiEvent::FocusGained);
-        assert!(sm.pinned(), "single-tap result starts pinned");
+        assert!(!sm.pinned(), "single-tap result starts unpinned by default");
 
-        // User unpins → now focus loss hides it.
+        // User pins it → focus loss now keeps it open.
         sm.handle(UiEvent::UserTogglePin);
         let effects = sm.handle(UiEvent::FocusLost);
-        assert_eq!(*sm.state(), OverlayState::Hidden);
-        assert!(effects.contains(&UiEffect::HideWindow));
+        assert!(effects.is_empty());
+        assert_eq!(*sm.state(), OverlayState::Result("out".into()));
     }
 
     #[test]

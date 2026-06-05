@@ -143,6 +143,7 @@ pub struct Config {
     api: ApiConfig,
     generation: GenerationConfig,
     hotkey: HotkeyConfig,
+    ui: UiConfig,
     languages: LanguagesConfig,
     translate: TranslateConfig,
     rephrase: RephraseConfig,
@@ -189,6 +190,18 @@ struct GenerationConfig {
 struct HotkeyConfig {
     /// Double-tap detection window in milliseconds (default 500).
     double_tap_timeout_ms: Option<u64>,
+}
+
+/// `[ui]` — overlay behavior. No environment-variable equivalent.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct UiConfig {
+    /// Whether a single-tap result starts pinned (stays open on focus loss).
+    /// Default false: single-tap results auto-hide like double-tap.
+    single_tap_pinned: Option<bool>,
+    /// Whether a double-tap result starts pinned. Default false (already copied
+    /// to the clipboard, so auto-hide is safe).
+    double_tap_pinned: Option<bool>,
 }
 
 /// `[languages]` — substituted into `{primary_lang}` / `{secondary_lang}`.
@@ -300,6 +313,16 @@ impl Config {
     /// (`[hotkey].double_tap_timeout_ms`).
     pub fn hotkey_double_tap_timeout_ms(&self) -> Option<u64> {
         self.hotkey.double_tap_timeout_ms
+    }
+
+    /// Whether single-tap results start pinned (`[ui].single_tap_pinned`, default false).
+    pub fn ui_single_tap_pinned(&self) -> bool {
+        self.ui.single_tap_pinned.unwrap_or(false)
+    }
+
+    /// Whether double-tap results start pinned (`[ui].double_tap_pinned`, default false).
+    pub fn ui_double_tap_pinned(&self) -> bool {
+        self.ui.double_tap_pinned.unwrap_or(false)
     }
 
     /// Primary language name (`{primary_lang}`).
@@ -739,6 +762,21 @@ mod tests {
     fn hotkey_default_is_absent() {
         let config = Config::default();
         assert_eq!(config.hotkey_double_tap_timeout_ms(), None);
+    }
+
+    #[test]
+    fn ui_section_parses() {
+        let config: Config =
+            toml::from_str("[ui]\nsingle_tap_pinned = true\ndouble_tap_pinned = true\n").unwrap();
+        assert!(config.ui_single_tap_pinned());
+        assert!(config.ui_double_tap_pinned());
+    }
+
+    #[test]
+    fn ui_defaults_unpinned() {
+        let config = Config::default();
+        assert!(!config.ui_single_tap_pinned());
+        assert!(!config.ui_double_tap_pinned());
     }
 
     #[test]

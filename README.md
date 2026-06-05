@@ -85,6 +85,10 @@ kinds of settings:
 - **`[hotkey]`** — `double_tap_timeout_ms`, the single/double-tap detection
   window in milliseconds (default `500`). Lower it (e.g. `300`) to shorten the
   silent wait before a single-tap resolves. No environment-variable equivalent.
+- **`[ui]`** — `single_tap_pinned` / `double_tap_pinned` (both default `false`):
+  whether a result starts pinned (stays open on focus loss instead of auto-hiding).
+  A single-tap result is not auto-copied to the clipboard, so set
+  `single_tap_pinned = true` to keep it from disappearing on focus change.
 - **prompts** — per-mode system prompts, with placeholders substituted at runtime:
   - `{primary_lang}` / `{secondary_lang}` — in the `[translate]` prompt
   - `{primary_lang}` — in the `[summarize]` prompts (summaries are primary-language only)

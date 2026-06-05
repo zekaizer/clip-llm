@@ -34,6 +34,17 @@ temperature          = 0.1     # sampling temperature (0.0–2.0)
 max_tokens           = 16384   # max tokens generated per response
 request_timeout_secs = 30      # per-request timeout (also the streaming connect timeout)
 
+# Hotkey behavior. No environment-variable equivalent.
+[hotkey]
+double_tap_timeout_ms = 500     # single/double-tap detection window (lower = snappier)
+
+# Overlay behavior. `*_pinned` sets whether a result starts "pinned" (stays open
+# on focus loss instead of auto-hiding). A single-tap result is NOT auto-copied to
+# the clipboard, so set single_tap_pinned = true to avoid losing it on focus loss.
+[ui]
+single_tap_pinned = false
+double_tap_pinned = false
+
 # Language names substituted into {primary_lang} / {secondary_lang}.
 [languages]
 primary   = "Korean"
