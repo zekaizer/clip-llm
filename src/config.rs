@@ -140,6 +140,7 @@ const DEFAULT_SUMMARIZE_IMAGE_PROMPT: &str =
 #[serde(default)]
 pub struct Config {
     api: ApiConfig,
+    generation: GenerationConfig,
     languages: LanguagesConfig,
     translate: TranslateConfig,
     rephrase: RephraseConfig,
@@ -164,6 +165,19 @@ struct ApiConfig {
     streaming: Option<bool>,
     /// `[api.headers]` — custom HTTP headers (alternative to `CLIP_LLM_CUSTOM_HEADERS`).
     headers: BTreeMap<String, String>,
+}
+
+/// `[generation]` — request parameters. These have no environment-variable
+/// equivalent; each falls back to a built-in default when unset.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct GenerationConfig {
+    /// Sampling temperature.
+    temperature: Option<f64>,
+    /// Maximum tokens to generate per response.
+    max_tokens: Option<u32>,
+    /// Per-request timeout in seconds (also the streaming connect timeout).
+    request_timeout_secs: Option<u64>,
 }
 
 /// `[languages]` — substituted into `{primary_lang}` / `{secondary_lang}`.
@@ -253,6 +267,22 @@ impl Config {
     /// Configured custom HTTP headers (`[api.headers]`); empty if none.
     pub fn api_headers(&self) -> &BTreeMap<String, String> {
         &self.api.headers
+    }
+
+    /// Configured sampling temperature, if any (`[generation].temperature`).
+    pub fn generation_temperature(&self) -> Option<f64> {
+        self.generation.temperature
+    }
+
+    /// Configured max output tokens, if any (`[generation].max_tokens`).
+    pub fn generation_max_tokens(&self) -> Option<u32> {
+        self.generation.max_tokens
+    }
+
+    /// Configured per-request timeout in seconds, if any
+    /// (`[generation].request_timeout_secs`).
+    pub fn generation_request_timeout_secs(&self) -> Option<u64> {
+        self.generation.request_timeout_secs
     }
 
     /// Primary language name (`{primary_lang}`).
@@ -595,6 +625,25 @@ mod tests {
         assert_eq!(config.api_streaming(), Some(false));
         assert_eq!(config.api_headers().get("X-Dep-Ticket").map(String::as_str), Some("abc"));
         assert_eq!(config.api_headers().get("User-Id").map(String::as_str), Some("u1"));
+    }
+
+    #[test]
+    fn generation_section_parses() {
+        let config: Config = toml::from_str(
+            "[generation]\ntemperature = 0.7\nmax_tokens = 2048\nrequest_timeout_secs = 60\n",
+        )
+        .unwrap();
+        assert_eq!(config.generation_temperature(), Some(0.7));
+        assert_eq!(config.generation_max_tokens(), Some(2048));
+        assert_eq!(config.generation_request_timeout_secs(), Some(60));
+    }
+
+    #[test]
+    fn generation_defaults_are_absent() {
+        let config = Config::default();
+        assert_eq!(config.generation_temperature(), None);
+        assert_eq!(config.generation_max_tokens(), None);
+        assert_eq!(config.generation_request_timeout_secs(), None);
     }
 
     #[test]
