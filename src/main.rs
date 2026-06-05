@@ -112,10 +112,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // thread reads them. Falls back to built-in defaults on any error.
     clip_llm::config::init();
 
-    // Check platform permissions before anything else.
+    // Check platform permissions before anything else. On macOS this also shows
+    // the system permission dialog; if still denied, print an actionable path
+    // (the app has no window/Dock icon on this code path, so stderr is the only
+    // feedback channel).
     {
         use clip_llm::platform::{NativePlatform, Platform};
-        NativePlatform.check_accessibility()?;
+        if let Err(e) = NativePlatform.check_accessibility() {
+            #[cfg(target_os = "macos")]
+            eprintln!(
+                "\nclip-llm needs Accessibility permission to simulate Cmd+C / Cmd+V.\n\
+                 Grant it in: System Settings > Privacy & Security > Accessibility\n\
+                 (enable clip-llm), then relaunch.\n"
+            );
+            return Err(e.into());
+        }
     }
 
     // GlobalHotKeyManager must be created on the main thread and kept alive.
