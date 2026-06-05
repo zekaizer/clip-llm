@@ -27,6 +27,13 @@ streaming = true                          # set false to disable SSE (like CLIP_
 # X-Dep-Ticket = "abc"
 # User-Id = "u1"
 
+# Request/generation parameters. No environment-variable equivalent; each falls
+# back to the built-in default shown below when omitted.
+[generation]
+temperature          = 0.1     # sampling temperature (0.0–2.0)
+max_tokens           = 16384   # max tokens generated per response
+request_timeout_secs = 30      # per-request timeout (also the streaming connect timeout)
+
 # Language names substituted into {primary_lang} / {secondary_lang}.
 [languages]
 primary   = "Korean"

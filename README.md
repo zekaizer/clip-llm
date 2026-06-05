@@ -60,6 +60,9 @@ kinds of settings:
   streaming). Each mirrors a `CLIP_LLM_*` environment variable; the precedence is
   **env var > config file > built-in default**. (Exception: `CLIP_LLM_NO_STREAM`
   only forces streaming off — it cannot force `streaming = false` back on.)
+- **`[generation]`** — request parameters (`temperature`, `max_tokens`,
+  `request_timeout_secs`). No environment-variable equivalent: **config file >
+  built-in default**.
 - **prompts** — per-mode system prompts, with placeholders substituted at runtime:
   - `{primary_lang}` / `{secondary_lang}` — in the `[translate]` prompt
   - `{primary_lang}` — in the `[summarize]` prompts (summaries are primary-language only)
