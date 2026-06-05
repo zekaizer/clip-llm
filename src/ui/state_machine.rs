@@ -369,6 +369,10 @@ impl StateMachine {
         }
         self.think_started = false;
         self.state = OverlayState::Error(message);
+        // Reset focus tracking so the newly shown error window doesn't
+        // immediately auto-hide from a stale has_been_focused flag carried
+        // over from the Processing phase (mirrors on_clipboard_error).
+        self.has_been_focused = false;
         vec![UiEffect::ResetAreas]
     }
 
@@ -1406,6 +1410,25 @@ mod tests {
         let effects = sm.handle(UiEvent::FocusLost);
         assert!(effects.is_empty());
         assert_eq!(*sm.state(), OverlayState::Error("read failed".into()));
+    }
+
+    #[test]
+    fn worker_error_resets_has_been_focused() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+        // Focus was gained during the Processing phase.
+        sm.handle(UiEvent::FocusGained);
+
+        // Worker error transitions to Error.
+        sm.handle(UiEvent::WorkerError { message: "boom".into(), request_id: rid });
+        assert_eq!(*sm.state(), OverlayState::Error("boom".into()));
+
+        // FocusLost must be ignored because has_been_focused was reset, so the
+        // user can read the error before it auto-hides.
+        let effects = sm.handle(UiEvent::FocusLost);
+        assert!(effects.is_empty());
+        assert_eq!(*sm.state(), OverlayState::Error("boom".into()));
     }
 
     // === Thinking mode tests ===
