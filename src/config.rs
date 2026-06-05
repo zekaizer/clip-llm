@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use serde::Deserialize;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{RephraseLength, RephraseStyle, PRIMARY_LANG, SECONDARY_LANG};
 
@@ -29,6 +29,10 @@ use crate::{RephraseLength, RephraseStyle, PRIMARY_LANG, SECONDARY_LANG};
 const CONFIG_ENV: &str = "CLIP_LLM_CONFIG";
 /// Config file name looked up next to the executable when `CONFIG_ENV` is unset.
 const CONFIG_FILENAME: &str = "config.toml";
+/// Upper bound on the config file size. Prompts are tiny; a larger file is
+/// almost certainly a mistake (or a hostile path), so reject it up front rather
+/// than reading it into memory.
+const MAX_CONFIG_BYTES: u64 = 1 << 20; // 1 MiB
 
 // -- Built-in default prompts (single source of truth) --
 //
@@ -319,24 +323,60 @@ pub fn init_prompt_config() {
     CONFIG.get_or_init(load_or_default);
 }
 
-/// Resolves the config path: `CLIP_LLM_CONFIG` if set (returned as-is, even if it
-/// does not exist, so a missing explicit path can be reported), otherwise
-/// `config.toml` next to the executable if present.
+/// Resolves the config path: a non-empty `CLIP_LLM_CONFIG` (returned as-is, even
+/// if it does not exist, so a bad explicit path can be reported), otherwise a
+/// `config.toml` next to the executable — but only if it is a regular file, so a
+/// directory, symlink-to-directory, or FIFO never enters the load path.
 fn resolve_path() -> Option<PathBuf> {
-    if let Ok(path) = env::var(CONFIG_ENV) {
-        return Some(PathBuf::from(path));
+    match env::var(CONFIG_ENV) {
+        // An exported-but-empty value is not a real path; fall through to the
+        // next-to-executable lookup instead of warning on a blank path.
+        Ok(path) if !path.is_empty() => return Some(PathBuf::from(path)),
+        _ => {}
     }
     let exe = env::current_exe().ok()?;
     let candidate = exe.parent()?.join(CONFIG_FILENAME);
-    candidate.exists().then_some(candidate)
+    candidate
+        .metadata()
+        .ok()
+        .filter(|meta| meta.is_file())
+        .map(|_| candidate)
 }
 
 /// Reads and parses the config file, falling back to defaults on any failure.
+///
+/// Full error details (which for a TOML error can echo a line of file content)
+/// go to `debug!` only; the `warn!` lines stay generic so a misdirected
+/// `CLIP_LLM_CONFIG` cannot leak file contents into ordinary logs.
 fn load_or_default() -> PromptConfig {
     let Some(path) = resolve_path() else {
         info!("config: no {CONFIG_FILENAME} found, using built-in prompt defaults");
         return PromptConfig::default();
     };
+
+    // Reject non-regular files (a FIFO would otherwise block startup forever) and
+    // oversized files before reading anything into memory.
+    match std::fs::metadata(&path) {
+        Ok(meta) if !meta.is_file() => {
+            warn!("config: {}: not a regular file — using built-in defaults", path.display());
+            return PromptConfig::default();
+        }
+        Ok(meta) if meta.len() > MAX_CONFIG_BYTES => {
+            warn!(
+                "config: {}: file too large ({} bytes) — using built-in defaults",
+                path.display(),
+                meta.len()
+            );
+            return PromptConfig::default();
+        }
+        Ok(_) => {}
+        Err(e) => {
+            warn!("config: {}: cannot read metadata — using built-in defaults", path.display());
+            debug!("config metadata error: {e}");
+            return PromptConfig::default();
+        }
+    }
+
     match std::fs::read_to_string(&path) {
         Ok(contents) => match toml::from_str::<PromptConfig>(&contents) {
             Ok(config) => {
@@ -344,18 +384,14 @@ fn load_or_default() -> PromptConfig {
                 config
             }
             Err(e) => {
-                warn!(
-                    "config: {}: TOML parse error: {e} — using built-in defaults",
-                    path.display()
-                );
+                warn!("config: {}: invalid TOML — using built-in defaults", path.display());
+                debug!("config parse error: {e}");
                 PromptConfig::default()
             }
         },
         Err(e) => {
-            warn!(
-                "config: {}: read failed: {e} — using built-in defaults",
-                path.display()
-            );
+            warn!("config: {}: read failed — using built-in defaults", path.display());
+            debug!("config read error: {e}");
             PromptConfig::default()
         }
     }
