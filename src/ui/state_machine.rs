@@ -287,10 +287,20 @@ impl StateMachine {
             self.mode = ProcessMode::Summarize;
         }
 
+        // Preserve the result cache and the user's per-session mode/param choices
+        // when the same content is re-triggered while the overlay is open, so the
+        // other modes' cached results survive (switching to them stays instant)
+        // and the chosen rephrase/thinking settings are kept. A genuinely new
+        // input wipes all of it. (Closing the overlay still clears the cache via
+        // reset_to_hidden.) The current mode is always re-processed below, so
+        // re-triggering remains a way to get a fresh generation.
+        let content_changed = self.original_content.as_ref() != Some(&content);
         self.original_content = Some(content.clone());
-        self.cache.clear();
-        self.mode_thinking.clear();
-        self.rephrase_params = RephraseParams::default();
+        if content_changed {
+            self.cache.clear();
+            self.mode_thinking.clear();
+            self.rephrase_params = RephraseParams::default();
+        }
         self.streaming_text.clear();
         self.think_started = false;
         self.think_content = None;
@@ -1183,6 +1193,50 @@ mod tests {
         let effects = sm.handle(UiEvent::ContentReady { content: ClipboardContent::text_only("world".into()), auto_copy: true });
         assert_eq!(*sm.state(), OverlayState::Processing);
         assert!(effects.iter().any(|e| matches!(e, UiEffect::SendProcess { .. })));
+    }
+
+    #[test]
+    fn identical_content_ready_preserves_other_mode_cache() {
+        let mut sm = new_sm();
+        // Translate → cache "translated".
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerResult { text: "translated".into(), think_content: None, request_id: rid });
+        // Rephrase → cache "rephrased".
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Rephrase));
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerResult { text: "rephrased".into(), think_content: None, request_id: rid });
+        // Back to Translate (cache hit).
+        sm.handle(UiEvent::UserSwitchMode(ProcessMode::Translate));
+        assert_eq!(*sm.state(), OverlayState::Result("translated".into()));
+
+        // Re-trigger with the SAME content: the current mode still re-processes,
+        // but the Rephrase cache entry must survive.
+        let effects = sm.handle(UiEvent::ContentReady {
+            content: ClipboardContent::text_only("hello".into()),
+            auto_copy: true,
+        });
+        assert_eq!(*sm.state(), OverlayState::Processing);
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerResult { text: "translated2".into(), think_content: None, request_id: rid });
+
+        // Switching to Rephrase is served from the preserved cache — no SendProcess.
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Rephrase));
+        assert_eq!(*sm.state(), OverlayState::Result("rephrased".into()));
+        assert!(!effects.iter().any(|e| matches!(e, UiEffect::SendProcess { .. })));
+    }
+
+    #[test]
+    fn identical_content_ready_preserves_rephrase_params() {
+        let mut sm = new_sm();
+        sm.handle(UiEvent::UserSwitchMode(ProcessMode::Rephrase));
+        start_processing(&mut sm, "hello");
+        sm.handle(UiEvent::UserChangeRephraseLength(RephraseLength::Terse));
+        assert_eq!(sm.rephrase_params().length, RephraseLength::Terse);
+
+        // Same content → params preserved.
+        start_processing(&mut sm, "hello");
+        assert_eq!(sm.rephrase_params().length, RephraseLength::Terse);
     }
 
     #[test]
