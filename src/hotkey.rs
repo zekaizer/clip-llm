@@ -2,8 +2,9 @@ use std::time::{Duration, Instant};
 
 use tracing::debug;
 
-/// Timeout window for double-tap detection.
-const DOUBLE_TAP_TIMEOUT: Duration = Duration::from_millis(500);
+/// Default timeout window for double-tap detection, used when the config does
+/// not override it (`[hotkey].double_tap_timeout_ms`).
+pub const DEFAULT_DOUBLE_TAP_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Result of a hotkey press event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +31,8 @@ pub struct TapEvent {
 /// - `check_timeout()` returns `true` when a pending single-tap has expired (single-tap confirmed).
 pub struct HotkeyDetector {
     last_press: Option<Instant>,
+    /// Double-tap detection window.
+    timeout: Duration,
 }
 
 impl Default for HotkeyDetector {
@@ -39,8 +42,17 @@ impl Default for HotkeyDetector {
 }
 
 impl HotkeyDetector {
+    /// Create a detector with the default double-tap timeout.
     pub fn new() -> Self {
-        Self { last_press: None }
+        Self::with_timeout(DEFAULT_DOUBLE_TAP_TIMEOUT)
+    }
+
+    /// Create a detector with a custom double-tap timeout.
+    pub fn with_timeout(timeout: Duration) -> Self {
+        Self {
+            last_press: None,
+            timeout,
+        }
     }
 
     /// Call on each hotkey press event.
@@ -49,7 +61,7 @@ impl HotkeyDetector {
     pub fn on_press(&mut self) -> TapAction {
         let now = Instant::now();
         if let Some(last) = self.last_press.take()
-            && now.duration_since(last) <= DOUBLE_TAP_TIMEOUT
+            && now.duration_since(last) <= self.timeout
         {
             debug!("double-tap detected");
             return TapAction::DoubleTap;
@@ -70,7 +82,7 @@ impl HotkeyDetector {
     /// confirming a single-tap action.
     pub fn check_timeout(&mut self) -> bool {
         if let Some(last) = self.last_press
-            && last.elapsed() > DOUBLE_TAP_TIMEOUT
+            && last.elapsed() > self.timeout
         {
             self.last_press = None;
             debug!("single-tap confirmed (timeout elapsed)");

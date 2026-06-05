@@ -53,7 +53,7 @@ startup clip-llm reads, in order of precedence:
 2. otherwise `config.toml` next to the executable.
 
 If no file is found — or it is malformed — the built-in defaults are used. Every
-key is optional; you only specify what you want to change. The file holds two
+key is optional; you only specify what you want to change. The file holds these
 kinds of settings:
 
 - **`[api]`** — connection settings (endpoint, model, API key, custom headers,
@@ -63,6 +63,9 @@ kinds of settings:
 - **`[generation]`** — request parameters (`temperature`, `max_tokens`,
   `request_timeout_secs`). No environment-variable equivalent: **config file >
   built-in default**.
+- **`[hotkey]`** — `double_tap_timeout_ms`, the single/double-tap detection
+  window in milliseconds (default `500`). Lower it (e.g. `300`) to shorten the
+  silent wait before a single-tap resolves. No environment-variable equivalent.
 - **prompts** — per-mode system prompts, with placeholders substituted at runtime:
   - `{primary_lang}` / `{secondary_lang}` — in the `[translate]` prompt
   - `{primary_lang}` — in the `[summarize]` prompts (summaries are primary-language only)
