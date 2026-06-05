@@ -11,7 +11,8 @@ use crate::{ClipboardContent, ProcessMode, RephraseParams, ThinkingMode};
 /// Runtime configuration resolved from environment variables once at worker startup.
 #[derive(Copy, Clone)]
 struct WorkerConfig {
-    /// Use streaming SSE API. Disabled by setting `CLIP_LLM_NO_STREAM`.
+    /// Use streaming SSE API. Disabled by setting `CLIP_LLM_NO_STREAM`, else taken
+    /// from the config `[api].streaming` (default true).
     streaming: bool,
     /// Use mock LLM responses for diagnostics. Enabled by setting `DIAG_MOCK`.
     #[cfg(feature = "diagnostics")]
@@ -299,8 +300,13 @@ pub fn spawn_worker(
             .expect("failed to create tokio runtime");
 
         // Read env vars once at thread start — no async context needed.
+        // Precedence: CLIP_LLM_NO_STREAM (when set, forces off) > config > default on.
         let config = WorkerConfig {
-            streaming: std::env::var("CLIP_LLM_NO_STREAM").is_err(),
+            streaming: if std::env::var("CLIP_LLM_NO_STREAM").is_ok() {
+                false
+            } else {
+                crate::config::get().api_streaming().unwrap_or(true)
+            },
             #[cfg(feature = "diagnostics")]
             use_mock: std::env::var("DIAG_MOCK").is_ok(),
         };
