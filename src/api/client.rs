@@ -229,10 +229,12 @@ impl LlmClientInner {
 }
 
 /// Resolves a string setting by precedence: env var > config file > built-in
-/// default.
+/// default. An empty string from either source is treated as unset so it falls
+/// through rather than winning with a blank value.
 fn resolve_setting(env_value: Option<String>, config_value: Option<&str>, default: &str) -> String {
     env_value
-        .or_else(|| config_value.map(str::to_owned))
+        .filter(|s| !s.is_empty())
+        .or_else(|| config_value.filter(|s| !s.is_empty()).map(str::to_owned))
         .unwrap_or_else(|| default.to_owned())
 }
 
@@ -268,17 +270,21 @@ impl LlmClient {
             config.api_model(),
             DEFAULT_MODEL_NAME,
         );
+        // Empty string = unset, so it never produces a blank Bearer token.
         let api_key = env::var("CLIP_LLM_API_KEY")
             .ok()
-            .or_else(|| config.api_key().map(str::to_owned));
-        let custom_headers: Vec<(String, String)> = match env::var("CLIP_LLM_CUSTOM_HEADERS") {
-            Ok(raw) => parse_custom_headers(&raw),
-            Err(_) => config
-                .api_headers()
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-        };
+            .filter(|k| !k.is_empty())
+            .or_else(|| config.api_key().filter(|k| !k.is_empty()).map(str::to_owned));
+        // Empty env var = unset, so it does not silently suppress configured headers.
+        let custom_headers: Vec<(String, String)> =
+            match env::var("CLIP_LLM_CUSTOM_HEADERS").ok().filter(|s| !s.is_empty()) {
+                Some(raw) => parse_custom_headers(&raw),
+                None => config
+                    .api_headers()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            };
 
         info!(
             "endpoint={endpoint}, model={model}, api_key={}, custom_headers={}",
@@ -687,6 +693,10 @@ mod tests {
         assert_eq!(resolve_setting(None, Some("cfg"), "def"), "cfg");
         // default when neither is set.
         assert_eq!(resolve_setting(None, None, "def"), "def");
+        // an empty env string is treated as unset and falls through to config.
+        assert_eq!(resolve_setting(Some(String::new()), Some("cfg"), "def"), "cfg");
+        // an empty config string is treated as unset and falls through to default.
+        assert_eq!(resolve_setting(Some(String::new()), Some(""), "def"), "def");
     }
 
     #[test]
