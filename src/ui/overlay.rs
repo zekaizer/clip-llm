@@ -404,7 +404,7 @@ fn render_param_pills<T: Copy + PartialEq>(
                 .color(if is_selected {
                     egui::Color32::WHITE
                 } else {
-                    egui::Color32::from_gray(100)
+                    egui::Color32::from_gray(140)
                 });
             let button = egui::Button::new(text)
                 .fill(if is_selected {
@@ -478,7 +478,7 @@ fn render_tab_bar(
             let text = egui::RichText::new(mode.label())
                 .size(13.0)
                 .color(if !is_available {
-                    egui::Color32::from_gray(50)
+                    egui::Color32::from_gray(90)
                 } else if is_selected {
                     egui::Color32::WHITE
                 } else {
@@ -523,7 +523,7 @@ fn render_tab_bar(
                         .color(if is_selected {
                             egui::Color32::WHITE
                         } else {
-                            egui::Color32::from_gray(80)
+                            egui::Color32::from_gray(130)
                         });
 
                     let button = egui::Button::new(text)
