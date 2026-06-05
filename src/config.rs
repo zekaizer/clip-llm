@@ -255,14 +255,54 @@ impl PromptConfig {
             .as_deref()
             .unwrap_or(DEFAULT_SUMMARIZE_IMAGE_PROMPT)
     }
+
+    /// Builds the Rephrase prompt by substituting the `{style}` / `{length}`
+    /// tokens in the base template in a single pass.
+    pub fn rephrase_prompt(&self, style: RephraseStyle, length: RephraseLength) -> String {
+        substitute_tokens(
+            self.rephrase_base(),
+            &[
+                ("{style}", self.rephrase_style(style)),
+                ("{length}", self.rephrase_length(length)),
+            ],
+        )
+    }
 }
 
-/// Substitute language placeholders in a template. Unknown `{...}` tokens pass
-/// through unchanged.
+/// Replaces every `{token}` in `template` with its mapped value in a single
+/// forward pass. Substituted values are emitted verbatim and never rescanned, so
+/// a replacement that happens to contain another token (e.g. a language name of
+/// `"{secondary_lang}"`) is not expanded again. Unknown `{...}` tokens pass
+/// through unchanged. Tokens are matched in slice order, so they must be disjoint
+/// (no token a prefix of another); the call sites below satisfy this.
+fn substitute_tokens(template: &str, vars: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let tail = &rest[open..];
+        match vars.iter().find(|(token, _)| tail.starts_with(token)) {
+            Some((token, value)) => {
+                out.push_str(value);
+                rest = &tail[token.len()..];
+            }
+            None => {
+                out.push('{');
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Substitute language placeholders (`{primary_lang}` / `{secondary_lang}`) in a
+/// template. Unknown `{...}` tokens pass through unchanged.
 pub fn substitute(template: &str, primary: &str, secondary: &str) -> String {
-    template
-        .replace("{primary_lang}", primary)
-        .replace("{secondary_lang}", secondary)
+    substitute_tokens(
+        template,
+        &[("{primary_lang}", primary), ("{secondary_lang}", secondary)],
+    )
 }
 
 static CONFIG: OnceLock<PromptConfig> = OnceLock::new();
@@ -333,10 +373,7 @@ mod tests {
         let secondary = config.secondary_lang();
         match mode {
             ProcessMode::Translate => substitute(config.translate_prompt(), primary, secondary),
-            ProcessMode::Rephrase => config
-                .rephrase_base()
-                .replace("{style}", config.rephrase_style(params.style))
-                .replace("{length}", config.rephrase_length(params.length)),
+            ProcessMode::Rephrase => config.rephrase_prompt(params.style, params.length),
             ProcessMode::Summarize if image_only => {
                 substitute(config.summarize_image_prompt(), primary, secondary)
             }
@@ -380,6 +417,30 @@ mod tests {
         );
         assert_eq!(substitute("{unknown} stays", "Korean", "English"), "{unknown} stays");
         assert_eq!(substitute("", "Korean", "English"), "");
+    }
+
+    #[test]
+    fn substitute_does_not_reexpand_injected_tokens() {
+        // A primary value that itself contains `{secondary_lang}` must be emitted
+        // verbatim, not expanded a second time.
+        assert_eq!(
+            substitute("{primary_lang}->{secondary_lang}", "{secondary_lang}", "English"),
+            "{secondary_lang}->English",
+        );
+    }
+
+    #[test]
+    fn rephrase_prompt_does_not_reexpand_style_into_length() {
+        // A style override containing `{length}` must not pull in the length
+        // modifier a second time.
+        let config: PromptConfig = toml::from_str(
+            "[rephrase]\nbase = \"X {style}{length} Y\"\n[rephrase.style]\ncorrect = \"S{length}\"\n[rephrase.length]\nsame = \"L\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.rephrase_prompt(RephraseStyle::Correct, RephraseLength::Same),
+            "X S{length}L Y",
+        );
     }
 
     #[test]

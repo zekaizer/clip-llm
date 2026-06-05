@@ -184,10 +184,7 @@ impl ProcessMode {
             Self::Translate => {
                 crate::config::substitute(config.translate_prompt(), primary, secondary)
             }
-            Self::Rephrase => config
-                .rephrase_base()
-                .replace("{style}", config.rephrase_style(params.style))
-                .replace("{length}", config.rephrase_length(params.length)),
+            Self::Rephrase => config.rephrase_prompt(params.style, params.length),
             Self::Summarize if image_only => {
                 crate::config::substitute(config.summarize_image_prompt(), primary, secondary)
             }
