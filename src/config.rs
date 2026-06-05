@@ -362,8 +362,9 @@ pub fn substitute(template: &str, primary: &str, secondary: &str) -> String {
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
-/// Returns the process-global prompt configuration, initializing it to the
-/// built-in defaults if [`init`] was never called (e.g. in tests).
+/// Returns the process-global configuration (prompts and `[api]` settings),
+/// initializing it to the built-in defaults if [`init`] was never called
+/// (e.g. in tests).
 pub fn get() -> &'static Config {
     CONFIG.get_or_init(Config::default)
 }
@@ -401,7 +402,7 @@ fn resolve_path() -> Option<PathBuf> {
 /// `CLIP_LLM_CONFIG` cannot leak file contents into ordinary logs.
 fn load_or_default() -> Config {
     let Some(path) = resolve_path() else {
-        info!("config: no {CONFIG_FILENAME} found, using built-in prompt defaults");
+        info!("config: no {CONFIG_FILENAME} found, using built-in defaults");
         return Config::default();
     };
 
@@ -431,7 +432,7 @@ fn load_or_default() -> Config {
     match std::fs::read_to_string(&path) {
         Ok(contents) => match toml::from_str::<Config>(&contents) {
             Ok(config) => {
-                info!("config: loaded prompts from {}", path.display());
+                info!("config: loaded from {}", path.display());
                 config
             }
             Err(e) => {
