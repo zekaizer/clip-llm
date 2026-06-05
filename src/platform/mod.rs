@@ -47,20 +47,79 @@ pub(crate) mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::WindowsPlatform as NativePlatform;
 
-/// Initialize the system tray icon with a Quit menu.
-/// On Windows, creates a tray icon and sets up event handling.
-/// On macOS, no-op (tray support planned for future).
-pub fn init_tray(_ctx: &eframe::egui::Context) {
-    #[cfg(target_os = "windows")]
-    windows::init_tray(_ctx);
+// -- System tray (Windows taskbar / macOS menu bar) --
+//
+// `tray-icon` is cross-platform, so the implementation is shared here; only the
+// Windows-specific window nudge in the menu handler is `cfg`-gated.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static TRAY_QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Decode the embedded tray icon PNG into an RGBA `tray_icon::Icon`.
+fn load_tray_icon() -> tray_icon::Icon {
+    let png_bytes = include_bytes!("../../assets/tray-icon-32.png");
+    let decoder = png::Decoder::new(std::io::Cursor::new(png_bytes.as_slice()));
+    let mut reader = decoder.read_info().expect("invalid tray icon PNG");
+    let mut buf = vec![0u8; reader.output_buffer_size().expect("unknown output buffer size")];
+    let info = reader.next_frame(&mut buf).expect("failed to decode tray icon");
+    buf.truncate(info.buffer_size());
+    tray_icon::Icon::from_rgba(buf, info.width, info.height).expect("invalid RGBA icon data")
 }
 
-/// Poll system tray events (e.g. Quit menu click).
-/// On Windows, checks for pending tray menu events.
-/// On macOS, no-op.
-pub fn poll_tray_quit(_ctx: &eframe::egui::Context) {
-    #[cfg(target_os = "windows")]
-    windows::poll_tray_quit(_ctx);
+/// Initialize the system tray icon with a disabled version label and a Quit item.
+/// On macOS this is the only way to quit the app (Accessory policy = no Dock icon).
+/// The `TrayIcon` is intentionally leaked (process-lifetime resource).
+pub fn init_tray(ctx: &eframe::egui::Context) {
+    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+    use tray_icon::TrayIconBuilder;
+
+    let title = MenuItem::new(concat!("clip-llm v", env!("CARGO_PKG_VERSION")), false, None);
+    let quit_item = MenuItem::new("Quit", true, None);
+    let quit_id = quit_item.id().clone();
+    let menu = Menu::with_items(&[&title, &PredefinedMenuItem::separator(), &quit_item])
+        .expect("failed to create tray menu");
+
+    let tray = TrayIconBuilder::new()
+        .with_menu(Box::new(menu))
+        .with_tooltip("clip-llm")
+        .with_icon(load_tray_icon())
+        .build();
+
+    match tray {
+        Ok(tray) => {
+            // Leak: the tray icon lives for the entire process lifetime.
+            std::mem::forget(tray);
+
+            // set_event_handler intercepts all menu events; compare the Quit id and
+            // signal via AtomicBool so poll_tray_quit() can act inside update().
+            let quit_id = quit_id.clone();
+            let ctx = ctx.clone();
+            MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+                if event.id() == &quit_id {
+                    TRAY_QUIT_REQUESTED.store(true, Ordering::SeqCst);
+                }
+                // Windows: a hidden window gets no WM_PAINT, so nudge it visible to
+                // make update() run. Not needed on macOS.
+                #[cfg(target_os = "windows")]
+                windows::show_no_activate();
+                ctx.request_repaint();
+            }));
+
+            tracing::info!("system tray icon created");
+        }
+        Err(e) => {
+            tracing::warn!("failed to create tray icon: {e}");
+        }
+    }
+}
+
+/// Poll for the tray quit flag; sends `ViewportCommand::Close` when set.
+pub fn poll_tray_quit(ctx: &eframe::egui::Context) {
+    if TRAY_QUIT_REQUESTED.swap(false, Ordering::SeqCst) {
+        tracing::info!("quit requested from tray menu");
+        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
+    }
 }
 
 /// Returns a platform-specific callback for pre-show hooks (coordinator / diagnostics threads).
