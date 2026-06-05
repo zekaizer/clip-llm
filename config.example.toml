@@ -9,8 +9,9 @@
 # without stopping the app.
 #
 # Placeholders (substituted at runtime):
-#   {primary_lang}, {secondary_lang}  -> usable in [translate] and [summarize]
-#   {style}, {length}                 -> usable only in [rephrase].base
+#   {primary_lang}, {secondary_lang}  -> in [translate]
+#   {primary_lang}                    -> in [summarize] (summaries are primary-language only)
+#   {style}, {length}                 -> only in [rephrase].base
 # Any other {token} is passed through to the model unchanged.
 
 # Language names substituted into {primary_lang} / {secondary_lang}.

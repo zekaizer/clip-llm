@@ -51,7 +51,8 @@ used. Every key is optional; you only specify the prompts you want to change.
 
 Available placeholders are substituted at runtime:
 
-- `{primary_lang}` / `{secondary_lang}` — in the `[translate]` and `[summarize]` prompts
+- `{primary_lang}` / `{secondary_lang}` — in the `[translate]` prompt
+- `{primary_lang}` — in the `[summarize]` prompts (summaries are primary-language only)
 - `{style}` / `{length}` — only in `[rephrase].base`
 
 See [config.example.toml](config.example.toml) for the full schema and examples.
