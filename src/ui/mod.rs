@@ -35,6 +35,11 @@ pub struct OverlayApp {
     last_desired_size: Option<egui::Vec2>,
     /// Whether the think block section is expanded in the Result state.
     think_expanded: bool,
+    /// request_id whose Processing start time is currently tracked; a change
+    /// restarts the elapsed-time clock so each new request counts from zero.
+    processing_request_id: Option<u64>,
+    /// When the current Processing request started, for the elapsed-time display.
+    processing_started_at: Option<std::time::Instant>,
     #[cfg(feature = "diagnostics")]
     diag: crate::diagnostics::DiagCollector,
     #[cfg(feature = "diagnostics")]
@@ -66,6 +71,8 @@ impl OverlayApp {
             tap_rx,
             last_desired_size: None,
             think_expanded: false,
+            processing_request_id: None,
+            processing_started_at: None,
             diag: crate::diagnostics::DiagCollector::new(),
             diag_action_rx,
             diag_state_tx,
@@ -93,6 +100,8 @@ impl OverlayApp {
             tap_rx,
             last_desired_size: None,
             think_expanded: false,
+            processing_request_id: None,
+            processing_started_at: None,
         }
     }
 }
@@ -399,6 +408,24 @@ impl OverlayApp {
         self.execute_effects(effects, ctx);
     }
 
+    /// Track how long the active Processing request has been running, keyed on its
+    /// request_id so each new request restarts the clock. Returns the elapsed
+    /// duration to display (None when not Processing).
+    fn processing_elapsed(&mut self) -> Option<std::time::Duration> {
+        if matches!(self.sm.state(), OverlayState::Processing) {
+            let rid = self.sm.current_request_id();
+            if self.processing_request_id != Some(rid) {
+                self.processing_request_id = Some(rid);
+                self.processing_started_at = Some(std::time::Instant::now());
+            }
+            self.processing_started_at.map(|t| t.elapsed())
+        } else {
+            self.processing_request_id = None;
+            self.processing_started_at = None;
+            None
+        }
+    }
+
     /// Request repaints: every frame while Processing (spinner), idle poll in diagnostics mode.
     fn schedule_repaint(&self, ctx: &egui::Context) {
         if matches!(self.sm.state(), OverlayState::Processing) {
@@ -429,6 +456,7 @@ impl eframe::App for OverlayApp {
             }
         });
 
+        let elapsed = self.processing_elapsed();
         let output = overlay::render(
             self.sm.state(),
             self.sm.mode(),
@@ -445,6 +473,7 @@ impl eframe::App for OverlayApp {
                 supported: self.sm.thinking_supported(),
             },
             self.sm.auto_copy(),
+            elapsed,
             ctx,
         );
 
