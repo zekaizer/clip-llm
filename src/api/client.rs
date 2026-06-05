@@ -228,27 +228,57 @@ impl LlmClientInner {
     }
 }
 
+/// Resolves a string setting by precedence: env var > config file > built-in
+/// default.
+fn resolve_setting(env_value: Option<String>, config_value: Option<&str>, default: &str) -> String {
+    env_value
+        .or_else(|| config_value.map(str::to_owned))
+        .unwrap_or_else(|| default.to_owned())
+}
+
+/// Parses the `CLIP_LLM_CUSTOM_HEADERS` env format: comma-separated `Key:Value`
+/// pairs, optionally wrapped in quotes.
+fn parse_custom_headers(raw: &str) -> Vec<(String, String)> {
+    raw.trim_matches('"')
+        .split(',')
+        .filter_map(|pair| {
+            let pair = pair.trim();
+            if pair.is_empty() {
+                return None;
+            }
+            let (key, value) = pair.split_once(':')?;
+            Some((key.trim().to_string(), value.trim().to_string()))
+        })
+        .collect()
+}
+
 impl LlmClient {
     pub fn new() -> Result<Self, ApiError> {
-        let base = env::var("CLIP_LLM_API_ENDPOINT")
-            .unwrap_or_else(|_| DEFAULT_API_ENDPOINT.to_string());
+        // Precedence for every setting: env var > config file > built-in default.
+        let config = crate::config::get();
+
+        let base = resolve_setting(
+            env::var("CLIP_LLM_API_ENDPOINT").ok(),
+            config.api_endpoint(),
+            DEFAULT_API_ENDPOINT,
+        );
         let endpoint = format!("{}{}", base.trim_end_matches('/'), CHAT_COMPLETIONS_PATH);
-        let model =
-            env::var("CLIP_LLM_MODEL").unwrap_or_else(|_| DEFAULT_MODEL_NAME.to_string());
-        let api_key = env::var("CLIP_LLM_API_KEY").ok();
-        let custom_headers: Vec<(String, String)> = env::var("CLIP_LLM_CUSTOM_HEADERS")
-            .unwrap_or_default()
-            .trim_matches('"')
-            .split(',')
-            .filter_map(|pair| {
-                let pair = pair.trim();
-                if pair.is_empty() {
-                    return None;
-                }
-                let (key, value) = pair.split_once(':')?;
-                Some((key.trim().to_string(), value.trim().to_string()))
-            })
-            .collect();
+        let model = resolve_setting(
+            env::var("CLIP_LLM_MODEL").ok(),
+            config.api_model(),
+            DEFAULT_MODEL_NAME,
+        );
+        let api_key = env::var("CLIP_LLM_API_KEY")
+            .ok()
+            .or_else(|| config.api_key().map(str::to_owned));
+        let custom_headers: Vec<(String, String)> = match env::var("CLIP_LLM_CUSTOM_HEADERS") {
+            Ok(raw) => parse_custom_headers(&raw),
+            Err(_) => config
+                .api_headers()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        };
 
         info!(
             "endpoint={endpoint}, model={model}, api_key={}, custom_headers={}",
@@ -645,6 +675,32 @@ impl LlmClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_setting_precedence() {
+        // env var wins over config and default.
+        assert_eq!(
+            resolve_setting(Some("env".to_string()), Some("cfg"), "def"),
+            "env"
+        );
+        // config wins when env is absent.
+        assert_eq!(resolve_setting(None, Some("cfg"), "def"), "cfg");
+        // default when neither is set.
+        assert_eq!(resolve_setting(None, None, "def"), "def");
+    }
+
+    #[test]
+    fn parse_custom_headers_pairs() {
+        let parsed = parse_custom_headers("\"X-A:1, X-B:2\"");
+        assert_eq!(
+            parsed,
+            vec![
+                ("X-A".to_string(), "1".to_string()),
+                ("X-B".to_string(), "2".to_string()),
+            ]
+        );
+        assert!(parse_custom_headers("").is_empty());
+    }
 
     #[test]
     fn parse_valid_response() {
