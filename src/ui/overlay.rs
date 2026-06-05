@@ -70,6 +70,7 @@ pub fn render(
     rephrase_params: RephraseParams,
     thinking: ThinkingState,
     auto_copy: bool,
+    elapsed: Option<std::time::Duration>,
     ctx: &egui::Context,
 ) -> OverlayOutput {
     if matches!(state, OverlayState::Hidden) {
@@ -137,7 +138,7 @@ pub fn render(
 
                 match state {
                     OverlayState::Processing => {
-                        render_processing(ui, mode, streaming.text, streaming.think_started, &mut action);
+                        render_processing(ui, mode, streaming.text, streaming.think_started, elapsed, &mut action);
                     }
                     OverlayState::Result(text) => {
                         render_result(
@@ -238,11 +239,25 @@ fn render_think_toggle(
     }
 }
 
+/// Small dim label showing how long the current request has been processing.
+/// Helps the user distinguish slow generation (especially a long thinking phase)
+/// from a stall.
+fn render_elapsed_label(ui: &mut egui::Ui, elapsed: Option<std::time::Duration>) {
+    if let Some(d) = elapsed {
+        ui.label(
+            egui::RichText::new(format!("{:.1}s", d.as_secs_f32()))
+                .color(egui::Color32::from_gray(120))
+                .size(12.0),
+        );
+    }
+}
+
 fn render_processing(
     ui: &mut egui::Ui,
     mode: ProcessMode,
     streaming_text: &str,
     think_started: bool,
+    elapsed: Option<std::time::Duration>,
     action: &mut OverlayAction,
 ) {
     if think_started && streaming_text.is_empty() {
@@ -254,14 +269,18 @@ fn render_processing(
                     .color(egui::Color32::from_gray(160))
                     .size(15.0),
             );
+            render_elapsed_label(ui, elapsed);
         });
     } else if think_started {
         // Think done, answer streaming: show locked collapsed header.
-        ui.label(
-            egui::RichText::new("\u{25b6} Thinking")
-                .color(egui::Color32::from_gray(100))
-                .size(13.0),
-        );
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("\u{25b6} Thinking")
+                    .color(egui::Color32::from_gray(100))
+                    .size(13.0),
+            );
+            render_elapsed_label(ui, elapsed);
+        });
         ui.add_space(4.0);
         render_scrollable_text(ui, ("streaming", mode), streaming_text, MAX_RESULT_HEIGHT, true);
     } else {
@@ -272,6 +291,7 @@ fn render_processing(
                     .color(egui::Color32::WHITE)
                     .size(15.0),
             );
+            render_elapsed_label(ui, elapsed);
         });
         if !streaming_text.is_empty() {
             ui.add_space(4.0);
@@ -384,7 +404,7 @@ fn render_param_pills<T: Copy + PartialEq>(
                 .color(if is_selected {
                     egui::Color32::WHITE
                 } else {
-                    egui::Color32::from_gray(100)
+                    egui::Color32::from_gray(140)
                 });
             let button = egui::Button::new(text)
                 .fill(if is_selected {
@@ -449,6 +469,9 @@ fn render_tab_bar(
     thinking: ThinkingState,
     action: &mut OverlayAction,
 ) {
+    // Content is loaded whenever any mode is available; when empty the overlay
+    // is idle (no clipboard content) rather than restricted, so skip the tooltip.
+    let has_content = !available_modes.is_empty();
     ui.horizontal(|ui| {
         // Mode tabs (left side)
         for &mode in ProcessMode::ALL {
@@ -458,7 +481,7 @@ fn render_tab_bar(
             let text = egui::RichText::new(mode.label())
                 .size(13.0)
                 .color(if !is_available {
-                    egui::Color32::from_gray(50)
+                    egui::Color32::from_gray(90)
                 } else if is_selected {
                     egui::Color32::WHITE
                 } else {
@@ -471,6 +494,13 @@ fn render_tab_bar(
                 .corner_radius(6.0);
 
             let response = ui.add(button);
+            // Explain why a tab is disabled (e.g. image-only clipboard locks all
+            // modes except Summarize) instead of silently swallowing the click.
+            let response = if !is_available && has_content {
+                response.on_hover_text("Requires text — image-only clipboard")
+            } else {
+                response
+            };
             let underline_color = if is_selected {
                 Some(accent_color())
             } else if response.hovered() && is_available {
@@ -503,7 +533,7 @@ fn render_tab_bar(
                         .color(if is_selected {
                             egui::Color32::WHITE
                         } else {
-                            egui::Color32::from_gray(80)
+                            egui::Color32::from_gray(130)
                         });
 
                     let button = egui::Button::new(text)

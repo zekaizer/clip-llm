@@ -35,6 +35,11 @@ pub struct OverlayApp {
     last_desired_size: Option<egui::Vec2>,
     /// Whether the think block section is expanded in the Result state.
     think_expanded: bool,
+    /// request_id whose Processing start time is currently tracked; a change
+    /// restarts the elapsed-time clock so each new request counts from zero.
+    processing_request_id: Option<u64>,
+    /// When the current Processing request started, for the elapsed-time display.
+    processing_started_at: Option<std::time::Instant>,
     #[cfg(feature = "diagnostics")]
     diag: crate::diagnostics::DiagCollector,
     #[cfg(feature = "diagnostics")]
@@ -66,6 +71,8 @@ impl OverlayApp {
             tap_rx,
             last_desired_size: None,
             think_expanded: false,
+            processing_request_id: None,
+            processing_started_at: None,
             diag: crate::diagnostics::DiagCollector::new(),
             diag_action_rx,
             diag_state_tx,
@@ -93,6 +100,8 @@ impl OverlayApp {
             tap_rx,
             last_desired_size: None,
             think_expanded: false,
+            processing_request_id: None,
+            processing_started_at: None,
         }
     }
 }
@@ -129,7 +138,7 @@ impl OverlayApp {
                     if let Err(e) = self.clipboard.write_text(&text) {
                         error!("clipboard write failed: {e}");
                         let err_effects =
-                            self.sm.handle(UiEvent::ClipboardError(e.to_string()));
+                            self.sm.handle(UiEvent::ClipboardError(friendly_clipboard_error(&e)));
                         // ClipboardError never emits WriteClipboard — recursion safe.
                         self.execute_effects(err_effects, ctx);
                         // Abort remaining effects: the state machine transitioned to
@@ -189,7 +198,10 @@ impl OverlayApp {
                     info!("single-tap triggered, using clipboard content...");
                     let event = match self.clipboard.read_content() {
                         Ok(content) => UiEvent::ContentReady { content, auto_copy: false },
-                        Err(e) => UiEvent::ClipboardError(e.to_string()),
+                        Err(e) => {
+                            error!("clipboard read failed: {e}");
+                            UiEvent::ClipboardError(friendly_clipboard_error(&e))
+                        }
                     };
                     let effects = self.sm.handle(event);
                     self.execute_effects(effects, ctx);
@@ -198,7 +210,10 @@ impl OverlayApp {
                     info!("double-tap triggered, copying selection...");
                     let event = match self.clipboard.copy_and_read(&self.platform) {
                         Ok(content) => UiEvent::ContentReady { content, auto_copy: true },
-                        Err(e) => UiEvent::ClipboardError(e.to_string()),
+                        Err(e) => {
+                            error!("clipboard copy/read failed: {e}");
+                            UiEvent::ClipboardError(friendly_clipboard_error(&e))
+                        }
                     };
                     let effects = self.sm.handle(event);
                     self.execute_effects(effects, ctx);
@@ -399,6 +414,24 @@ impl OverlayApp {
         self.execute_effects(effects, ctx);
     }
 
+    /// Track how long the active Processing request has been running, keyed on its
+    /// request_id so each new request restarts the clock. Returns the elapsed
+    /// duration to display (None when not Processing).
+    fn processing_elapsed(&mut self) -> Option<std::time::Duration> {
+        if matches!(self.sm.state(), OverlayState::Processing) {
+            let rid = self.sm.current_request_id();
+            if self.processing_request_id != Some(rid) {
+                self.processing_request_id = Some(rid);
+                self.processing_started_at = Some(std::time::Instant::now());
+            }
+            self.processing_started_at.map(|t| t.elapsed())
+        } else {
+            self.processing_request_id = None;
+            self.processing_started_at = None;
+            None
+        }
+    }
+
     /// Request repaints: every frame while Processing (spinner), idle poll in diagnostics mode.
     fn schedule_repaint(&self, ctx: &egui::Context) {
         if matches!(self.sm.state(), OverlayState::Processing) {
@@ -429,6 +462,7 @@ impl eframe::App for OverlayApp {
             }
         });
 
+        let elapsed = self.processing_elapsed();
         let output = overlay::render(
             self.sm.state(),
             self.sm.mode(),
@@ -445,6 +479,7 @@ impl eframe::App for OverlayApp {
                 supported: self.sm.thinking_supported(),
             },
             self.sm.auto_copy(),
+            elapsed,
             ctx,
         );
 
@@ -482,6 +517,21 @@ impl eframe::App for OverlayApp {
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0.0, 0.0, 0.0, 0.0]
+    }
+}
+
+/// Map a clipboard error to a short, user-facing message. The raw error is
+/// logged separately for diagnostics, so no internal detail is lost.
+fn friendly_clipboard_error(e: &crate::ClipboardError) -> String {
+    use crate::ClipboardError::*;
+    match e {
+        NoTextInClipboard => "Clipboard is empty.".to_string(),
+        NoTextAfterCopy => {
+            "Could not capture selected text. Try selecting it again and double-tapping.".to_string()
+        }
+        AccessFailed(_) | CopyFailed(_) => "Clipboard is unavailable.".to_string(),
+        WriteFailed(_) => "Could not write to clipboard.".to_string(),
+        ImageEncodeFailed(_) => "Could not process the clipboard image.".to_string(),
     }
 }
 

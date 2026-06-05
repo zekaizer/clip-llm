@@ -6,7 +6,7 @@ use tracing::{debug, error, info, trace};
 
 use crate::api::client::{LlmClient, SseEvent, SseParser};
 use crate::api::response::{extract_first_think_content, strip_think_blocks, ThinkBlockFilter};
-use crate::{ClipboardContent, ProcessMode, RephraseParams, ThinkingMode};
+use crate::{ApiError, ClipboardContent, ProcessMode, RephraseParams, ThinkingMode};
 
 /// Runtime configuration resolved from environment variables once at worker startup.
 #[derive(Copy, Clone)]
@@ -43,6 +43,41 @@ pub enum WorkerResponse {
     ThinkingProbeResult { supported: bool },
 }
 
+/// Map a reqwest transport error to a short, user-facing message that hides
+/// internal endpoint URLs and OS error codes. The full error is logged separately.
+fn friendly_reqwest_error(e: &reqwest::Error) -> String {
+    if e.is_connect() || e.is_timeout() {
+        "Cannot reach the server. Check that the LLM service is running.".to_string()
+    } else if let Some(status) = e.status() {
+        if status.is_client_error() {
+            format!("Server rejected the request (HTTP {}).", status.as_u16())
+        } else if status.is_server_error() {
+            "Server error. Try again in a moment.".to_string()
+        } else {
+            "Network error.".to_string()
+        }
+    } else if e.is_request() {
+        "Configuration error: invalid server URL.".to_string()
+    } else {
+        "Network error.".to_string()
+    }
+}
+
+/// Map an [`ApiError`] to a short, user-facing message (no internal details).
+fn friendly_api_error(e: &ApiError) -> String {
+    match e {
+        ApiError::Http(inner) => friendly_reqwest_error(inner),
+        ApiError::EmptyResponse => {
+            "The model returned no visible output. Try switching mode or disabling thinking."
+                .to_string()
+        }
+        ApiError::NoUsableContent => {
+            "Image cannot be processed — the connected model does not support vision.".to_string()
+        }
+        ApiError::Cancelled => "Request cancelled.".to_string(),
+    }
+}
+
 /// Strip think blocks from raw LLM output and build the appropriate response.
 /// Logs completion with the given `label` (e.g. "complete", "stream complete").
 fn make_complete_response(
@@ -55,7 +90,8 @@ fn make_complete_response(
     let text = strip_think_blocks(raw);
     if text.is_empty() {
         WorkerResponse::Error {
-            message: "empty response after stripping think blocks".into(),
+            message: "The model returned no visible output. Try switching mode or disabling thinking."
+                .into(),
             request_id,
         }
     } else {
@@ -88,7 +124,7 @@ async fn run_non_streaming(
         Err(e) => {
             error!("worker: LLM error: {e}");
             WorkerResponse::Error {
-                message: e.to_string(),
+                message: friendly_api_error(&e),
                 request_id,
             }
         }
@@ -117,7 +153,7 @@ async fn run_streaming(
         Err(e) => {
             error!("worker: LLM stream error: {e}");
             let _ = resp_tx.send(WorkerResponse::Error {
-                message: e.to_string(),
+                message: friendly_api_error(&e),
                 request_id,
             });
             return;
@@ -180,7 +216,7 @@ async fn run_streaming(
             Err(e) => {
                 error!("worker: stream chunk error: {e}");
                 let _ = resp_tx.send(WorkerResponse::Error {
-                    message: e.to_string(),
+                    message: friendly_reqwest_error(&e),
                     request_id,
                 });
                 return;
@@ -395,14 +431,14 @@ mod tests {
         let raw = "<think>only thinking</think>";
         let r = make_complete_response(raw, ProcessMode::Summarize, 3, "complete");
         let msg = assert_error(&r, 3);
-        assert!(msg.contains("empty response"));
+        assert!(msg.contains("no visible output"));
     }
 
     #[test]
     fn make_complete_response_empty_input() {
         let r = make_complete_response("", ProcessMode::Translate, 4, "complete");
         let msg = assert_error(&r, 4);
-        assert!(msg.contains("empty response"));
+        assert!(msg.contains("no visible output"));
     }
 
     #[test]
@@ -411,7 +447,7 @@ mod tests {
         let r = make_complete_response(raw, ProcessMode::Translate, 5, "complete");
         // strip_think_blocks trims whitespace; empty after trim → error.
         let msg = assert_error(&r, 5);
-        assert!(msg.contains("empty response"));
+        assert!(msg.contains("no visible output"));
     }
 
     #[test]

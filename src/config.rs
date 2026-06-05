@@ -141,6 +141,7 @@ const DEFAULT_SUMMARIZE_IMAGE_PROMPT: &str =
 pub struct Config {
     api: ApiConfig,
     generation: GenerationConfig,
+    hotkey: HotkeyConfig,
     languages: LanguagesConfig,
     translate: TranslateConfig,
     rephrase: RephraseConfig,
@@ -178,6 +179,15 @@ struct GenerationConfig {
     max_tokens: Option<u32>,
     /// Per-request timeout in seconds (also the streaming connect timeout).
     request_timeout_secs: Option<u64>,
+}
+
+/// `[hotkey]` — hotkey behavior. No environment-variable equivalent; each falls
+/// back to a built-in default when unset.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct HotkeyConfig {
+    /// Double-tap detection window in milliseconds (default 500).
+    double_tap_timeout_ms: Option<u64>,
 }
 
 /// `[languages]` — substituted into `{primary_lang}` / `{secondary_lang}`.
@@ -283,6 +293,12 @@ impl Config {
     /// (`[generation].request_timeout_secs`).
     pub fn generation_request_timeout_secs(&self) -> Option<u64> {
         self.generation.request_timeout_secs
+    }
+
+    /// Configured double-tap timeout in milliseconds, if any
+    /// (`[hotkey].double_tap_timeout_ms`).
+    pub fn hotkey_double_tap_timeout_ms(&self) -> Option<u64> {
+        self.hotkey.double_tap_timeout_ms
     }
 
     /// Primary language name (`{primary_lang}`).
@@ -436,6 +452,23 @@ fn resolve_path() -> Option<PathBuf> {
 fn load_or_default() -> Config {
     let Some(path) = resolve_path() else {
         info!("config: no {CONFIG_FILENAME} found, using built-in defaults");
+        // Surface where a config file would be picked up so the app's
+        // configurability is discoverable without reading the docs. Printed to
+        // stderr unconditionally (not gated behind the tracing filter), since on
+        // a fresh install this is the user's only hint that the file exists.
+        // Note: we deliberately do NOT auto-create config.example.toml here — it
+        // ships simplified sample prompts that would override the richer built-in
+        // defaults, degrading output quality.
+        if let Some(candidate) =
+            env::current_exe().ok().and_then(|e| e.parent().map(|p| p.join(CONFIG_FILENAME)))
+        {
+            eprintln!(
+                "clip-llm: no config file found — using built-in defaults.\n\
+                 To customize, create {}\n\
+                 (or set CLIP_LLM_CONFIG to a file path). See config.example.toml for the schema.",
+                candidate.display()
+            );
+        }
         return Config::default();
     };
 
@@ -466,6 +499,7 @@ fn load_or_default() -> Config {
         Ok(contents) => match toml::from_str::<Config>(&contents) {
             Ok(config) => {
                 info!("config: loaded from {}", path.display());
+                eprintln!("clip-llm: config loaded from {}", path.display());
                 config
             }
             Err(e) => {
@@ -636,6 +670,19 @@ mod tests {
         assert_eq!(config.generation_temperature(), Some(0.7));
         assert_eq!(config.generation_max_tokens(), Some(2048));
         assert_eq!(config.generation_request_timeout_secs(), Some(60));
+    }
+
+    #[test]
+    fn hotkey_section_parses() {
+        let config: Config =
+            toml::from_str("[hotkey]\ndouble_tap_timeout_ms = 300\n").unwrap();
+        assert_eq!(config.hotkey_double_tap_timeout_ms(), Some(300));
+    }
+
+    #[test]
+    fn hotkey_default_is_absent() {
+        let config = Config::default();
+        assert_eq!(config.hotkey_double_tap_timeout_ms(), None);
     }
 
     #[test]

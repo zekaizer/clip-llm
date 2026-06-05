@@ -19,15 +19,17 @@ use crate::hotkey::{HotkeyDetector, TapAction, TapEvent};
 ///
 /// The loop is event-driven:
 /// - Idle: blocks on `recv()` (zero CPU).
-/// - During double-tap window (500ms): polls with `recv_timeout(50ms)`.
+/// - During the double-tap window (`double_tap_timeout`, default 500ms): polls
+///   with `recv_timeout(50ms)`.
 pub fn run(
     hotkey_rx: mpsc::Receiver<GlobalHotKeyEvent>,
     tap_tx: mpsc::Sender<TapEvent>,
     ctx: egui::Context,
     pre_show: Box<dyn Fn() + Send>,
     mouse_pos_fn: Box<dyn Fn() -> Option<(f64, f64)> + Send>,
+    double_tap_timeout: Duration,
 ) {
-    let mut detector = HotkeyDetector::new();
+    let mut detector = HotkeyDetector::with_timeout(double_tap_timeout);
     let mut pending_mouse_pos: Option<(f64, f64)> = None;
     info!("coordinator thread started");
 
@@ -120,6 +122,7 @@ mod tests {
                     c.fetch_add(1, Ordering::SeqCst);
                 }),
                 noop_mouse(),
+                Duration::from_millis(500),
             );
         });
 
@@ -141,7 +144,7 @@ mod tests {
         let ctx = egui::Context::default();
 
         let h = std::thread::spawn(move || {
-            run(hrx, ttx, ctx, Box::new(|| {}), noop_mouse());
+            run(hrx, ttx, ctx, Box::new(|| {}), noop_mouse(), Duration::from_millis(500));
         });
 
         htx.send(press_event()).unwrap();
@@ -163,7 +166,7 @@ mod tests {
         let ctx = egui::Context::default();
 
         let h = std::thread::spawn(move || {
-            run(hrx, ttx, ctx, Box::new(|| {}), noop_mouse());
+            run(hrx, ttx, ctx, Box::new(|| {}), noop_mouse(), Duration::from_millis(500));
         });
 
         htx.send(release_event()).unwrap();
@@ -180,7 +183,7 @@ mod tests {
         let ctx = egui::Context::default();
 
         let h = std::thread::spawn(move || {
-            run(hrx, ttx, ctx, Box::new(|| {}), noop_mouse());
+            run(hrx, ttx, ctx, Box::new(|| {}), noop_mouse(), Duration::from_millis(500));
         });
 
         drop(htx);

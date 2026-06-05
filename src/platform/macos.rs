@@ -37,7 +37,25 @@ const NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY: c_ulong = 1 << 8;
 
 #[link(name = "AppKit", kind = "framework")]
 unsafe extern "C" {
-    fn AXIsProcessTrusted() -> bool;
+    /// `options` is a `CFDictionaryRef`; passing `kAXTrustedCheckOptionPrompt =
+    /// true` makes macOS show the permission dialog and open System Settings.
+    fn AXIsProcessTrustedWithOptions(options: *const c_void) -> bool;
+}
+
+/// Check Accessibility trust using the prompting variant: when permission is not
+/// yet granted, macOS shows its standard dialog and opens System Settings >
+/// Privacy & Security > Accessibility, instead of failing silently.
+fn ax_is_process_trusted_with_prompt() -> bool {
+    use core_foundation::base::TCFType;
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::string::CFString;
+
+    // Documented underlying string value of kAXTrustedCheckOptionPrompt.
+    let key = CFString::from_static_string("AXTrustedCheckOptionPrompt");
+    let value = CFBoolean::true_value();
+    let options = CFDictionary::from_CFType_pairs(&[(key.as_CFType(), value.as_CFType())]);
+    unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef() as *const c_void) }
 }
 
 #[link(name = "objc", kind = "dylib")]
@@ -287,7 +305,7 @@ impl Platform for MacOsPlatform {
     /// Check if the process has Accessibility permission.
     /// Returns `AccessibilityDenied` if not granted.
     fn check_accessibility(&self) -> Result<(), PlatformError> {
-        let trusted = unsafe { AXIsProcessTrusted() };
+        let trusted = ax_is_process_trusted_with_prompt();
         if trusted {
             info!("accessibility permission granted");
             Ok(())
