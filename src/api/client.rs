@@ -205,6 +205,8 @@ struct LlmClientInner {
     model: String,
     api_key: Option<String>,
     custom_headers: Vec<(String, String)>,
+    temperature: f64,
+    max_tokens: u32,
     supports_vision: OnceCell<bool>,
     thinking_control: OnceCell<ThinkingControlMethod>,
 }
@@ -215,9 +217,510 @@ const PROBE_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAA
 #[derive(Clone)]
 pub struct LlmClient(Arc<LlmClientInner>);
 
+impl LlmClientInner {
+    /// Apply authentication headers (Bearer token and custom headers) to a request.
+    fn apply_auth(&self, mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Some(key) = &self.api_key {
+            req = req.bearer_auth(key);
+        }
+        for (name, value) in &self.custom_headers {
+            req = req.header(name, value);
+        }
+        req
+    }
+}
+
+/// Resolves a string setting by precedence: env var > config file > built-in
+/// default. An empty string from either source is treated as unset so it falls
+/// through rather than winning with a blank value.
+fn resolve_setting(env_value: Option<String>, config_value: Option<&str>, default: &str) -> String {
+    env_value
+        .filter(|s| !s.is_empty())
+        .or_else(|| config_value.filter(|s| !s.is_empty()).map(str::to_owned))
+        .unwrap_or_else(|| default.to_owned())
+}
+
+/// Parses the `CLIP_LLM_CUSTOM_HEADERS` env format: comma-separated `Key:Value`
+/// pairs, optionally wrapped in quotes.
+fn parse_custom_headers(raw: &str) -> Vec<(String, String)> {
+    raw.trim_matches('"')
+        .split(',')
+        .filter_map(|pair| {
+            let pair = pair.trim();
+            if pair.is_empty() {
+                return None;
+            }
+            let (key, value) = pair.split_once(':')?;
+            Some((key.trim().to_string(), value.trim().to_string()))
+        })
+        .collect()
+}
+
+impl LlmClient {
+    pub fn new() -> Result<Self, ApiError> {
+        // Precedence for every setting: env var > config file > built-in default.
+        let config = crate::config::get();
+
+        let base = resolve_setting(
+            env::var("CLIP_LLM_API_ENDPOINT").ok(),
+            config.api_endpoint(),
+            DEFAULT_API_ENDPOINT,
+        );
+        let endpoint = format!("{}{}", base.trim_end_matches('/'), CHAT_COMPLETIONS_PATH);
+        let model = resolve_setting(
+            env::var("CLIP_LLM_MODEL").ok(),
+            config.api_model(),
+            DEFAULT_MODEL_NAME,
+        );
+        // Empty string = unset, so it never produces a blank Bearer token.
+        let api_key = env::var("CLIP_LLM_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty())
+            .or_else(|| config.api_key().filter(|k| !k.is_empty()).map(str::to_owned));
+        // Empty env var = unset, so it does not silently suppress configured headers.
+        let custom_headers: Vec<(String, String)> =
+            match env::var("CLIP_LLM_CUSTOM_HEADERS").ok().filter(|s| !s.is_empty()) {
+                Some(raw) => parse_custom_headers(&raw),
+                None => config
+                    .api_headers()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            };
+
+        // Generation parameters: config file > built-in default (no env var).
+        let temperature = config.generation_temperature().unwrap_or(TEMPERATURE);
+        let max_tokens = config.generation_max_tokens().unwrap_or(MAX_TOKENS);
+        let timeout = Duration::from_secs(
+            config
+                .generation_request_timeout_secs()
+                .unwrap_or(REQUEST_TIMEOUT_SECS),
+        );
+
+        info!(
+            "endpoint={endpoint}, model={model}, api_key={}, custom_headers={}, temperature={temperature}, max_tokens={max_tokens}, timeout={}s",
+            if api_key.is_some() { "set" } else { "unset" },
+            if custom_headers.is_empty() {
+                "none".to_string()
+            } else {
+                custom_headers.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(",")
+            },
+            timeout.as_secs(),
+        );
+
+        let client = Client::builder().timeout(timeout).build()?;
+        // Streaming client: connect timeout only, no total body timeout.
+        let streaming_client = Client::builder().connect_timeout(timeout).build()?;
+        Ok(Self(Arc::new(LlmClientInner {
+            client,
+            streaming_client,
+            endpoint,
+            model,
+            api_key,
+            custom_headers,
+            temperature,
+            max_tokens,
+            supports_vision: OnceCell::new(),
+            thinking_control: OnceCell::new(),
+        })))
+    }
+
+    /// Probe whether the model supports vision by sending a tiny image request.
+    /// Result is cached in `OnceCell`. Network/server errors skip caching (retry next time).
+    pub async fn probe_vision(&self) -> bool {
+        let inner = &self.0;
+        if let Some(&cached) = inner.supports_vision.get() {
+            return cached;
+        }
+
+        let data_uri = format!("data:image/png;base64,{PROBE_PNG_BASE64}");
+        let body = ChatRequest {
+            model: &inner.model,
+            messages: vec![Message {
+                role: "user",
+                content: MessageContent::Parts(vec![
+                    ContentPart::Text {
+                        text: "Describe this image in one word.".to_owned(),
+                    },
+                    ContentPart::ImageUrl {
+                        image_url: ImageUrl { url: data_uri },
+                    },
+                ]),
+            }],
+            temperature: 0.0,
+            max_tokens: 1,
+            stream: None,
+            chat_template_kwargs: None,
+        };
+
+        info!("probing model vision support...");
+        if tracing::enabled!(tracing::Level::TRACE)
+            && let Ok(json) = serde_json::to_string_pretty(&body)
+        {
+            trace!("vision probe request:\n{json}");
+        }
+        let req = inner.apply_auth(inner.client.post(&inner.endpoint).json(&body));
+
+        match req.send().await {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                let supported = (200..300).contains(&status);
+                info!("model vision support: {supported} (HTTP {status})");
+                let _ = inner.supports_vision.set(supported);
+                supported
+            }
+            Err(e) => {
+                warn!("vision probe failed (will retry): {e}");
+                false
+            }
+        }
+    }
+
+    /// Probe whether the model supports controllable thinking mode.
+    /// Tries `chat_template_kwargs` first, then falls back to system prompt tag.
+    /// Result is cached in `OnceCell`. Network errors skip caching (retry next time).
+    pub async fn probe_thinking(&self) -> ThinkingControlMethod {
+        let inner = &self.0;
+        if let Some(&cached) = inner.thinking_control.get() {
+            return cached;
+        }
+
+        info!("probing model thinking support...");
+
+        // Step 1: try chat_template_kwargs with enable_thinking=true
+        let method = match self.probe_thinking_kwargs(inner).await {
+            Some(method) => method,
+            None => return ThinkingControlMethod::Unsupported, // network error, don't cache
+        };
+
+        info!("thinking control method: {method:?}");
+        let _ = inner.thinking_control.set(method);
+        method
+    }
+
+    /// Try `chat_template_kwargs: { enable_thinking: true }`.
+    /// Returns `None` on network error (caller should not cache).
+    async fn probe_thinking_kwargs(&self, inner: &LlmClientInner) -> Option<ThinkingControlMethod> {
+        let body = ChatRequest {
+            model: &inner.model,
+            messages: vec![Message {
+                role: "user",
+                content: MessageContent::Text("Say hi."),
+            }],
+            temperature: 0.0,
+            max_tokens: 128,
+            stream: None,
+            chat_template_kwargs: Some(ChatTemplateKwargs { enable_thinking: true }),
+        };
+
+        if tracing::enabled!(tracing::Level::TRACE)
+            && let Ok(json) = serde_json::to_string_pretty(&body)
+        {
+            trace!("thinking kwargs probe request:\n{json}");
+        }
+        let req = inner.apply_auth(inner.client.post(&inner.endpoint).json(&body));
+
+        match req.send().await {
+            Ok(resp) if resp.status().is_success() => {
+                trace!("thinking kwargs probe response: HTTP {}", resp.status().as_u16());
+                // HTTP 200 + kwargs accepted = model supports chat_template_kwargs.
+                // Don't require <think> in the response — the model may skip thinking
+                // for trivial prompts even with enable_thinking=true.
+                Some(ThinkingControlMethod::ChatTemplateKwargs)
+            }
+            Ok(resp) if resp.status().is_server_error() => {
+                // 5xx: transient server error — don't cache, retry next time.
+                warn!(
+                    "thinking kwargs probe got {} (will retry)",
+                    resp.status().as_u16()
+                );
+                None
+            }
+            Ok(resp) => {
+                trace!("thinking kwargs probe rejected: HTTP {}", resp.status().as_u16());
+                // 4xx: server rejected the kwargs field — try prompt tag fallback.
+                self.probe_thinking_prompt_tag(inner).await
+            }
+            Err(e) => {
+                warn!("thinking probe failed (will retry): {e}");
+                None
+            }
+        }
+    }
+
+    /// Fallback: try `/think` tag in the system prompt.
+    /// Returns `None` on network error.
+    async fn probe_thinking_prompt_tag(
+        &self,
+        inner: &LlmClientInner,
+    ) -> Option<ThinkingControlMethod> {
+        let body = ChatRequest {
+            model: &inner.model,
+            messages: vec![
+                Message {
+                    role: "system",
+                    content: MessageContent::Text("/think"),
+                },
+                Message {
+                    role: "user",
+                    content: MessageContent::Text("Say hi."),
+                },
+            ],
+            temperature: 0.0,
+            max_tokens: 128,
+            stream: None,
+            chat_template_kwargs: None,
+        };
+
+        if tracing::enabled!(tracing::Level::TRACE)
+            && let Ok(json) = serde_json::to_string_pretty(&body)
+        {
+            trace!("thinking prompt-tag probe request:\n{json}");
+        }
+        let req = inner.apply_auth(inner.client.post(&inner.endpoint).json(&body));
+
+        match req.send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let text = resp.text().await.unwrap_or_default();
+                trace!("thinking prompt-tag probe response:\n{text}");
+                if let Ok(chat) = serde_json::from_str::<ChatResponse>(&text) {
+                    let content = chat
+                        .choices
+                        .first()
+                        .map(|c| c.message.content.as_str())
+                        .unwrap_or("");
+                    if content.contains("<think>") {
+                        Some(ThinkingControlMethod::SystemPromptTag)
+                    } else {
+                        Some(ThinkingControlMethod::Unsupported)
+                    }
+                } else {
+                    Some(ThinkingControlMethod::Unsupported)
+                }
+            }
+            Ok(resp) if resp.status().is_server_error() => {
+                warn!(
+                    "thinking prompt-tag probe got {} (will retry)",
+                    resp.status().as_u16()
+                );
+                None
+            }
+            Ok(_) => Some(ThinkingControlMethod::Unsupported),
+            Err(e) => {
+                warn!("thinking prompt-tag probe failed (will retry): {e}");
+                None
+            }
+        }
+    }
+
+    /// Build user message content: multimodal parts if images should be included,
+    /// otherwise plain text.
+    fn build_user_content<'a>(
+        content: &'a ClipboardContent,
+        use_images: bool,
+    ) -> MessageContent<'a> {
+        let text = content.text.as_deref().unwrap_or("");
+
+        if !use_images {
+            return MessageContent::Text(text);
+        }
+
+        let mut parts = Vec::with_capacity(1 + content.images.len());
+        if !text.is_empty() {
+            parts.push(ContentPart::Text {
+                text: text.to_owned(),
+            });
+        }
+        for png_bytes in &content.images {
+            use base64::Engine;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(png_bytes.as_ref());
+            parts.push(ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: format!("data:image/png;base64,{b64}"),
+                },
+            });
+        }
+        MessageContent::Parts(parts)
+    }
+
+    /// Resolve thinking mode into API-level controls based on probe result.
+    fn resolve_thinking(
+        thinking_mode: ThinkingMode,
+        control: ThinkingControlMethod,
+    ) -> (Option<&'static str>, Option<ChatTemplateKwargs>) {
+        match (thinking_mode, control) {
+            (_, ThinkingControlMethod::Unsupported) => (None, None),
+            (ThinkingMode::Think, ThinkingControlMethod::ChatTemplateKwargs) => {
+                (None, Some(ChatTemplateKwargs { enable_thinking: true }))
+            }
+            (ThinkingMode::NoThink, ThinkingControlMethod::ChatTemplateKwargs) => {
+                (None, Some(ChatTemplateKwargs { enable_thinking: false }))
+            }
+            (ThinkingMode::Think, ThinkingControlMethod::SystemPromptTag) => {
+                (Some("/think\n"), None)
+            }
+            (ThinkingMode::NoThink, ThinkingControlMethod::SystemPromptTag) => {
+                (Some("/no_think\n"), None)
+            }
+        }
+    }
+
+    /// Build and send a chat completion request. Probes vision and thinking support,
+    /// constructs the request body, applies auth, and returns the raw response.
+    /// `stream=true` uses the no-timeout streaming client; `false` uses the regular client.
+    async fn build_and_send(
+        &self,
+        content: &ClipboardContent,
+        mode: ProcessMode,
+        rephrase_params: RephraseParams,
+        thinking_mode: ThinkingMode,
+        stream: bool,
+    ) -> Result<reqwest::Response, ApiError> {
+        let inner = &self.0;
+        let vision = self.probe_vision().await;
+        let thinking_control = self.probe_thinking().await;
+        let (sys_prefix, template_kwargs) =
+            Self::resolve_thinking(thinking_mode, thinking_control);
+
+        let use_images =
+            mode == ProcessMode::Summarize && vision && content.has_images();
+        let image_only = use_images && !content.has_text();
+
+        // Image-only clipboard but model lacks vision — nothing useful to send.
+        if !content.has_text() && content.has_images() && !vision {
+            return Err(ApiError::NoUsableContent);
+        }
+
+        let base_prompt = mode.system_prompt(rephrase_params, image_only);
+        let sys_prompt = if let Some(prefix) = sys_prefix {
+            format!("{prefix}{base_prompt}")
+        } else {
+            base_prompt
+        };
+
+        let body = ChatRequest {
+            model: &inner.model,
+            messages: vec![
+                Message {
+                    role: "system",
+                    content: MessageContent::Text(&sys_prompt),
+                },
+                Message {
+                    role: "user",
+                    content: Self::build_user_content(content, use_images),
+                },
+            ],
+            temperature: inner.temperature,
+            max_tokens: inner.max_tokens,
+            stream: if stream { Some(true) } else { None },
+            chat_template_kwargs: template_kwargs,
+        };
+
+        if tracing::enabled!(tracing::Level::TRACE)
+            && let Ok(json) = serde_json::to_string_pretty(&body)
+        {
+            trace!("LLM request body:\n{json}");
+        }
+        let client = if stream { &inner.streaming_client } else { &inner.client };
+        let req = inner.apply_auth(client.post(&inner.endpoint).json(&body));
+        Ok(req.send().await?.error_for_status()?)
+    }
+
+    /// Send content to the vLLM server and return the raw response content.
+    /// Think-block stripping is handled separately by `response::strip_think_blocks`.
+    pub async fn complete(
+        &self,
+        content: &ClipboardContent,
+        mode: ProcessMode,
+        rephrase_params: RephraseParams,
+        thinking_mode: ThinkingMode,
+    ) -> Result<String, ApiError> {
+        let inner = &self.0;
+        info!("sending request to {}", inner.endpoint);
+        debug!("model={}, temperature={}, max_tokens={}", inner.model, TEMPERATURE, MAX_TOKENS);
+
+        let resp = self
+            .build_and_send(content, mode, rephrase_params, thinking_mode, false)
+            .await?;
+        let text = resp.text().await?;
+        if tracing::enabled!(tracing::Level::TRACE) {
+            if let Ok(pretty) = serde_json::from_str::<serde_json::Value>(&text) {
+                trace!(
+                    "LLM response:\n{}",
+                    serde_json::to_string_pretty(&pretty).unwrap_or_default()
+                );
+            } else {
+                trace!("LLM response (raw):\n{text}");
+            }
+        }
+        let chat: ChatResponse = serde_json::from_str(&text).map_err(|_| ApiError::EmptyResponse)?;
+
+        let resp_content = chat
+            .choices
+            .into_iter()
+            .next()
+            .ok_or(ApiError::EmptyResponse)?
+            .message
+            .content;
+
+        if resp_content.is_empty() {
+            return Err(ApiError::EmptyResponse);
+        }
+
+        info!("received response ({} chars)", resp_content.len());
+        debug!("response content: {resp_content}");
+        Ok(resp_content)
+    }
+
+    /// Start a streaming request. Returns the raw `reqwest::Response` whose body
+    /// the caller reads via `chunk()` and feeds into [`SseParser`].
+    pub async fn complete_stream(
+        &self,
+        content: &ClipboardContent,
+        mode: ProcessMode,
+        rephrase_params: RephraseParams,
+        thinking_mode: ThinkingMode,
+    ) -> Result<reqwest::Response, ApiError> {
+        let inner = &self.0;
+        info!("sending streaming request to {}", inner.endpoint);
+        self.build_and_send(content, mode, rephrase_params, thinking_mode, true)
+            .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_setting_precedence() {
+        // env var wins over config and default.
+        assert_eq!(
+            resolve_setting(Some("env".to_string()), Some("cfg"), "def"),
+            "env"
+        );
+        // config wins when env is absent.
+        assert_eq!(resolve_setting(None, Some("cfg"), "def"), "cfg");
+        // default when neither is set.
+        assert_eq!(resolve_setting(None, None, "def"), "def");
+        // an empty env string is treated as unset and falls through to config.
+        assert_eq!(resolve_setting(Some(String::new()), Some("cfg"), "def"), "cfg");
+        // an empty config string is treated as unset and falls through to default.
+        assert_eq!(resolve_setting(Some(String::new()), Some(""), "def"), "def");
+    }
+
+    #[test]
+    fn parse_custom_headers_pairs() {
+        let parsed = parse_custom_headers("\"X-A:1, X-B:2\"");
+        assert_eq!(
+            parsed,
+            vec![
+                ("X-A".to_string(), "1".to_string()),
+                ("X-B".to_string(), "2".to_string()),
+            ]
+        );
+        assert!(parse_custom_headers("").is_empty());
+    }
 
     #[test]
     fn parse_valid_response() {
@@ -532,432 +1035,5 @@ mod tests {
         );
         assert_eq!(prefix.unwrap(), "/no_think\n");
         assert!(kwargs.is_none());
-    }
-}
-
-impl LlmClientInner {
-    /// Apply authentication headers (Bearer token and custom headers) to a request.
-    fn apply_auth(&self, mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        if let Some(key) = &self.api_key {
-            req = req.bearer_auth(key);
-        }
-        for (name, value) in &self.custom_headers {
-            req = req.header(name, value);
-        }
-        req
-    }
-}
-
-impl LlmClient {
-    pub fn new() -> Result<Self, ApiError> {
-        let base = env::var("CLIP_LLM_API_ENDPOINT")
-            .unwrap_or_else(|_| DEFAULT_API_ENDPOINT.to_string());
-        let endpoint = format!("{}{}", base.trim_end_matches('/'), CHAT_COMPLETIONS_PATH);
-        let model =
-            env::var("CLIP_LLM_MODEL").unwrap_or_else(|_| DEFAULT_MODEL_NAME.to_string());
-        let api_key = env::var("CLIP_LLM_API_KEY").ok();
-        let custom_headers: Vec<(String, String)> = env::var("CLIP_LLM_CUSTOM_HEADERS")
-            .unwrap_or_default()
-            .trim_matches('"')
-            .split(',')
-            .filter_map(|pair| {
-                let pair = pair.trim();
-                if pair.is_empty() {
-                    return None;
-                }
-                let (key, value) = pair.split_once(':')?;
-                Some((key.trim().to_string(), value.trim().to_string()))
-            })
-            .collect();
-
-        info!(
-            "endpoint={endpoint}, model={model}, api_key={}, custom_headers={}",
-            if api_key.is_some() { "set" } else { "unset" },
-            if custom_headers.is_empty() {
-                "none".to_string()
-            } else {
-                custom_headers.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(",")
-            },
-        );
-
-        let client = Client::builder()
-            .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
-            .build()?;
-        // Streaming client: connect timeout only, no total body timeout.
-        let streaming_client = Client::builder()
-            .connect_timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
-            .build()?;
-        Ok(Self(Arc::new(LlmClientInner {
-            client,
-            streaming_client,
-            endpoint,
-            model,
-            api_key,
-            custom_headers,
-            supports_vision: OnceCell::new(),
-            thinking_control: OnceCell::new(),
-        })))
-    }
-
-    /// Probe whether the model supports vision by sending a tiny image request.
-    /// Result is cached in `OnceCell`. Network/server errors skip caching (retry next time).
-    pub async fn probe_vision(&self) -> bool {
-        let inner = &self.0;
-        if let Some(&cached) = inner.supports_vision.get() {
-            return cached;
-        }
-
-        let data_uri = format!("data:image/png;base64,{PROBE_PNG_BASE64}");
-        let body = ChatRequest {
-            model: &inner.model,
-            messages: vec![Message {
-                role: "user",
-                content: MessageContent::Parts(vec![
-                    ContentPart::Text {
-                        text: "Describe this image in one word.".to_owned(),
-                    },
-                    ContentPart::ImageUrl {
-                        image_url: ImageUrl { url: data_uri },
-                    },
-                ]),
-            }],
-            temperature: 0.0,
-            max_tokens: 1,
-            stream: None,
-            chat_template_kwargs: None,
-        };
-
-        info!("probing model vision support...");
-        if tracing::enabled!(tracing::Level::TRACE)
-            && let Ok(json) = serde_json::to_string_pretty(&body)
-        {
-            trace!("vision probe request:\n{json}");
-        }
-        let req = inner.apply_auth(inner.client.post(&inner.endpoint).json(&body));
-
-        match req.send().await {
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                let supported = (200..300).contains(&status);
-                info!("model vision support: {supported} (HTTP {status})");
-                let _ = inner.supports_vision.set(supported);
-                supported
-            }
-            Err(e) => {
-                warn!("vision probe failed (will retry): {e}");
-                false
-            }
-        }
-    }
-
-    /// Probe whether the model supports controllable thinking mode.
-    /// Tries `chat_template_kwargs` first, then falls back to system prompt tag.
-    /// Result is cached in `OnceCell`. Network errors skip caching (retry next time).
-    pub async fn probe_thinking(&self) -> ThinkingControlMethod {
-        let inner = &self.0;
-        if let Some(&cached) = inner.thinking_control.get() {
-            return cached;
-        }
-
-        info!("probing model thinking support...");
-
-        // Step 1: try chat_template_kwargs with enable_thinking=true
-        let method = match self.probe_thinking_kwargs(inner).await {
-            Some(method) => method,
-            None => return ThinkingControlMethod::Unsupported, // network error, don't cache
-        };
-
-        info!("thinking control method: {method:?}");
-        let _ = inner.thinking_control.set(method);
-        method
-    }
-
-    /// Try `chat_template_kwargs: { enable_thinking: true }`.
-    /// Returns `None` on network error (caller should not cache).
-    async fn probe_thinking_kwargs(&self, inner: &LlmClientInner) -> Option<ThinkingControlMethod> {
-        let body = ChatRequest {
-            model: &inner.model,
-            messages: vec![Message {
-                role: "user",
-                content: MessageContent::Text("Say hi."),
-            }],
-            temperature: 0.0,
-            max_tokens: 128,
-            stream: None,
-            chat_template_kwargs: Some(ChatTemplateKwargs { enable_thinking: true }),
-        };
-
-        if tracing::enabled!(tracing::Level::TRACE)
-            && let Ok(json) = serde_json::to_string_pretty(&body)
-        {
-            trace!("thinking kwargs probe request:\n{json}");
-        }
-        let req = inner.apply_auth(inner.client.post(&inner.endpoint).json(&body));
-
-        match req.send().await {
-            Ok(resp) if resp.status().is_success() => {
-                trace!("thinking kwargs probe response: HTTP {}", resp.status().as_u16());
-                // HTTP 200 + kwargs accepted = model supports chat_template_kwargs.
-                // Don't require <think> in the response — the model may skip thinking
-                // for trivial prompts even with enable_thinking=true.
-                Some(ThinkingControlMethod::ChatTemplateKwargs)
-            }
-            Ok(resp) if resp.status().is_server_error() => {
-                // 5xx: transient server error — don't cache, retry next time.
-                warn!(
-                    "thinking kwargs probe got {} (will retry)",
-                    resp.status().as_u16()
-                );
-                None
-            }
-            Ok(resp) => {
-                trace!("thinking kwargs probe rejected: HTTP {}", resp.status().as_u16());
-                // 4xx: server rejected the kwargs field — try prompt tag fallback.
-                self.probe_thinking_prompt_tag(inner).await
-            }
-            Err(e) => {
-                warn!("thinking probe failed (will retry): {e}");
-                None
-            }
-        }
-    }
-
-    /// Fallback: try `/think` tag in the system prompt.
-    /// Returns `None` on network error.
-    async fn probe_thinking_prompt_tag(
-        &self,
-        inner: &LlmClientInner,
-    ) -> Option<ThinkingControlMethod> {
-        let body = ChatRequest {
-            model: &inner.model,
-            messages: vec![
-                Message {
-                    role: "system",
-                    content: MessageContent::Text("/think"),
-                },
-                Message {
-                    role: "user",
-                    content: MessageContent::Text("Say hi."),
-                },
-            ],
-            temperature: 0.0,
-            max_tokens: 128,
-            stream: None,
-            chat_template_kwargs: None,
-        };
-
-        if tracing::enabled!(tracing::Level::TRACE)
-            && let Ok(json) = serde_json::to_string_pretty(&body)
-        {
-            trace!("thinking prompt-tag probe request:\n{json}");
-        }
-        let req = inner.apply_auth(inner.client.post(&inner.endpoint).json(&body));
-
-        match req.send().await {
-            Ok(resp) if resp.status().is_success() => {
-                let text = resp.text().await.unwrap_or_default();
-                trace!("thinking prompt-tag probe response:\n{text}");
-                if let Ok(chat) = serde_json::from_str::<ChatResponse>(&text) {
-                    let content = chat
-                        .choices
-                        .first()
-                        .map(|c| c.message.content.as_str())
-                        .unwrap_or("");
-                    if content.contains("<think>") {
-                        Some(ThinkingControlMethod::SystemPromptTag)
-                    } else {
-                        Some(ThinkingControlMethod::Unsupported)
-                    }
-                } else {
-                    Some(ThinkingControlMethod::Unsupported)
-                }
-            }
-            Ok(resp) if resp.status().is_server_error() => {
-                warn!(
-                    "thinking prompt-tag probe got {} (will retry)",
-                    resp.status().as_u16()
-                );
-                None
-            }
-            Ok(_) => Some(ThinkingControlMethod::Unsupported),
-            Err(e) => {
-                warn!("thinking prompt-tag probe failed (will retry): {e}");
-                None
-            }
-        }
-    }
-
-    /// Build user message content: multimodal parts if images should be included,
-    /// otherwise plain text.
-    fn build_user_content<'a>(
-        content: &'a ClipboardContent,
-        use_images: bool,
-    ) -> MessageContent<'a> {
-        let text = content.text.as_deref().unwrap_or("");
-
-        if !use_images {
-            return MessageContent::Text(text);
-        }
-
-        let mut parts = Vec::with_capacity(1 + content.images.len());
-        if !text.is_empty() {
-            parts.push(ContentPart::Text {
-                text: text.to_owned(),
-            });
-        }
-        for png_bytes in &content.images {
-            use base64::Engine;
-            let b64 = base64::engine::general_purpose::STANDARD.encode(png_bytes.as_ref());
-            parts.push(ContentPart::ImageUrl {
-                image_url: ImageUrl {
-                    url: format!("data:image/png;base64,{b64}"),
-                },
-            });
-        }
-        MessageContent::Parts(parts)
-    }
-
-    /// Resolve thinking mode into API-level controls based on probe result.
-    fn resolve_thinking(
-        thinking_mode: ThinkingMode,
-        control: ThinkingControlMethod,
-    ) -> (Option<&'static str>, Option<ChatTemplateKwargs>) {
-        match (thinking_mode, control) {
-            (_, ThinkingControlMethod::Unsupported) => (None, None),
-            (ThinkingMode::Think, ThinkingControlMethod::ChatTemplateKwargs) => {
-                (None, Some(ChatTemplateKwargs { enable_thinking: true }))
-            }
-            (ThinkingMode::NoThink, ThinkingControlMethod::ChatTemplateKwargs) => {
-                (None, Some(ChatTemplateKwargs { enable_thinking: false }))
-            }
-            (ThinkingMode::Think, ThinkingControlMethod::SystemPromptTag) => {
-                (Some("/think\n"), None)
-            }
-            (ThinkingMode::NoThink, ThinkingControlMethod::SystemPromptTag) => {
-                (Some("/no_think\n"), None)
-            }
-        }
-    }
-
-    /// Build and send a chat completion request. Probes vision and thinking support,
-    /// constructs the request body, applies auth, and returns the raw response.
-    /// `stream=true` uses the no-timeout streaming client; `false` uses the regular client.
-    async fn build_and_send(
-        &self,
-        content: &ClipboardContent,
-        mode: ProcessMode,
-        rephrase_params: RephraseParams,
-        thinking_mode: ThinkingMode,
-        stream: bool,
-    ) -> Result<reqwest::Response, ApiError> {
-        let inner = &self.0;
-        let vision = self.probe_vision().await;
-        let thinking_control = self.probe_thinking().await;
-        let (sys_prefix, template_kwargs) =
-            Self::resolve_thinking(thinking_mode, thinking_control);
-
-        let use_images =
-            mode == ProcessMode::Summarize && vision && content.has_images();
-        let image_only = use_images && !content.has_text();
-
-        // Image-only clipboard but model lacks vision — nothing useful to send.
-        if !content.has_text() && content.has_images() && !vision {
-            return Err(ApiError::NoUsableContent);
-        }
-
-        let base_prompt = mode.system_prompt(rephrase_params, image_only);
-        let sys_prompt = if let Some(prefix) = sys_prefix {
-            format!("{prefix}{base_prompt}")
-        } else {
-            base_prompt
-        };
-
-        let body = ChatRequest {
-            model: &inner.model,
-            messages: vec![
-                Message {
-                    role: "system",
-                    content: MessageContent::Text(&sys_prompt),
-                },
-                Message {
-                    role: "user",
-                    content: Self::build_user_content(content, use_images),
-                },
-            ],
-            temperature: TEMPERATURE,
-            max_tokens: MAX_TOKENS,
-            stream: if stream { Some(true) } else { None },
-            chat_template_kwargs: template_kwargs,
-        };
-
-        if tracing::enabled!(tracing::Level::TRACE)
-            && let Ok(json) = serde_json::to_string_pretty(&body)
-        {
-            trace!("LLM request body:\n{json}");
-        }
-        let client = if stream { &inner.streaming_client } else { &inner.client };
-        let req = inner.apply_auth(client.post(&inner.endpoint).json(&body));
-        Ok(req.send().await?.error_for_status()?)
-    }
-
-    /// Send content to the vLLM server and return the raw response content.
-    /// Think-block stripping is handled separately by `response::strip_think_blocks`.
-    pub async fn complete(
-        &self,
-        content: &ClipboardContent,
-        mode: ProcessMode,
-        rephrase_params: RephraseParams,
-        thinking_mode: ThinkingMode,
-    ) -> Result<String, ApiError> {
-        let inner = &self.0;
-        info!("sending request to {}", inner.endpoint);
-        debug!("model={}, temperature={}, max_tokens={}", inner.model, TEMPERATURE, MAX_TOKENS);
-
-        let resp = self
-            .build_and_send(content, mode, rephrase_params, thinking_mode, false)
-            .await?;
-        let text = resp.text().await?;
-        if tracing::enabled!(tracing::Level::TRACE) {
-            if let Ok(pretty) = serde_json::from_str::<serde_json::Value>(&text) {
-                trace!(
-                    "LLM response:\n{}",
-                    serde_json::to_string_pretty(&pretty).unwrap_or_default()
-                );
-            } else {
-                trace!("LLM response (raw):\n{text}");
-            }
-        }
-        let chat: ChatResponse = serde_json::from_str(&text).map_err(|_| ApiError::EmptyResponse)?;
-
-        let resp_content = chat
-            .choices
-            .into_iter()
-            .next()
-            .ok_or(ApiError::EmptyResponse)?
-            .message
-            .content;
-
-        if resp_content.is_empty() {
-            return Err(ApiError::EmptyResponse);
-        }
-
-        info!("received response ({} chars)", resp_content.len());
-        debug!("response content: {resp_content}");
-        Ok(resp_content)
-    }
-
-    /// Start a streaming request. Returns the raw `reqwest::Response` whose body
-    /// the caller reads via `chunk()` and feeds into [`SseParser`].
-    pub async fn complete_stream(
-        &self,
-        content: &ClipboardContent,
-        mode: ProcessMode,
-        rephrase_params: RephraseParams,
-        thinking_mode: ThinkingMode,
-    ) -> Result<reqwest::Response, ApiError> {
-        let inner = &self.0;
-        info!("sending streaming request to {}", inner.endpoint);
-        self.build_and_send(content, mode, rephrase_params, thinking_mode, true)
-            .await
     }
 }

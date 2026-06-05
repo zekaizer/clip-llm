@@ -388,7 +388,7 @@ dependencies = [
 
 [[package]]
 name = "clip-llm"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "arboard",
  "base64",
@@ -406,6 +406,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "tray-icon",
