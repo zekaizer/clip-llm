@@ -147,7 +147,8 @@ pub struct Config {
 }
 
 /// `[api]` — connection settings. Each is an alternative to the matching
-/// `CLIP_LLM_*` environment variable, which still wins when set.
+/// `CLIP_LLM_*` environment variable, which still wins when set (see `streaming`
+/// for the one asymmetric case).
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct ApiConfig {
@@ -157,7 +158,9 @@ struct ApiConfig {
     model: Option<String>,
     /// Bearer token (alternative to `CLIP_LLM_API_KEY`).
     api_key: Option<String>,
-    /// Whether to use SSE streaming (alternative to the inverse `CLIP_LLM_NO_STREAM`).
+    /// Whether to use SSE streaming. `CLIP_LLM_NO_STREAM`, when set, forces this
+    /// off, but there is no environment variable that forces it on — so a
+    /// `streaming = false` here can only be re-enabled by editing the file.
     streaming: Option<bool>,
     /// `[api.headers]` — custom HTTP headers (alternative to `CLIP_LLM_CUSTOM_HEADERS`).
     headers: BTreeMap<String, String>,

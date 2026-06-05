@@ -36,9 +36,11 @@ System-wide LLM clipboard assistant. Captures text via global hotkey, sends it t
 | `RUST_LOG` | `clip_llm=info` | Log level filter ([`tracing_subscriber::EnvFilter`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html)) |
 | `DIAG_MOCK` | *(unset)* | Use mock LLM responses (requires `--features diagnostics`) |
 
-The connection and streaming variables (`CLIP_LLM_API_ENDPOINT`, `CLIP_LLM_MODEL`,
-`CLIP_LLM_API_KEY`, `CLIP_LLM_CUSTOM_HEADERS`, `CLIP_LLM_NO_STREAM`) can also be set
-in `config.toml` under `[api]`. When both are present the environment variable wins.
+The connection variables (`CLIP_LLM_API_ENDPOINT`, `CLIP_LLM_MODEL`,
+`CLIP_LLM_API_KEY`, `CLIP_LLM_CUSTOM_HEADERS`) can also be set in `config.toml`
+under `[api]`, and the environment variable wins when both are present. Streaming
+is `[api].streaming = true/false`; `CLIP_LLM_NO_STREAM`, when set, forces it off
+(there is no environment variable that forces streaming on).
 
 See [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) for detailed specifications.
 
@@ -56,7 +58,8 @@ kinds of settings:
 
 - **`[api]`** — connection settings (endpoint, model, API key, custom headers,
   streaming). Each mirrors a `CLIP_LLM_*` environment variable; the precedence is
-  **env var > config file > built-in default**.
+  **env var > config file > built-in default**. (Exception: `CLIP_LLM_NO_STREAM`
+  only forces streaming off — it cannot force `streaming = false` back on.)
 - **prompts** — per-mode system prompts, with placeholders substituted at runtime:
   - `{primary_lang}` / `{secondary_lang}` — in the `[translate]` prompt
   - `{primary_lang}` — in the `[summarize]` prompts (summaries are primary-language only)
