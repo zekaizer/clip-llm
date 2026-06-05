@@ -215,326 +215,6 @@ const PROBE_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAA
 #[derive(Clone)]
 pub struct LlmClient(Arc<LlmClientInner>);
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_valid_response() {
-        let json = r#"{"choices":[{"message":{"content":"hello"}}]}"#;
-        let resp: ChatResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.choices[0].message.content, "hello");
-    }
-
-    #[test]
-    fn parse_empty_choices() {
-        let json = r#"{"choices":[]}"#;
-        let resp: ChatResponse = serde_json::from_str(json).unwrap();
-        assert!(resp.choices.is_empty());
-    }
-
-    #[test]
-    fn parse_ignores_extra_fields() {
-        let json = r#"{"id":"x","choices":[{"index":0,"message":{"role":"assistant","content":"hi"}}]}"#;
-        let resp: ChatResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.choices[0].message.content, "hi");
-    }
-
-    // --- SseParser tests ---
-
-    #[test]
-    fn sse_single_event() {
-        let mut p = SseParser::new();
-        let events =
-            p.feed(br#"data: {"choices":[{"delta":{"content":"hello"}}]}"#.as_ref());
-        // No newline yet — line is incomplete.
-        assert!(events.is_empty());
-
-        let events = p.feed(b"\n");
-        assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], SseEvent::Content(s) if s == "hello"));
-    }
-
-    #[test]
-    fn sse_done_event() {
-        let mut p = SseParser::new();
-        let events = p.feed(b"data: [DONE]\n");
-        assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], SseEvent::Done));
-    }
-
-    #[test]
-    fn sse_split_across_chunks() {
-        let mut p = SseParser::new();
-        assert!(p.feed(br#"data: {"choices":[{"de"#).is_empty());
-        let events = p.feed(br#"lta":{"content":"hi"}}]}"#.as_ref());
-        assert!(events.is_empty()); // still no newline
-
-        let events = p.feed(b"\n");
-        assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], SseEvent::Content(s) if s == "hi"));
-    }
-
-    #[test]
-    fn sse_multiple_events() {
-        let mut p = SseParser::new();
-        let input = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n",
-            "data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n",
-        );
-        let events = p.feed(input.as_bytes());
-        assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0], SseEvent::Content(s) if s == "a"));
-        assert!(matches!(&events[1], SseEvent::Content(s) if s == "b"));
-    }
-
-    #[test]
-    fn sse_role_only_delta_skipped() {
-        let mut p = SseParser::new();
-        let events =
-            p.feed(br#"data: {"choices":[{"delta":{"role":"assistant"}}]}"#.as_ref());
-        assert!(events.is_empty()); // incomplete line
-        let events = p.feed(b"\n");
-        assert!(events.is_empty()); // no content field
-    }
-
-    #[test]
-    fn sse_non_data_lines_ignored() {
-        let mut p = SseParser::new();
-        let input = concat!(
-            ": comment\n",
-            "event: message\n",
-            "data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n",
-        );
-        let events = p.feed(input.as_bytes());
-        assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], SseEvent::Content(s) if s == "x"));
-    }
-
-    // --- Additional SseParser edge cases ---
-
-    // SSE spec allows \r\n line endings; trim_end_matches('\r') must strip the CR.
-    #[test]
-    fn sse_crlf_line_ending() {
-        let mut p = SseParser::new();
-        let events =
-            p.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\r\n");
-        assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], SseEvent::Content(s) if s == "hi"));
-    }
-
-    // Empty string content must not produce an event (guarded by !content.is_empty()).
-    #[test]
-    fn sse_empty_content_not_emitted() {
-        let mut p = SseParser::new();
-        let events =
-            p.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"\"}}]}\n");
-        assert!(events.is_empty());
-    }
-
-    // null content field deserializes as Option::None and must not produce an event.
-    #[test]
-    fn sse_null_content_not_emitted() {
-        let mut p = SseParser::new();
-        let events =
-            p.feed(b"data: {\"choices\":[{\"delta\":{\"content\":null}}]}\n");
-        assert!(events.is_empty());
-    }
-
-    // Malformed JSON in a data line must be silently ignored (no panic, no event).
-    #[test]
-    fn sse_bad_json_silently_ignored() {
-        let mut p = SseParser::new();
-        let events = p.feed(b"data: not-valid-json\n");
-        assert!(events.is_empty());
-    }
-
-    // [DONE] does not halt parsing; subsequent data lines are still processed.
-    #[test]
-    fn sse_done_does_not_stop_subsequent_parsing() {
-        let mut p = SseParser::new();
-        let input = concat!(
-            "data: [DONE]\n",
-            "data: {\"choices\":[{\"delta\":{\"content\":\"after\"}}]}\n",
-        );
-        let events = p.feed(input.as_bytes());
-        assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0], SseEvent::Done));
-        assert!(matches!(&events[1], SseEvent::Content(s) if s == "after"));
-    }
-
-    // Multi-byte UTF-8 sequence (e.g. CJK character, 3 bytes) split at a chunk boundary
-    // must not produce replacement characters — the incomplete bytes are carried over.
-    #[test]
-    fn sse_utf8_split_across_chunks() {
-        // "가" = 0xEA 0xB0 0x80 (3-byte UTF-8)
-        // Split after first byte, then after second byte.
-        let prefix = b"data: {\"choices\":[{\"delta\":{\"content\":\"\xEA";
-        let middle = b"\xB0";
-        let suffix = b"\x80\"}}]}\n";
-
-        let mut p = SseParser::new();
-        assert!(p.feed(prefix).is_empty());
-        assert!(p.feed(middle).is_empty());
-        let events = p.feed(suffix);
-        assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], SseEvent::Content(s) if s == "가"));
-    }
-
-    // --- MessageContent serialization tests ---
-
-    #[test]
-    fn message_content_text_serializes_as_string() {
-        let mc = MessageContent::Text("hello");
-        let json = serde_json::to_value(&mc).unwrap();
-        assert_eq!(json, serde_json::json!("hello"));
-    }
-
-    #[test]
-    fn message_content_parts_serializes_as_array() {
-        let mc = MessageContent::Parts(vec![
-            ContentPart::Text {
-                text: "describe".to_owned(),
-            },
-            ContentPart::ImageUrl {
-                image_url: ImageUrl {
-                    url: "data:image/png;base64,abc".to_owned(),
-                },
-            },
-        ]);
-        let json = serde_json::to_value(&mc).unwrap();
-        let arr = json.as_array().unwrap();
-        assert_eq!(arr.len(), 2);
-        assert_eq!(arr[0]["type"], "text");
-        assert_eq!(arr[0]["text"], "describe");
-        assert_eq!(arr[1]["type"], "image_url");
-        assert_eq!(arr[1]["image_url"]["url"], "data:image/png;base64,abc");
-    }
-
-    // --- build_user_content tests ---
-
-    #[test]
-    fn build_user_content_text_only() {
-        let content = ClipboardContent::text_only("hello".into());
-        let mc = LlmClient::build_user_content(&content, false);
-        assert_eq!(mc, MessageContent::Text("hello"));
-    }
-
-    #[test]
-    fn build_user_content_with_image_summarize() {
-        let content = ClipboardContent {
-            text: Some("caption".into()),
-            images: vec![Arc::new(vec![0x89, 0x50])],
-        };
-        let mc = LlmClient::build_user_content(&content, true);
-        match mc {
-            MessageContent::Parts(parts) => {
-                assert_eq!(parts.len(), 2);
-                assert!(matches!(&parts[0], ContentPart::Text { text } if text == "caption"));
-                assert!(matches!(&parts[1], ContentPart::ImageUrl { .. }));
-            }
-            _ => panic!("expected Parts"),
-        }
-    }
-
-    #[test]
-    fn build_user_content_no_images_returns_text() {
-        let content = ClipboardContent {
-            text: Some("hello".into()),
-            images: vec![Arc::new(vec![0x89])],
-        };
-        // use_images=false: caller decided not to include images.
-        let mc = LlmClient::build_user_content(&content, false);
-        assert_eq!(mc, MessageContent::Text("hello"));
-    }
-
-    #[test]
-    fn build_user_content_image_only_no_text_part() {
-        let content = ClipboardContent {
-            text: None,
-            images: vec![Arc::new(vec![0x89, 0x50])],
-        };
-        let mc = LlmClient::build_user_content(&content, true);
-        match mc {
-            MessageContent::Parts(parts) => {
-                // Only image part, no text part since text is None.
-                assert_eq!(parts.len(), 1);
-                assert!(matches!(&parts[0], ContentPart::ImageUrl { .. }));
-            }
-            _ => panic!("expected Parts"),
-        }
-    }
-
-    #[test]
-    fn build_user_content_empty_text_with_image() {
-        let content = ClipboardContent {
-            text: Some("".into()),
-            images: vec![Arc::new(vec![0x89, 0x50])],
-        };
-        let mc = LlmClient::build_user_content(&content, true);
-        match mc {
-            MessageContent::Parts(parts) => {
-                // Empty text should be omitted, only image part.
-                assert_eq!(parts.len(), 1);
-                assert!(matches!(&parts[0], ContentPart::ImageUrl { .. }));
-            }
-            _ => panic!("expected Parts"),
-        }
-    }
-
-    // --- resolve_thinking tests ---
-
-    #[test]
-    fn resolve_thinking_unsupported_returns_none() {
-        let (prefix, kwargs) = LlmClient::resolve_thinking(
-            ThinkingMode::Think,
-            ThinkingControlMethod::Unsupported,
-        );
-        assert!(prefix.is_none());
-        assert!(kwargs.is_none());
-    }
-
-    #[test]
-    fn resolve_thinking_think_with_kwargs() {
-        let (prefix, kwargs) = LlmClient::resolve_thinking(
-            ThinkingMode::Think,
-            ThinkingControlMethod::ChatTemplateKwargs,
-        );
-        assert!(prefix.is_none());
-        assert!(kwargs.unwrap().enable_thinking);
-    }
-
-    #[test]
-    fn resolve_thinking_nothink_with_kwargs() {
-        let (prefix, kwargs) = LlmClient::resolve_thinking(
-            ThinkingMode::NoThink,
-            ThinkingControlMethod::ChatTemplateKwargs,
-        );
-        assert!(prefix.is_none());
-        assert!(!kwargs.unwrap().enable_thinking);
-    }
-
-    #[test]
-    fn resolve_thinking_think_with_prompt_tag() {
-        let (prefix, kwargs) = LlmClient::resolve_thinking(
-            ThinkingMode::Think,
-            ThinkingControlMethod::SystemPromptTag,
-        );
-        assert_eq!(prefix.unwrap(), "/think\n");
-        assert!(kwargs.is_none());
-    }
-
-    #[test]
-    fn resolve_thinking_nothink_with_prompt_tag() {
-        let (prefix, kwargs) = LlmClient::resolve_thinking(
-            ThinkingMode::NoThink,
-            ThinkingControlMethod::SystemPromptTag,
-        );
-        assert_eq!(prefix.unwrap(), "/no_think\n");
-        assert!(kwargs.is_none());
-    }
-}
-
 impl LlmClientInner {
     /// Apply authentication headers (Bearer token and custom headers) to a request.
     fn apply_auth(&self, mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -959,5 +639,325 @@ impl LlmClient {
         info!("sending streaming request to {}", inner.endpoint);
         self.build_and_send(content, mode, rephrase_params, thinking_mode, true)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_valid_response() {
+        let json = r#"{"choices":[{"message":{"content":"hello"}}]}"#;
+        let resp: ChatResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.choices[0].message.content, "hello");
+    }
+
+    #[test]
+    fn parse_empty_choices() {
+        let json = r#"{"choices":[]}"#;
+        let resp: ChatResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.choices.is_empty());
+    }
+
+    #[test]
+    fn parse_ignores_extra_fields() {
+        let json = r#"{"id":"x","choices":[{"index":0,"message":{"role":"assistant","content":"hi"}}]}"#;
+        let resp: ChatResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.choices[0].message.content, "hi");
+    }
+
+    // --- SseParser tests ---
+
+    #[test]
+    fn sse_single_event() {
+        let mut p = SseParser::new();
+        let events =
+            p.feed(br#"data: {"choices":[{"delta":{"content":"hello"}}]}"#.as_ref());
+        // No newline yet — line is incomplete.
+        assert!(events.is_empty());
+
+        let events = p.feed(b"\n");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Content(s) if s == "hello"));
+    }
+
+    #[test]
+    fn sse_done_event() {
+        let mut p = SseParser::new();
+        let events = p.feed(b"data: [DONE]\n");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Done));
+    }
+
+    #[test]
+    fn sse_split_across_chunks() {
+        let mut p = SseParser::new();
+        assert!(p.feed(br#"data: {"choices":[{"de"#).is_empty());
+        let events = p.feed(br#"lta":{"content":"hi"}}]}"#.as_ref());
+        assert!(events.is_empty()); // still no newline
+
+        let events = p.feed(b"\n");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Content(s) if s == "hi"));
+    }
+
+    #[test]
+    fn sse_multiple_events() {
+        let mut p = SseParser::new();
+        let input = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n",
+        );
+        let events = p.feed(input.as_bytes());
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], SseEvent::Content(s) if s == "a"));
+        assert!(matches!(&events[1], SseEvent::Content(s) if s == "b"));
+    }
+
+    #[test]
+    fn sse_role_only_delta_skipped() {
+        let mut p = SseParser::new();
+        let events =
+            p.feed(br#"data: {"choices":[{"delta":{"role":"assistant"}}]}"#.as_ref());
+        assert!(events.is_empty()); // incomplete line
+        let events = p.feed(b"\n");
+        assert!(events.is_empty()); // no content field
+    }
+
+    #[test]
+    fn sse_non_data_lines_ignored() {
+        let mut p = SseParser::new();
+        let input = concat!(
+            ": comment\n",
+            "event: message\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n",
+        );
+        let events = p.feed(input.as_bytes());
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Content(s) if s == "x"));
+    }
+
+    // --- Additional SseParser edge cases ---
+
+    // SSE spec allows \r\n line endings; trim_end_matches('\r') must strip the CR.
+    #[test]
+    fn sse_crlf_line_ending() {
+        let mut p = SseParser::new();
+        let events =
+            p.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\r\n");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Content(s) if s == "hi"));
+    }
+
+    // Empty string content must not produce an event (guarded by !content.is_empty()).
+    #[test]
+    fn sse_empty_content_not_emitted() {
+        let mut p = SseParser::new();
+        let events =
+            p.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"\"}}]}\n");
+        assert!(events.is_empty());
+    }
+
+    // null content field deserializes as Option::None and must not produce an event.
+    #[test]
+    fn sse_null_content_not_emitted() {
+        let mut p = SseParser::new();
+        let events =
+            p.feed(b"data: {\"choices\":[{\"delta\":{\"content\":null}}]}\n");
+        assert!(events.is_empty());
+    }
+
+    // Malformed JSON in a data line must be silently ignored (no panic, no event).
+    #[test]
+    fn sse_bad_json_silently_ignored() {
+        let mut p = SseParser::new();
+        let events = p.feed(b"data: not-valid-json\n");
+        assert!(events.is_empty());
+    }
+
+    // [DONE] does not halt parsing; subsequent data lines are still processed.
+    #[test]
+    fn sse_done_does_not_stop_subsequent_parsing() {
+        let mut p = SseParser::new();
+        let input = concat!(
+            "data: [DONE]\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"after\"}}]}\n",
+        );
+        let events = p.feed(input.as_bytes());
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], SseEvent::Done));
+        assert!(matches!(&events[1], SseEvent::Content(s) if s == "after"));
+    }
+
+    // Multi-byte UTF-8 sequence (e.g. CJK character, 3 bytes) split at a chunk boundary
+    // must not produce replacement characters — the incomplete bytes are carried over.
+    #[test]
+    fn sse_utf8_split_across_chunks() {
+        // "가" = 0xEA 0xB0 0x80 (3-byte UTF-8)
+        // Split after first byte, then after second byte.
+        let prefix = b"data: {\"choices\":[{\"delta\":{\"content\":\"\xEA";
+        let middle = b"\xB0";
+        let suffix = b"\x80\"}}]}\n";
+
+        let mut p = SseParser::new();
+        assert!(p.feed(prefix).is_empty());
+        assert!(p.feed(middle).is_empty());
+        let events = p.feed(suffix);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Content(s) if s == "가"));
+    }
+
+    // --- MessageContent serialization tests ---
+
+    #[test]
+    fn message_content_text_serializes_as_string() {
+        let mc = MessageContent::Text("hello");
+        let json = serde_json::to_value(&mc).unwrap();
+        assert_eq!(json, serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn message_content_parts_serializes_as_array() {
+        let mc = MessageContent::Parts(vec![
+            ContentPart::Text {
+                text: "describe".to_owned(),
+            },
+            ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: "data:image/png;base64,abc".to_owned(),
+                },
+            },
+        ]);
+        let json = serde_json::to_value(&mc).unwrap();
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[0]["text"], "describe");
+        assert_eq!(arr[1]["type"], "image_url");
+        assert_eq!(arr[1]["image_url"]["url"], "data:image/png;base64,abc");
+    }
+
+    // --- build_user_content tests ---
+
+    #[test]
+    fn build_user_content_text_only() {
+        let content = ClipboardContent::text_only("hello".into());
+        let mc = LlmClient::build_user_content(&content, false);
+        assert_eq!(mc, MessageContent::Text("hello"));
+    }
+
+    #[test]
+    fn build_user_content_with_image_summarize() {
+        let content = ClipboardContent {
+            text: Some("caption".into()),
+            images: vec![Arc::new(vec![0x89, 0x50])],
+        };
+        let mc = LlmClient::build_user_content(&content, true);
+        match mc {
+            MessageContent::Parts(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert!(matches!(&parts[0], ContentPart::Text { text } if text == "caption"));
+                assert!(matches!(&parts[1], ContentPart::ImageUrl { .. }));
+            }
+            _ => panic!("expected Parts"),
+        }
+    }
+
+    #[test]
+    fn build_user_content_no_images_returns_text() {
+        let content = ClipboardContent {
+            text: Some("hello".into()),
+            images: vec![Arc::new(vec![0x89])],
+        };
+        // use_images=false: caller decided not to include images.
+        let mc = LlmClient::build_user_content(&content, false);
+        assert_eq!(mc, MessageContent::Text("hello"));
+    }
+
+    #[test]
+    fn build_user_content_image_only_no_text_part() {
+        let content = ClipboardContent {
+            text: None,
+            images: vec![Arc::new(vec![0x89, 0x50])],
+        };
+        let mc = LlmClient::build_user_content(&content, true);
+        match mc {
+            MessageContent::Parts(parts) => {
+                // Only image part, no text part since text is None.
+                assert_eq!(parts.len(), 1);
+                assert!(matches!(&parts[0], ContentPart::ImageUrl { .. }));
+            }
+            _ => panic!("expected Parts"),
+        }
+    }
+
+    #[test]
+    fn build_user_content_empty_text_with_image() {
+        let content = ClipboardContent {
+            text: Some("".into()),
+            images: vec![Arc::new(vec![0x89, 0x50])],
+        };
+        let mc = LlmClient::build_user_content(&content, true);
+        match mc {
+            MessageContent::Parts(parts) => {
+                // Empty text should be omitted, only image part.
+                assert_eq!(parts.len(), 1);
+                assert!(matches!(&parts[0], ContentPart::ImageUrl { .. }));
+            }
+            _ => panic!("expected Parts"),
+        }
+    }
+
+    // --- resolve_thinking tests ---
+
+    #[test]
+    fn resolve_thinking_unsupported_returns_none() {
+        let (prefix, kwargs) = LlmClient::resolve_thinking(
+            ThinkingMode::Think,
+            ThinkingControlMethod::Unsupported,
+        );
+        assert!(prefix.is_none());
+        assert!(kwargs.is_none());
+    }
+
+    #[test]
+    fn resolve_thinking_think_with_kwargs() {
+        let (prefix, kwargs) = LlmClient::resolve_thinking(
+            ThinkingMode::Think,
+            ThinkingControlMethod::ChatTemplateKwargs,
+        );
+        assert!(prefix.is_none());
+        assert!(kwargs.unwrap().enable_thinking);
+    }
+
+    #[test]
+    fn resolve_thinking_nothink_with_kwargs() {
+        let (prefix, kwargs) = LlmClient::resolve_thinking(
+            ThinkingMode::NoThink,
+            ThinkingControlMethod::ChatTemplateKwargs,
+        );
+        assert!(prefix.is_none());
+        assert!(!kwargs.unwrap().enable_thinking);
+    }
+
+    #[test]
+    fn resolve_thinking_think_with_prompt_tag() {
+        let (prefix, kwargs) = LlmClient::resolve_thinking(
+            ThinkingMode::Think,
+            ThinkingControlMethod::SystemPromptTag,
+        );
+        assert_eq!(prefix.unwrap(), "/think\n");
+        assert!(kwargs.is_none());
+    }
+
+    #[test]
+    fn resolve_thinking_nothink_with_prompt_tag() {
+        let (prefix, kwargs) = LlmClient::resolve_thinking(
+            ThinkingMode::NoThink,
+            ThinkingControlMethod::SystemPromptTag,
+        );
+        assert_eq!(prefix.unwrap(), "/no_think\n");
+        assert!(kwargs.is_none());
     }
 }

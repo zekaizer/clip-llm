@@ -287,6 +287,53 @@ fn dispatch_process(
 ///
 /// Uses `tokio::sync::mpsc` for the command channel so that `.recv().await`
 /// does not block the single-threaded tokio runtime.
+pub fn spawn_worker(
+    mut cmd_rx: tokio_mpsc::UnboundedReceiver<WorkerCommand>,
+    resp_tx: mpsc::Sender<WorkerResponse>,
+    llm: LlmClient,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to create tokio runtime");
+
+        // Read env vars once at thread start — no async context needed.
+        let config = WorkerConfig {
+            streaming: std::env::var("CLIP_LLM_NO_STREAM").is_err(),
+            #[cfg(feature = "diagnostics")]
+            use_mock: std::env::var("DIAG_MOCK").is_ok(),
+        };
+
+        rt.block_on(async move {
+            // Probe vision and thinking support eagerly so they don't delay the first request.
+            llm.probe_vision().await;
+            let thinking_method = llm.probe_thinking().await;
+            let supported =
+                thinking_method != crate::api::client::ThinkingControlMethod::Unsupported;
+            let _ = resp_tx.send(WorkerResponse::ThinkingProbeResult { supported });
+
+            let mut cancel_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
+
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    WorkerCommand::Process(task) => {
+                        dispatch_process(task, &llm, &resp_tx, &mut cancel_tx, &config);
+                    }
+                    WorkerCommand::Cancel => {
+                        if let Some(tx) = cancel_tx.take() {
+                            let _ = tx.send(());
+                            info!("worker: cancelled by user");
+                        }
+                    }
+                }
+            }
+
+            info!("worker: command channel closed, exiting");
+        });
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,51 +413,4 @@ mod tests {
         let r = make_complete_response("ok", ProcessMode::Translate, 42, "test");
         assert_complete(&r, 42);
     }
-}
-
-pub fn spawn_worker(
-    mut cmd_rx: tokio_mpsc::UnboundedReceiver<WorkerCommand>,
-    resp_tx: mpsc::Sender<WorkerResponse>,
-    llm: LlmClient,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to create tokio runtime");
-
-        // Read env vars once at thread start — no async context needed.
-        let config = WorkerConfig {
-            streaming: std::env::var("CLIP_LLM_NO_STREAM").is_err(),
-            #[cfg(feature = "diagnostics")]
-            use_mock: std::env::var("DIAG_MOCK").is_ok(),
-        };
-
-        rt.block_on(async move {
-            // Probe vision and thinking support eagerly so they don't delay the first request.
-            llm.probe_vision().await;
-            let thinking_method = llm.probe_thinking().await;
-            let supported =
-                thinking_method != crate::api::client::ThinkingControlMethod::Unsupported;
-            let _ = resp_tx.send(WorkerResponse::ThinkingProbeResult { supported });
-
-            let mut cancel_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
-
-            while let Some(cmd) = cmd_rx.recv().await {
-                match cmd {
-                    WorkerCommand::Process(task) => {
-                        dispatch_process(task, &llm, &resp_tx, &mut cancel_tx, &config);
-                    }
-                    WorkerCommand::Cancel => {
-                        if let Some(tx) = cancel_tx.take() {
-                            let _ = tx.send(());
-                            info!("worker: cancelled by user");
-                        }
-                    }
-                }
-            }
-
-            info!("worker: command channel closed, exiting");
-        });
-    })
 }
