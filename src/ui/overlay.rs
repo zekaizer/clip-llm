@@ -49,6 +49,7 @@ pub enum OverlayAction {
     ChangeThinkingMode(ThinkingMode),
     CopyToClipboard,
     PasteReplace,
+    TogglePin,
 }
 
 pub struct OverlayOutput {
@@ -69,6 +70,7 @@ pub fn render(
     available_modes: &[ProcessMode],
     rephrase_params: RephraseParams,
     thinking: ThinkingState,
+    pinned: bool,
     auto_copy: bool,
     elapsed: Option<std::time::Duration>,
     ctx: &egui::Context,
@@ -127,7 +129,7 @@ pub fn render(
 
                 render_tab_bar(
                     ui, mode, available_modes,
-                    thinking,
+                    thinking, pinned,
                     &mut action,
                 );
 
@@ -503,6 +505,7 @@ fn render_tab_bar(
     current: ProcessMode,
     available_modes: &[ProcessMode],
     thinking: ThinkingState,
+    pinned: bool,
     action: &mut OverlayAction,
 ) {
     // Content is loaded whenever any mode is available; when empty the overlay
@@ -557,9 +560,50 @@ fn render_tab_bar(
             }
         }
 
-        // Thinking pill (right side) — hidden when model doesn't support thinking control.
-        if thinking.supported {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        // Right side, laid out right-to-left so the close button sits in the very
+        // top-right corner, with the thinking pills (if any) to its left.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // Close button — always available (the overlay otherwise dismisses only
+            // via Escape, and single-tap results stay open on focus loss).
+            let close = egui::Button::new(
+                egui::RichText::new("\u{2715}")
+                    .size(13.0)
+                    .color(egui::Color32::from_gray(150)),
+            )
+            .fill(egui::Color32::TRANSPARENT)
+            .stroke(egui::Stroke::NONE)
+            .corner_radius(4.0);
+            if ui.add(close).on_hover_text("Close (Esc)").clicked() {
+                *action = OverlayAction::Close;
+            }
+
+            // Pin button (left of close) — when lit, the overlay stays open on
+            // focus loss instead of auto-hiding.
+            let pin = egui::Button::new(
+                egui::RichText::new("\u{1F4CC}").size(13.0).color(if pinned {
+                    egui::Color32::WHITE
+                } else {
+                    egui::Color32::from_gray(150)
+                }),
+            )
+            .fill(if pinned {
+                egui::Color32::from_rgba_unmultiplied(60, 60, 60, 200)
+            } else {
+                egui::Color32::TRANSPARENT
+            })
+            .stroke(egui::Stroke::NONE)
+            .corner_radius(4.0);
+            let pin_tip = if pinned {
+                "Pinned — click to allow auto-hide"
+            } else {
+                "Pin — keep open on focus loss"
+            };
+            if ui.add(pin).on_hover_text(pin_tip).clicked() {
+                *action = OverlayAction::TogglePin;
+            }
+
+            // Thinking pills — only when the model supports thinking control.
+            if thinking.supported {
                 // Render in reverse order (right-to-left layout reverses visual order)
                 for &tm in ThinkingMode::ALL.iter().rev() {
                     let is_selected = tm == thinking.mode;
@@ -584,7 +628,7 @@ fn render_tab_bar(
                         *action = OverlayAction::ChangeThinkingMode(tm);
                     }
                 }
-            });
-        }
+            }
+        });
     });
 }

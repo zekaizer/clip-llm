@@ -489,6 +489,7 @@ impl OverlayApp {
             }
             overlay::OverlayAction::CopyToClipboard => UiEvent::UserCopy,
             overlay::OverlayAction::PasteReplace => UiEvent::UserPaste,
+            overlay::OverlayAction::TogglePin => UiEvent::UserTogglePin,
         };
         let effects = self.sm.handle(event);
         self.execute_effects(effects, ctx);
@@ -559,6 +560,7 @@ impl eframe::App for OverlayApp {
                 mode: self.sm.effective_thinking_mode(),
                 supported: self.sm.thinking_supported(),
             },
+            self.sm.pinned(),
             self.sm.auto_copy(),
             elapsed,
             ctx,

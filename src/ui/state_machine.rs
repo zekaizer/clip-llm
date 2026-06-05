@@ -87,6 +87,8 @@ pub enum UiEvent {
     UserCopy,
     /// User clicked the paste/replace button in the result area.
     UserPaste,
+    /// User toggled the pin (keep-open) button.
+    UserTogglePin,
 }
 
 /// Side effects that the adapter must execute after a state transition.
@@ -150,6 +152,9 @@ pub struct StateMachine {
     /// Whether the current session should auto-copy results to clipboard.
     /// Set by ContentReady (true for double-tap, false for single-tap).
     auto_copy: bool,
+    /// When true, the overlay never auto-hides on focus loss (the user pinned it).
+    /// Reset on every new trigger and on close.
+    pinned: bool,
 }
 
 impl StateMachine {
@@ -170,6 +175,7 @@ impl StateMachine {
             think_started: false,
             think_content: None,
             auto_copy: false,
+            pinned: false,
         }
     }
 
@@ -177,6 +183,11 @@ impl StateMachine {
 
     pub fn state(&self) -> &OverlayState {
         &self.state
+    }
+
+    /// Whether the overlay is pinned open (suppresses focus-loss auto-hide).
+    pub fn pinned(&self) -> bool {
+        self.pinned
     }
 
     pub fn mode(&self) -> ProcessMode {
@@ -285,6 +296,10 @@ impl StateMachine {
             UiEvent::ClipboardError(msg) => self.on_clipboard_error(msg),
             UiEvent::UserCopy => self.on_user_copy(),
             UiEvent::UserPaste => self.on_user_paste(),
+            UiEvent::UserTogglePin => {
+                self.pinned = !self.pinned;
+                vec![]
+            }
         };
 
         self.check_invariants();
@@ -310,6 +325,7 @@ impl StateMachine {
         self.auto_copy = true; // capture is the double-tap (auto-copy) path
         self.user_repositioned = false;
         self.has_been_focused = false;
+        self.pinned = false; // each new trigger starts unpinned
         self.state = OverlayState::Capturing;
 
         let mut effects = vec![
@@ -354,6 +370,11 @@ impl StateMachine {
         self.state = OverlayState::Processing;
         self.user_repositioned = false;
         self.has_been_focused = false;
+        // Single-tap results are not written to the clipboard, so losing them on
+        // focus loss would be data loss — start pinned (stays open). Double-tap
+        // results are already in the clipboard, so start unpinned (auto-hide).
+        // The user can toggle either via the pin button.
+        self.pinned = !auto_copy;
 
         let mut effects = vec![
             UiEffect::CaptureMousePosition,
@@ -441,14 +462,25 @@ impl StateMachine {
         self.has_been_focused = false;
         self.auto_copy = false;
         self.user_repositioned = false;
+        self.pinned = false;
     }
 
     fn on_close(&mut self) -> Vec<UiEffect> {
-        if matches!(self.state, OverlayState::Hidden) {
-            return vec![];
+        match self.state {
+            OverlayState::Hidden => vec![],
+            // Closing mid-request (Escape or the ✕ button) must also cancel the
+            // in-flight LLM request, or it runs to completion and its response is
+            // silently dropped. Capturing has no request yet (its background result
+            // is discarded by the adapter's seq + state gate).
+            OverlayState::Processing => {
+                self.reset_to_hidden();
+                vec![UiEffect::SendCancel, UiEffect::HideWindow]
+            }
+            _ => {
+                self.reset_to_hidden();
+                vec![UiEffect::HideWindow]
+            }
         }
-        self.reset_to_hidden();
-        vec![UiEffect::HideWindow]
     }
 
     fn on_cancel(&mut self) -> Vec<UiEffect> {
@@ -562,20 +594,19 @@ impl StateMachine {
         if matches!(self.state, OverlayState::Hidden) || !self.has_been_focused {
             return vec![];
         }
-        // Processing: abandoning the overlay must also cancel the in-flight
+        // Pinned: the user asked to keep the overlay open — never auto-hide,
+        // regardless of state (a Processing request keeps running).
+        if self.pinned {
+            return vec![];
+        }
+        // Not pinned: auto-hide. Processing additionally cancels the in-flight
         // request, otherwise it runs to completion and its response is silently
         // dropped (on_worker_result rejects results once we leave Processing).
+        // (Single-tap results start pinned via on_content_ready, so they are
+        // already handled by the guard above and never reach here.)
         if matches!(self.state, OverlayState::Processing) {
             self.reset_to_hidden();
             return vec![UiEffect::SendCancel, UiEffect::HideWindow];
-        }
-        // Single-tap result (auto_copy == false): the result was NOT written to
-        // the clipboard, so auto-hiding here would lose it with no recovery path.
-        // Keep the overlay open; the user dismisses it explicitly (Escape or a new
-        // hotkey trigger). A double-tap result is already safely in the clipboard,
-        // and the Error state carries no user data, so both still auto-hide below.
-        if matches!(self.state, OverlayState::Result(_)) && !self.auto_copy {
-            return vec![];
         }
         self.reset_to_hidden();
         vec![UiEffect::HideWindow]
@@ -849,6 +880,21 @@ mod tests {
         start_processing(&mut sm, "hello");
 
         let effects = sm.handle(UiEvent::UserCancel);
+
+        assert_eq!(*sm.state(), OverlayState::Hidden);
+        assert!(effects.contains(&UiEffect::SendCancel));
+        assert!(effects.contains(&UiEffect::HideWindow));
+    }
+
+    #[test]
+    fn close_during_processing_cancels_request() {
+        // Closing via the ✕ button (or Escape) while a request is in flight must
+        // cancel it, not just hide — otherwise the request leaks and its response
+        // is silently dropped.
+        let mut sm = new_sm();
+        start_processing(&mut sm, "hello");
+
+        let effects = sm.handle(UiEvent::UserClose);
 
         assert_eq!(*sm.state(), OverlayState::Hidden);
         assert!(effects.contains(&UiEffect::SendCancel));
@@ -1952,5 +1998,84 @@ mod tests {
         // No content yet — nothing to re-process; stays Capturing.
         assert!(effects.is_empty());
         assert_eq!(*sm.state(), OverlayState::Capturing);
+    }
+
+    // === Pin (keep-open) ===
+
+    #[test]
+    fn single_tap_starts_pinned_double_tap_unpinned() {
+        let mut sm = new_sm();
+        sm.handle(UiEvent::ContentReady {
+            content: ClipboardContent::text_only("hi".into()),
+            auto_copy: false,
+        });
+        assert!(sm.pinned(), "single-tap (not auto-copied) starts pinned");
+
+        let mut sm2 = new_sm();
+        sm2.handle(UiEvent::ContentReady {
+            content: ClipboardContent::text_only("hi".into()),
+            auto_copy: true,
+        });
+        assert!(!sm2.pinned(), "double-tap (auto-copied) starts unpinned");
+    }
+
+    #[test]
+    fn toggle_pin_flips_state() {
+        let mut sm = new_sm();
+        start_processing(&mut sm, "hello"); // double-tap helper → unpinned
+        assert!(!sm.pinned());
+        sm.handle(UiEvent::UserTogglePin);
+        assert!(sm.pinned());
+        sm.handle(UiEvent::UserTogglePin);
+        assert!(!sm.pinned());
+    }
+
+    #[test]
+    fn pinned_overlay_survives_focus_loss() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello"); // double-tap → unpinned
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerResult { text: "out".into(), think_content: None, request_id: rid });
+        sm.handle(UiEvent::FocusGained);
+        sm.handle(UiEvent::UserTogglePin); // pin it
+        assert!(sm.pinned());
+
+        let effects = sm.handle(UiEvent::FocusLost);
+        assert!(effects.is_empty(), "pinned overlay must not auto-hide");
+        assert_eq!(*sm.state(), OverlayState::Result("out".into()));
+    }
+
+    #[test]
+    fn unpinning_single_tap_result_allows_focus_loss_hide() {
+        let mut sm = new_sm();
+        let effects = sm.handle(UiEvent::ContentReady {
+            content: ClipboardContent::text_only("hi".into()),
+            auto_copy: false,
+        });
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerResult { text: "out".into(), think_content: None, request_id: rid });
+        sm.handle(UiEvent::FocusGained);
+        assert!(sm.pinned(), "single-tap result starts pinned");
+
+        // User unpins → now focus loss hides it.
+        sm.handle(UiEvent::UserTogglePin);
+        let effects = sm.handle(UiEvent::FocusLost);
+        assert_eq!(*sm.state(), OverlayState::Hidden);
+        assert!(effects.contains(&UiEffect::HideWindow));
+    }
+
+    #[test]
+    fn pin_resets_on_close_and_new_trigger() {
+        let mut sm = new_sm();
+        start_processing(&mut sm, "hello");
+        sm.handle(UiEvent::UserTogglePin);
+        assert!(sm.pinned());
+
+        sm.handle(UiEvent::UserClose);
+        assert!(!sm.pinned(), "close resets pin");
+
+        // New double-tap trigger also starts unpinned.
+        sm.handle(UiEvent::CaptureStarted);
+        assert!(!sm.pinned());
     }
 }
