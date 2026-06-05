@@ -18,7 +18,7 @@ System-wide LLM clipboard assistant. Captures text via global hotkey, sends it t
 - [x] Phase 1 — Basic Pipeline
 - [x] Phase 2 — Async API + SSE Streaming
 - [ ] Phase 3 — Status Feedback + System Tray (partial: Windows tray done, no macOS tray/toast/retry)
-- [ ] Phase 4 — Config File + Multiple Templates (partial: TOML prompt overrides done)
+- [ ] Phase 4 — Config File + Multiple Templates (partial: TOML config for prompts + API settings done)
 - [ ] Phase 5 — Template Cycle Selection UI
 - [x] Phase 6 — Windows Build & Distribution (partial: no CI/E2E tests)
 - [ ] Phase 7 — Extended Features
@@ -32,28 +32,35 @@ System-wide LLM clipboard assistant. Captures text via global hotkey, sends it t
 | `CLIP_LLM_API_KEY` | *(none)* | Bearer token for API auth (optional) |
 | `CLIP_LLM_CUSTOM_HEADERS` | *(none)* | Custom HTTP headers, comma-separated `Key:Value` pairs (e.g. `X-Dep-Ticket:abc,User-Id:u1`) |
 | `CLIP_LLM_NO_STREAM` | *(unset)* | Disable SSE streaming when set |
-| `CLIP_LLM_CONFIG` | *(unset)* | Path to a prompt config TOML (overrides the `config.toml`-next-to-executable lookup) |
+| `CLIP_LLM_CONFIG` | *(unset)* | Path to the config TOML (overrides the `config.toml`-next-to-executable lookup) |
 | `RUST_LOG` | `clip_llm=info` | Log level filter ([`tracing_subscriber::EnvFilter`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html)) |
 | `DIAG_MOCK` | *(unset)* | Use mock LLM responses (requires `--features diagnostics`) |
 
+The connection and streaming variables (`CLIP_LLM_API_ENDPOINT`, `CLIP_LLM_MODEL`,
+`CLIP_LLM_API_KEY`, `CLIP_LLM_CUSTOM_HEADERS`, `CLIP_LLM_NO_STREAM`) can also be set
+in `config.toml` under `[api]`. When both are present the environment variable wins.
+
 See [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) for detailed specifications.
 
-## Prompt Configuration
+## Configuration
 
-System prompts can be overridden from an external TOML file without rebuilding.
-At startup clip-llm reads, in order of precedence:
+Settings can be supplied from an external TOML file without rebuilding. At
+startup clip-llm reads, in order of precedence:
 
 1. the path in `CLIP_LLM_CONFIG`, if set;
 2. otherwise `config.toml` next to the executable.
 
-If no file is found — or it is malformed — the built-in default prompts are
-used. Every key is optional; you only specify the prompts you want to change.
+If no file is found — or it is malformed — the built-in defaults are used. Every
+key is optional; you only specify what you want to change. The file holds two
+kinds of settings:
 
-Available placeholders are substituted at runtime:
-
-- `{primary_lang}` / `{secondary_lang}` — in the `[translate]` prompt
-- `{primary_lang}` — in the `[summarize]` prompts (summaries are primary-language only)
-- `{style}` / `{length}` — only in `[rephrase].base`
+- **`[api]`** — connection settings (endpoint, model, API key, custom headers,
+  streaming). Each mirrors a `CLIP_LLM_*` environment variable; the precedence is
+  **env var > config file > built-in default**.
+- **prompts** — per-mode system prompts, with placeholders substituted at runtime:
+  - `{primary_lang}` / `{secondary_lang}` — in the `[translate]` prompt
+  - `{primary_lang}` — in the `[summarize]` prompts (summaries are primary-language only)
+  - `{style}` / `{length}` — only in `[rephrase].base`
 
 See [config.example.toml](config.example.toml) for the full schema and examples.
 

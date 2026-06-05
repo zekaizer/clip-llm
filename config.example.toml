@@ -1,10 +1,10 @@
-# clip-llm prompt configuration (example)
+# clip-llm configuration (example)
 #
 # Copy this file to `config.toml` next to the clip-llm executable, or point the
 # CLIP_LLM_CONFIG environment variable at it (absolute path recommended).
 #
 # Every key below is OPTIONAL. Any key you omit keeps its built-in default, so a
-# config.toml may contain just the few prompts you want to change. A missing
+# config.toml may contain just the few settings you want to change. A missing
 # file, malformed TOML, or unknown keys all fall back to the built-in defaults
 # without stopping the app.
 #
@@ -13,6 +13,19 @@
 #   {primary_lang}                    -> in [summarize] (summaries are primary-language only)
 #   {style}, {length}                 -> only in [rephrase].base
 # Any other {token} is passed through to the model unchanged.
+
+# Connection settings. Each mirrors a CLIP_LLM_* environment variable; when both
+# are present the environment variable wins (env var > config > built-in default).
+[api]
+endpoint  = "http://localhost:8000/v1"   # CLIP_LLM_API_ENDPOINT
+model     = "MiniMaxAI/MiniMax-M2.5"      # CLIP_LLM_MODEL
+streaming = true                          # set false to disable SSE (like CLIP_LLM_NO_STREAM)
+# api_key = "..."                         # CLIP_LLM_API_KEY (plain text — keep the file private; omit if unused)
+
+# Custom HTTP headers (like CLIP_LLM_CUSTOM_HEADERS). One key = value per line.
+[api.headers]
+# X-Dep-Ticket = "abc"
+# User-Id = "u1"
 
 # Language names substituted into {primary_lang} / {secondary_lang}.
 [languages]
