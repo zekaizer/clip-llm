@@ -452,6 +452,23 @@ fn resolve_path() -> Option<PathBuf> {
 fn load_or_default() -> Config {
     let Some(path) = resolve_path() else {
         info!("config: no {CONFIG_FILENAME} found, using built-in defaults");
+        // Surface where a config file would be picked up so the app's
+        // configurability is discoverable without reading the docs. Printed to
+        // stderr unconditionally (not gated behind the tracing filter), since on
+        // a fresh install this is the user's only hint that the file exists.
+        // Note: we deliberately do NOT auto-create config.example.toml here — it
+        // ships simplified sample prompts that would override the richer built-in
+        // defaults, degrading output quality.
+        if let Some(candidate) =
+            env::current_exe().ok().and_then(|e| e.parent().map(|p| p.join(CONFIG_FILENAME)))
+        {
+            eprintln!(
+                "clip-llm: no config file found — using built-in defaults.\n\
+                 To customize, create {}\n\
+                 (or set CLIP_LLM_CONFIG to a file path). See config.example.toml for the schema.",
+                candidate.display()
+            );
+        }
         return Config::default();
     };
 
@@ -482,6 +499,7 @@ fn load_or_default() -> Config {
         Ok(contents) => match toml::from_str::<Config>(&contents) {
             Ok(config) => {
                 info!("config: loaded from {}", path.display());
+                eprintln!("clip-llm: config loaded from {}", path.display());
                 config
             }
             Err(e) => {
