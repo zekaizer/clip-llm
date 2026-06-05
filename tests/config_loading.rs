@@ -4,6 +4,11 @@
 //!
 //! This runs as its own test binary, so the process-global config `OnceLock`
 //! starts uninitialized and `init_prompt_config()` is the first reader.
+//!
+//! IMPORTANT: keep exactly one `#[test]` in this file. `init_prompt_config()`
+//! writes the `OnceLock` once; a second test in the same binary would read the
+//! config frozen by whichever test ran first, regardless of its own
+//! `CLIP_LLM_CONFIG`. Add new scenarios as separate `tests/*.rs` files.
 
 use clip_llm::{config, ProcessMode, RephraseParams};
 
@@ -16,8 +21,9 @@ fn startup_loads_override_from_env_path() {
     )
     .unwrap();
 
-    // SAFETY: single-threaded test setup; no other thread reads the environment
-    // before init_prompt_config() runs below.
+    // SAFETY: this test binary is single-threaded here (no worker/UI threads have
+    // been spawned), so no other thread can concurrently access the process
+    // environment — set_var/remove_var are sound.
     unsafe {
         std::env::set_var("CLIP_LLM_CONFIG", &path);
     }
@@ -33,6 +39,8 @@ fn startup_loads_override_from_env_path() {
     assert!(summarize.contains("text summarizer for software engineering content"));
 
     let _ = std::fs::remove_file(&path);
+    // SAFETY: same invariant as above — still single-threaded, no concurrent
+    // environment access.
     unsafe {
         std::env::remove_var("CLIP_LLM_CONFIG");
     }
