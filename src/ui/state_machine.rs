@@ -15,6 +15,10 @@ use crate::{ClipboardContent, ProcessMode, RephraseLength, RephraseParams, Rephr
 #[derive(Debug, Clone, PartialEq)]
 pub enum OverlayState {
     Hidden,
+    /// Double-tap selection capture is running on a background thread; the overlay
+    /// shows a spinner but has no content yet. Transitions to Processing when the
+    /// captured content arrives, or Error if capture fails.
+    Capturing,
     Processing,
     Result(String),
     Error(String),
@@ -24,6 +28,7 @@ impl OverlayState {
     pub fn variant_name(&self) -> &'static str {
         match self {
             Self::Hidden => "Hidden",
+            Self::Capturing => "Capturing",
             Self::Processing => "Processing",
             Self::Result(_) => "Result",
             Self::Error(_) => "Error",
@@ -42,6 +47,9 @@ impl OverlayState {
 /// Events fed into the state machine by the adapter layer.
 #[derive(Debug, Clone)]
 pub enum UiEvent {
+    /// Double-tap pressed: begin capturing the current selection on a background
+    /// thread. Shows the overlay (non-activating) with a spinner before any I/O.
+    CaptureStarted,
     /// Clipboard content ready for processing.
     /// `auto_copy`: when true, auto-copy the result to clipboard (double-tap behavior).
     ContentReady { content: ClipboardContent, auto_copy: bool },
@@ -94,6 +102,11 @@ pub enum UiEffect {
     SendCancel,
     WriteClipboard(String),
     ShowWindow,
+    /// Show the overlay WITHOUT taking keyboard focus (used during capture so the
+    /// user's app stays key and the simulated Cmd+C/Ctrl+C targets it, not the overlay).
+    ShowWindowNoActivate,
+    /// Spawn the background selection-capture (copy simulation + clipboard poll).
+    StartCapture,
     HideWindow,
     CaptureMousePosition,
     /// Reset egui Area stored sizing (needed on state variant change).
@@ -237,6 +250,7 @@ impl StateMachine {
 
     pub fn handle(&mut self, event: UiEvent) -> Vec<UiEffect> {
         let effects = match event {
+            UiEvent::CaptureStarted => self.on_capture_started(),
             UiEvent::ContentReady { content, auto_copy } => self.on_content_ready(content, auto_copy),
             UiEvent::WorkerResult { text, think_content, request_id } => {
                 self.on_worker_result(text, think_content, request_id)
@@ -278,6 +292,36 @@ impl StateMachine {
     }
 
     // -- Private transition handlers --
+
+    fn on_capture_started(&mut self) -> Vec<UiEffect> {
+        let old_state = self.state.clone();
+
+        // A double-tap always starts a fresh capture. Drop any prior content and
+        // cached results so a capture *failure* (→ Error) can never leave stale
+        // content that a later mode switch would re-process. The content is unknown
+        // until the background capture completes, so we cannot key off it here.
+        self.original_content = None;
+        self.cache.clear();
+        self.mode_thinking.clear();
+        self.rephrase_params = RephraseParams::default();
+        self.streaming_text.clear();
+        self.think_started = false;
+        self.think_content = None;
+        self.auto_copy = true; // capture is the double-tap (auto-copy) path
+        self.user_repositioned = false;
+        self.has_been_focused = false;
+        self.state = OverlayState::Capturing;
+
+        let mut effects = vec![
+            UiEffect::CaptureMousePosition,
+            UiEffect::ShowWindowNoActivate,
+        ];
+        if !old_state.same_variant(&self.state) {
+            effects.push(UiEffect::ResetAreas);
+        }
+        effects.push(UiEffect::StartCapture);
+        effects
+    }
 
     fn on_content_ready(&mut self, content: ClipboardContent, auto_copy: bool) -> Vec<UiEffect> {
         let old_state = self.state.clone();
@@ -408,11 +452,21 @@ impl StateMachine {
     }
 
     fn on_cancel(&mut self) -> Vec<UiEffect> {
-        if !matches!(self.state, OverlayState::Processing) {
-            return vec![];
+        match self.state {
+            // In-flight LLM request: cancel it and hide.
+            OverlayState::Processing => {
+                self.reset_to_hidden();
+                vec![UiEffect::SendCancel, UiEffect::HideWindow]
+            }
+            // Capture in flight: there is no LLM request yet, just hide. The
+            // background capture's result is ignored via the adapter's seq + state
+            // gate once we leave Capturing.
+            OverlayState::Capturing => {
+                self.reset_to_hidden();
+                vec![UiEffect::HideWindow]
+            }
+            _ => vec![],
         }
-        self.reset_to_hidden();
-        vec![UiEffect::SendCancel, UiEffect::HideWindow]
     }
 
     fn on_switch_mode(&mut self, new_mode: ProcessMode) -> Vec<UiEffect> {
@@ -486,7 +540,8 @@ impl StateMachine {
                     vec![]
                 }
             }
-            OverlayState::Hidden => vec![],
+            // No content loaded (idle) or capture still running: nothing to re-process.
+            OverlayState::Hidden | OverlayState::Capturing => vec![],
         }
     }
 
@@ -651,7 +706,8 @@ impl StateMachine {
                     vec![]
                 }
             }
-            OverlayState::Hidden => vec![],
+            // No content loaded (idle) or capture still running: nothing to re-process.
+            OverlayState::Hidden | OverlayState::Capturing => vec![],
         }
     }
 
@@ -663,6 +719,10 @@ impl StateMachine {
         debug_assert!(
             !matches!(self.state, OverlayState::Hidden) || self.original_content.is_none(),
             "invariant violated: Hidden state should have no original_content"
+        );
+        debug_assert!(
+            !matches!(self.state, OverlayState::Capturing) || self.original_content.is_none(),
+            "invariant violated: Capturing state should have no original_content (content not yet captured)"
         );
     }
 }
@@ -1789,5 +1849,108 @@ mod tests {
         start_processing(&mut sm, "hello");
         let effects = sm.handle(UiEvent::UserPaste);
         assert!(effects.is_empty());
+    }
+
+    // === Capture (double-tap) ===
+
+    #[test]
+    fn capture_started_shows_spinner_non_activating() {
+        let mut sm = new_sm();
+        let effects = sm.handle(UiEvent::CaptureStarted);
+
+        assert_eq!(*sm.state(), OverlayState::Capturing);
+        assert!(sm.auto_copy(), "capture is the double-tap (auto-copy) path");
+        assert!(effects.contains(&UiEffect::CaptureMousePosition));
+        assert!(effects.contains(&UiEffect::ShowWindowNoActivate));
+        assert!(effects.contains(&UiEffect::StartCapture));
+        assert!(effects.contains(&UiEffect::ResetAreas));
+        // Must NOT activate the window (would steal focus and break the copy).
+        assert!(!effects.contains(&UiEffect::ShowWindow));
+    }
+
+    #[test]
+    fn capture_to_processing_on_content_ready() {
+        let mut sm = new_sm();
+        sm.handle(UiEvent::CaptureStarted);
+
+        let effects = sm.handle(UiEvent::ContentReady {
+            content: ClipboardContent::text_only("captured".into()),
+            auto_copy: true,
+        });
+        assert_eq!(*sm.state(), OverlayState::Processing);
+        assert!(effects.iter().any(|e| matches!(e, UiEffect::SendProcess { .. })));
+        // Now activates (re-acquires focus) for the result.
+        assert!(effects.contains(&UiEffect::ShowWindow));
+    }
+
+    #[test]
+    fn capture_to_error_on_clipboard_error() {
+        let mut sm = new_sm();
+        sm.handle(UiEvent::CaptureStarted);
+
+        let effects = sm.handle(UiEvent::ClipboardError("no text after copy".into()));
+        assert_eq!(*sm.state(), OverlayState::Error("no text after copy".into()));
+        assert!(effects.contains(&UiEffect::ShowWindow));
+        // No stale content left behind after a failed capture.
+        assert_eq!(sm.original_text(), None);
+    }
+
+    #[test]
+    fn cancel_during_capture_hides_without_sendcancel() {
+        let mut sm = new_sm();
+        sm.handle(UiEvent::CaptureStarted);
+
+        let effects = sm.handle(UiEvent::UserCancel);
+        assert_eq!(*sm.state(), OverlayState::Hidden);
+        assert!(effects.contains(&UiEffect::HideWindow));
+        // No LLM request exists yet, so nothing to cancel on the worker.
+        assert!(!effects.contains(&UiEffect::SendCancel));
+    }
+
+    #[test]
+    fn close_during_capture_hides() {
+        let mut sm = new_sm();
+        sm.handle(UiEvent::CaptureStarted);
+
+        let effects = sm.handle(UiEvent::UserClose);
+        assert_eq!(*sm.state(), OverlayState::Hidden);
+        assert!(effects.contains(&UiEffect::HideWindow));
+    }
+
+    #[test]
+    fn focus_lost_during_capture_ignored() {
+        let mut sm = new_sm();
+        sm.handle(UiEvent::CaptureStarted);
+        // The capture overlay is shown non-activating, so it never gains focus;
+        // a spurious FocusLost must not dismiss it.
+        let effects = sm.handle(UiEvent::FocusLost);
+        assert!(effects.is_empty());
+        assert_eq!(*sm.state(), OverlayState::Capturing);
+    }
+
+    #[test]
+    fn capture_started_clears_prior_content_and_cache() {
+        let mut sm = new_sm();
+        // Build up a Result with cached content.
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerResult { text: "translated".into(), think_content: None, request_id: rid });
+        assert!(sm.original_text().is_some());
+
+        // A fresh double-tap capture drops the prior content (so a capture failure
+        // can't leave stale content for a later mode switch to re-process).
+        sm.handle(UiEvent::CaptureStarted);
+        assert_eq!(*sm.state(), OverlayState::Capturing);
+        assert_eq!(sm.original_text(), None);
+    }
+
+    #[test]
+    fn switch_mode_during_capture_is_noop() {
+        let mut sm = new_sm();
+        sm.handle(UiEvent::CaptureStarted);
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Rephrase));
+        // No content yet — nothing to re-process; stays Capturing.
+        assert!(effects.is_empty());
+        assert_eq!(*sm.state(), OverlayState::Capturing);
     }
 }

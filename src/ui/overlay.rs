@@ -119,6 +119,12 @@ pub fn render(
             frame.show(ui, |ui| {
                 ui.set_width(OVERLAY_WIDTH);
 
+                // Capturing has no content/modes yet — show only a spinner, no tab bar.
+                if matches!(state, OverlayState::Capturing) {
+                    render_capturing(ui, elapsed, &mut action);
+                    return;
+                }
+
                 render_tab_bar(
                     ui, mode, available_modes,
                     thinking,
@@ -152,7 +158,8 @@ pub fn render(
                         );
                     }
                     OverlayState::Error(msg) => render_error(ui, msg),
-                    OverlayState::Hidden => unreachable!(),
+                    // Hidden returns early at the top of render(); Capturing is handled above.
+                    OverlayState::Hidden | OverlayState::Capturing => unreachable!(),
                 }
             });
         });
@@ -249,6 +256,35 @@ fn render_elapsed_label(ui: &mut egui::Ui, elapsed: Option<std::time::Duration>)
                 .color(egui::Color32::from_gray(120))
                 .size(12.0),
         );
+    }
+}
+
+/// Render the Capturing state: a spinner shown immediately on double-tap while the
+/// selection is copied on a background thread (no content/tabs yet).
+fn render_capturing(
+    ui: &mut egui::Ui,
+    elapsed: Option<std::time::Duration>,
+    action: &mut OverlayAction,
+) {
+    ui.horizontal(|ui| {
+        ui.spinner();
+        ui.label(
+            egui::RichText::new("Copying selection...")
+                .color(egui::Color32::WHITE)
+                .size(15.0),
+        );
+        render_elapsed_label(ui, elapsed);
+    });
+    ui.add_space(4.0);
+    let cancel_btn = egui::Button::new(
+        egui::RichText::new("Cancel")
+            .size(12.0)
+            .color(egui::Color32::from_rgb(255, 140, 140)),
+    )
+    .fill(egui::Color32::from_rgba_unmultiplied(80, 30, 30, 180))
+    .corner_radius(6.0);
+    if ui.add(cancel_btn).clicked() {
+        *action = OverlayAction::Cancel;
     }
 }
 

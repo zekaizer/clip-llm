@@ -18,6 +18,12 @@ pub trait Platform {
     /// (Windows winit workaround to maintain ControlFlow::Wait, egui#5229).
     fn show_window(&self, pos: Option<(f32, f32)>) -> bool;
 
+    /// Show the overlay at an optional position WITHOUT taking keyboard focus, so
+    /// the user's app stays key and a simulated Cmd+C/Ctrl+C still targets it.
+    /// Used while capturing the current selection on double-tap.
+    /// Returns true if an egui `Visible(true)` viewport sync is also needed.
+    fn show_window_no_activate(&self, pos: Option<(f32, f32)>) -> bool;
+
     /// Hide the overlay window. Returns true if handled natively (caller must not send
     /// `Visible(false)`); false means the caller should send `ViewportCommand::Visible(false)`.
     fn hide_window(&self) -> bool;

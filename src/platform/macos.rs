@@ -167,6 +167,34 @@ pub fn show_and_focus_window(position: Option<(f32, f32)>) {
     }
 }
 
+/// Show the overlay WITHOUT making it key or activating the app, pre-positioning
+/// it synchronously like `show_and_focus_window`. The user's app stays key, so a
+/// subsequent simulated Cmd+C still targets it — used during selection capture.
+pub fn show_no_activate(position: Option<(f32, f32)>) {
+    unsafe {
+        let window = get_app_window();
+        if window.is_null() {
+            return;
+        }
+
+        if let Some((x, y)) = position {
+            let screen_height = CGDisplayBounds(CGMainDisplayID()).size.height;
+            let cocoa_point = CGPoint::new(x as f64, screen_height - y as f64);
+            let msg_send_point: MsgSendPoint = std::mem::transmute(objc_msgSend as *const ());
+            msg_send_point(
+                window,
+                sel_registerName(c"setFrameTopLeftPoint:".as_ptr()),
+                cocoa_point,
+            );
+        }
+
+        let nil: *mut c_void = std::ptr::null_mut();
+        let msg_send_ptr: MsgSendPtr = std::mem::transmute(objc_msgSend as *const ());
+        // orderFront: shows the window without making it key or activating the app.
+        msg_send_ptr(window, sel_registerName(c"orderFront:".as_ptr()), nil);
+    }
+}
+
 
 unsafe extern "C" {
     fn CGMainDisplayID() -> u32;
@@ -317,6 +345,12 @@ impl Platform for MacOsPlatform {
     fn show_window(&self, pos: Option<(f32, f32)>) -> bool {
         configure_window_for_spaces();
         show_and_focus_window(pos);
+        false // no egui Visible(true) sync needed on macOS
+    }
+
+    fn show_window_no_activate(&self, pos: Option<(f32, f32)>) -> bool {
+        configure_window_for_spaces();
+        show_no_activate(pos);
         false // no egui Visible(true) sync needed on macOS
     }
 

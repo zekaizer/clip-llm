@@ -144,6 +144,13 @@ impl Platform for WindowsPlatform {
         true // needs Visible(true) to sync winit state (ControlFlow::Wait, egui#5229)
     }
 
+    fn show_window_no_activate(&self, pos: Option<(f32, f32)>) -> bool {
+        show_no_activate_at(pos);
+        // SW_SHOWNA delivers WM_PAINT and keeps ControlFlow::Wait without a
+        // Visible(true) sync, so we must NOT request one here (it would steal focus).
+        false
+    }
+
     fn hide_window(&self) -> bool {
         move_window_offscreen();
         true // handled natively; caller must NOT send Visible(false)
@@ -226,6 +233,34 @@ pub fn show_no_activate() {
                     HWND_TOP,
                     pt.x - w / 2,
                     pt.y - h / 2,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+            ShowWindowAsync(hwnd, SW_SHOWNA);
+        }
+    }
+}
+
+/// Show the clip-llm window at `position` (logical points) WITHOUT activating it,
+/// so the foreground app stays the same and `SendInput(Ctrl+C)` still targets it.
+/// Like `show_no_activate()` but honors an explicit position (the capture spawn
+/// point) instead of re-centering on the cursor.
+pub fn show_no_activate_at(position: Option<(f32, f32)>) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, ShowWindowAsync, HWND_TOP, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOSIZE,
+        SWP_NOZORDER,
+    };
+    if let Some(hwnd) = find_clip_llm_hwnd() {
+        unsafe {
+            if let Some((x, y)) = position {
+                let scale = system_dpi_scale();
+                SetWindowPos(
+                    hwnd,
+                    HWND_TOP,
+                    (x as f64 * scale) as i32,
+                    (y as f64 * scale) as i32,
                     0,
                     0,
                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,

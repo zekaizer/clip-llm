@@ -19,6 +19,10 @@ use state_machine::{StateMachine, UiEffect, UiEvent};
 #[cfg(feature = "diagnostics")]
 const IDLE_POLL_MS: u64 = 100;
 
+/// A background selection-capture result tagged with the capture sequence id that
+/// produced it, so stale captures (after a re-trigger / close) can be discarded.
+type CaptureResult = (u64, Result<crate::ClipboardContent, crate::ClipboardError>);
+
 pub struct OverlayApp {
     sm: StateMachine,
     cmd_tx: tokio_mpsc::UnboundedSender<WorkerCommand>,
@@ -40,6 +44,13 @@ pub struct OverlayApp {
     processing_request_id: Option<u64>,
     /// When the current Processing request started, for the elapsed-time display.
     processing_started_at: Option<std::time::Instant>,
+    /// Receives results from background selection-capture threads (double-tap).
+    capture_rx: mpsc::Receiver<CaptureResult>,
+    /// Sender cloned into each capture thread.
+    capture_tx: mpsc::Sender<CaptureResult>,
+    /// Monotonic capture id; a returning capture result is honored only if it
+    /// matches the latest and the state machine is still Capturing.
+    capture_seq: u64,
     #[cfg(feature = "diagnostics")]
     diag: crate::diagnostics::DiagCollector,
     #[cfg(feature = "diagnostics")]
@@ -60,6 +71,7 @@ impl OverlayApp {
         diag_action_rx: mpsc::Receiver<crate::diagnostics::ScenarioAction>,
         diag_state_tx: mpsc::Sender<&'static str>,
     ) -> Self {
+        let (capture_tx, capture_rx) = mpsc::channel();
         Self {
             sm: StateMachine::new(crate::ProcessMode::default()),
             cmd_tx,
@@ -73,6 +85,9 @@ impl OverlayApp {
             think_expanded: false,
             processing_request_id: None,
             processing_started_at: None,
+            capture_rx,
+            capture_tx,
+            capture_seq: 0,
             diag: crate::diagnostics::DiagCollector::new(),
             diag_action_rx,
             diag_state_tx,
@@ -89,6 +104,7 @@ impl OverlayApp {
         clipboard: ClipboardManager,
         tap_rx: mpsc::Receiver<TapEvent>,
     ) -> Self {
+        let (capture_tx, capture_rx) = mpsc::channel();
         Self {
             sm: StateMachine::new(crate::ProcessMode::default()),
             cmd_tx,
@@ -102,6 +118,9 @@ impl OverlayApp {
             think_expanded: false,
             processing_request_id: None,
             processing_started_at: None,
+            capture_rx,
+            capture_tx,
+            capture_seq: 0,
         }
     }
 }
@@ -154,6 +173,8 @@ impl OverlayApp {
                     }
                 }
                 UiEffect::ShowWindow => self.show_window(ctx),
+                UiEffect::ShowWindowNoActivate => self.show_window_no_activate(ctx),
+                UiEffect::StartCapture => self.start_capture(ctx),
                 UiEffect::HideWindow => {
                     ctx.memory_mut(|m| m.reset_areas());
                     self.hide_window(ctx);
@@ -207,19 +228,38 @@ impl OverlayApp {
                     self.execute_effects(effects, ctx);
                 }
                 TapAction::DoubleTap => {
-                    info!("double-tap triggered, copying selection...");
-                    let event = match self.clipboard.copy_and_read(&self.platform) {
-                        Ok(content) => UiEvent::ContentReady { content, auto_copy: true },
-                        Err(e) => {
-                            error!("clipboard copy/read failed: {e}");
-                            UiEvent::ClipboardError(friendly_clipboard_error(&e))
-                        }
-                    };
-                    let effects = self.sm.handle(event);
+                    info!("double-tap triggered, capturing selection...");
+                    // Show the spinner immediately (non-activating) and run the
+                    // blocking copy+poll on a background thread (see start_capture),
+                    // instead of freezing the render thread for 250-700ms.
+                    let effects = self.sm.handle(UiEvent::CaptureStarted);
                     self.execute_effects(effects, ctx);
                 }
                 TapAction::Pending => {}
             }
+        }
+    }
+
+    // -- Background capture results (from start_capture threads) --
+
+    fn poll_captures(&mut self, ctx: &egui::Context) {
+        while let Ok((seq, result)) = self.capture_rx.try_recv() {
+            // Discard stale captures: superseded by a newer trigger, or the user
+            // already left Capturing (Escape / single-tap / re-trigger) before this
+            // one finished. The seq check covers re-triggers; the state check covers
+            // close/cancel.
+            if seq != self.capture_seq || !matches!(self.sm.state(), OverlayState::Capturing) {
+                continue;
+            }
+            let event = match result {
+                Ok(content) => UiEvent::ContentReady { content, auto_copy: true },
+                Err(e) => {
+                    error!("clipboard capture failed: {e}");
+                    UiEvent::ClipboardError(friendly_clipboard_error(&e))
+                }
+            };
+            let effects = self.sm.handle(event);
+            self.execute_effects(effects, ctx);
         }
     }
 
@@ -355,6 +395,46 @@ impl OverlayApp {
         }
     }
 
+    /// Show the overlay during capture WITHOUT taking focus, so the user's app
+    /// stays key and the simulated Cmd+C/Ctrl+C targets it. Positions at the
+    /// spawn point (cursor) on first show; `update_viewport` re-centers once the
+    /// rendered size is known.
+    fn show_window_no_activate(&self, ctx: &egui::Context) {
+        let pos = if self.sm.user_repositioned() {
+            None
+        } else {
+            self.last_desired_size
+                .and_then(|s| self.calculate_centered_position(s))
+                .map(|p| (p.x, p.y))
+                .or_else(|| self.spawn_position.map(|p| (p.x, p.y)))
+        };
+
+        if self.platform.show_window_no_activate(pos) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        }
+    }
+
+    /// Spawn a background thread to capture the current selection off the render
+    /// thread (the 200 ms modifier-release wait + copy + clipboard poll would
+    /// otherwise freeze the UI). Tagged with the current `capture_seq` so a stale
+    /// result is discarded by `poll_captures`.
+    fn start_capture(&mut self, ctx: &egui::Context) {
+        self.capture_seq += 1;
+        let seq = self.capture_seq;
+        let tx = self.capture_tx.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            // Build a clipboard handle on this thread (avoids sharing the main
+            // thread's, and sidesteps Send concerns). NativePlatform is a ZST.
+            let result = match ClipboardManager::new() {
+                Ok(mut cm) => cm.copy_and_read(&NativePlatform),
+                Err(e) => Err(e),
+            };
+            let _ = tx.send((seq, result));
+            ctx.request_repaint();
+        });
+    }
+
     fn hide_window(&self, ctx: &egui::Context) {
         if !self.platform.hide_window() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -432,9 +512,9 @@ impl OverlayApp {
         }
     }
 
-    /// Request repaints: every frame while Processing (spinner), idle poll in diagnostics mode.
+    /// Request repaints: every frame while Processing/Capturing (spinner), idle poll in diagnostics mode.
     fn schedule_repaint(&self, ctx: &egui::Context) {
-        if matches!(self.sm.state(), OverlayState::Processing) {
+        if matches!(self.sm.state(), OverlayState::Processing | OverlayState::Capturing) {
             ctx.request_repaint();
         } else {
             #[cfg(feature = "diagnostics")]
@@ -449,6 +529,7 @@ impl eframe::App for OverlayApp {
 
         self.poll_responses(ctx);
         self.poll_tap_actions(ctx);
+        self.poll_captures(ctx);
         #[cfg(feature = "diagnostics")]
         self.poll_diag_actions(ctx);
 
