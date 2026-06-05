@@ -15,9 +15,13 @@ pub mod worker;
 use thiserror::Error;
 
 // -- Language constants --
+//
+// Default language names. Crate-internal: callers must read the runtime values
+// via `config::prompt_config().primary_lang()` / `secondary_lang()` so external
+// config overrides are honored, rather than hardcoding these defaults.
 
-pub const PRIMARY_LANG: &str = "Korean";
-pub const SECONDARY_LANG: &str = "English";
+pub(crate) const PRIMARY_LANG: &str = "Korean";
+pub(crate) const SECONDARY_LANG: &str = "English";
 
 // -- Rephrase parameters --
 
