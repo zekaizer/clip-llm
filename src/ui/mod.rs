@@ -589,7 +589,7 @@ impl eframe::App for OverlayApp {
             self.diag.flush_pending_if_stale();
         }
 
-        crate::platform::poll_tray_quit(ctx);
+        crate::platform::poll_tray_events(ctx);
 
         // Focus-loss auto-hide (skip during diagnostics).
         #[cfg(not(feature = "diagnostics"))]

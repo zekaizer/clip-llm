@@ -167,26 +167,49 @@ pub fn show_and_focus_window(position: Option<(f32, f32)>) {
     }
 }
 
-/// Show the standard macOS "About" panel, populated from the app bundle's
-/// Info.plist (name, version, copyright). For a bare binary (no bundle) the panel
-/// still appears with whatever process info macOS infers.
+/// Create an autoreleased `NSString` from a Rust string.
+unsafe fn ns_string(s: &str) -> *mut c_void {
+    unsafe {
+        let cstr = std::ffi::CString::new(s).unwrap_or_default();
+        let cls = objc_getClass(c"NSString".as_ptr());
+        let sel = sel_registerName(c"stringWithUTF8String:".as_ptr());
+        let send: unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_char) -> *mut c_void =
+            std::mem::transmute(objc_msgSend as *const ());
+        send(cls, sel, cstr.as_ptr())
+    }
+}
+
+/// Show a simple "About" dialog with the app name, version, and author — matching
+/// the Windows message box. (The standard macOS About panel does not surface the
+/// author, so an NSAlert is used for parity.)
 pub fn show_about() {
     unsafe {
-        let cls = objc_getClass(c"NSApplication".as_ptr());
-        if cls.is_null() {
+        // Bring the Accessory app forward so the alert appears in front.
+        let app_cls = objc_getClass(c"NSApplication".as_ptr());
+        let app = objc_msgSend(app_cls, sel_registerName(c"sharedApplication".as_ptr()));
+        if !app.is_null() {
+            let msg_send_bool: MsgSendBool = std::mem::transmute(objc_msgSend as *const ());
+            msg_send_bool(app, sel_registerName(c"activateIgnoringOtherApps:".as_ptr()), true);
+        }
+
+        let alert_cls = objc_getClass(c"NSAlert".as_ptr());
+        if alert_cls.is_null() {
             return;
         }
-        let app = objc_msgSend(cls, sel_registerName(c"sharedApplication".as_ptr()));
-        if app.is_null() {
+        let alert = objc_msgSend(alert_cls, sel_registerName(c"alloc".as_ptr()));
+        let alert = objc_msgSend(alert, sel_registerName(c"init".as_ptr()));
+        if alert.is_null() {
             return;
         }
-        // Bring the Accessory app forward so the panel is visible.
-        let msg_send_bool: MsgSendBool = std::mem::transmute(objc_msgSend as *const ());
-        msg_send_bool(app, sel_registerName(c"activateIgnoringOtherApps:".as_ptr()), true);
-        // [NSApp orderFrontStandardAboutPanel:nil]
-        let nil: *mut c_void = std::ptr::null_mut();
+
         let msg_send_ptr: MsgSendPtr = std::mem::transmute(objc_msgSend as *const ());
-        msg_send_ptr(app, sel_registerName(c"orderFrontStandardAboutPanel:".as_ptr()), nil);
+        let title = ns_string(concat!("clip-llm v", env!("CARGO_PKG_VERSION")));
+        let body = ns_string(env!("CARGO_PKG_AUTHORS"));
+        msg_send_ptr(alert, sel_registerName(c"setMessageText:".as_ptr()), title);
+        msg_send_ptr(alert, sel_registerName(c"setInformativeText:".as_ptr()), body);
+
+        // [alert runModal] — modal until the user dismisses it.
+        objc_msgSend(alert, sel_registerName(c"runModal".as_ptr()));
     }
 }
 

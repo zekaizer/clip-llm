@@ -55,6 +55,7 @@ pub use windows::WindowsPlatform as NativePlatform;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static TRAY_QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+static TRAY_ABOUT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Decode the embedded tray icon PNG into an RGBA `tray_icon::Icon`.
 fn load_tray_icon() -> tray_icon::Icon {
@@ -92,27 +93,23 @@ pub fn init_tray(ctx: &eframe::egui::Context) {
             // Leak: the tray icon lives for the entire process lifetime.
             std::mem::forget(tray);
 
-            // set_event_handler intercepts all menu events; compare the Quit id and
-            // signal via AtomicBool so poll_tray_quit() can act inside update().
+            // set_event_handler intercepts all menu events; signal via AtomicBool so
+            // poll_tray_events() acts inside update() — guaranteed on the main thread,
+            // which native dialogs (NSAlert / MessageBox) require.
             let quit_id = quit_id.clone();
             let about_id = about_id.clone();
             let ctx = ctx.clone();
             MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
                 if event.id() == &quit_id {
                     TRAY_QUIT_REQUESTED.store(true, Ordering::SeqCst);
-                    // Windows: a hidden window gets no WM_PAINT, so nudge it visible
-                    // so update() runs and poll_tray_quit() can act. Not needed on macOS.
-                    #[cfg(target_os = "windows")]
-                    windows::show_no_activate();
-                    ctx.request_repaint();
                 } else if event.id() == &about_id {
-                    // Menu events fire on the main thread, so showing the panel
-                    // directly is safe (no eframe ctx needed).
-                    #[cfg(target_os = "macos")]
-                    macos::show_about();
-                    #[cfg(target_os = "windows")]
-                    windows::show_about();
+                    TRAY_ABOUT_REQUESTED.store(true, Ordering::SeqCst);
                 }
+                // Windows: a hidden window gets no WM_PAINT, so nudge it visible so
+                // update() runs and poll_tray_events() can act. Not needed on macOS.
+                #[cfg(target_os = "windows")]
+                windows::show_no_activate();
+                ctx.request_repaint();
             }));
 
             tracing::info!("system tray icon created");
@@ -123,8 +120,15 @@ pub fn init_tray(ctx: &eframe::egui::Context) {
     }
 }
 
-/// Poll for the tray quit flag; sends `ViewportCommand::Close` when set.
-pub fn poll_tray_quit(ctx: &eframe::egui::Context) {
+/// Poll for tray menu actions inside `update()` (main thread): show the About
+/// dialog and/or quit. Called every frame from `OverlayApp::update`.
+pub fn poll_tray_events(ctx: &eframe::egui::Context) {
+    if TRAY_ABOUT_REQUESTED.swap(false, Ordering::SeqCst) {
+        #[cfg(target_os = "macos")]
+        macos::show_about();
+        #[cfg(target_os = "windows")]
+        windows::show_about();
+    }
     if TRAY_QUIT_REQUESTED.swap(false, Ordering::SeqCst) {
         tracing::info!("quit requested from tray menu");
         ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
