@@ -74,10 +74,11 @@ pub fn init_tray(ctx: &eframe::egui::Context) {
     use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::TrayIconBuilder;
 
-    let title = MenuItem::new(concat!("clip-llm v", env!("CARGO_PKG_VERSION")), false, None);
+    let about_item = MenuItem::new("About clip-llm", true, None);
+    let about_id = about_item.id().clone();
     let quit_item = MenuItem::new("Quit", true, None);
     let quit_id = quit_item.id().clone();
-    let menu = Menu::with_items(&[&title, &PredefinedMenuItem::separator(), &quit_item])
+    let menu = Menu::with_items(&[&about_item, &PredefinedMenuItem::separator(), &quit_item])
         .expect("failed to create tray menu");
 
     let tray = TrayIconBuilder::new()
@@ -94,16 +95,24 @@ pub fn init_tray(ctx: &eframe::egui::Context) {
             // set_event_handler intercepts all menu events; compare the Quit id and
             // signal via AtomicBool so poll_tray_quit() can act inside update().
             let quit_id = quit_id.clone();
+            let about_id = about_id.clone();
             let ctx = ctx.clone();
             MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
                 if event.id() == &quit_id {
                     TRAY_QUIT_REQUESTED.store(true, Ordering::SeqCst);
+                    // Windows: a hidden window gets no WM_PAINT, so nudge it visible
+                    // so update() runs and poll_tray_quit() can act. Not needed on macOS.
+                    #[cfg(target_os = "windows")]
+                    windows::show_no_activate();
+                    ctx.request_repaint();
+                } else if event.id() == &about_id {
+                    // Menu events fire on the main thread, so showing the panel
+                    // directly is safe (no eframe ctx needed).
+                    #[cfg(target_os = "macos")]
+                    macos::show_about();
+                    #[cfg(target_os = "windows")]
+                    windows::show_about();
                 }
-                // Windows: a hidden window gets no WM_PAINT, so nudge it visible to
-                // make update() run. Not needed on macOS.
-                #[cfg(target_os = "windows")]
-                windows::show_no_activate();
-                ctx.request_repaint();
             }));
 
             tracing::info!("system tray icon created");

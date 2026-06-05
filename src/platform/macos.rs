@@ -167,6 +167,29 @@ pub fn show_and_focus_window(position: Option<(f32, f32)>) {
     }
 }
 
+/// Show the standard macOS "About" panel, populated from the app bundle's
+/// Info.plist (name, version, copyright). For a bare binary (no bundle) the panel
+/// still appears with whatever process info macOS infers.
+pub fn show_about() {
+    unsafe {
+        let cls = objc_getClass(c"NSApplication".as_ptr());
+        if cls.is_null() {
+            return;
+        }
+        let app = objc_msgSend(cls, sel_registerName(c"sharedApplication".as_ptr()));
+        if app.is_null() {
+            return;
+        }
+        // Bring the Accessory app forward so the panel is visible.
+        let msg_send_bool: MsgSendBool = std::mem::transmute(objc_msgSend as *const ());
+        msg_send_bool(app, sel_registerName(c"activateIgnoringOtherApps:".as_ptr()), true);
+        // [NSApp orderFrontStandardAboutPanel:nil]
+        let nil: *mut c_void = std::ptr::null_mut();
+        let msg_send_ptr: MsgSendPtr = std::mem::transmute(objc_msgSend as *const ());
+        msg_send_ptr(app, sel_registerName(c"orderFrontStandardAboutPanel:".as_ptr()), nil);
+    }
+}
+
 /// Show the overlay WITHOUT making it key or activating the app, pre-positioning
 /// it synchronously like `show_and_focus_window`. The user's app stays key, so a
 /// subsequent simulated Cmd+C still targets it — used during selection capture.

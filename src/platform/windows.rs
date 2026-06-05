@@ -241,6 +241,28 @@ pub fn show_no_activate() {
     }
 }
 
+/// Show a simple About message box with the app name, version, and author.
+pub fn show_about() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONINFORMATION, MB_OK};
+    let body: Vec<u16> = format!(
+        "clip-llm v{}\n{}",
+        env!("CARGO_PKG_VERSION"),
+        env!("CARGO_PKG_AUTHORS")
+    )
+    .encode_utf16()
+    .chain(std::iter::once(0))
+    .collect();
+    let title: Vec<u16> = "About clip-llm".encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        let _ = MessageBoxW(
+            std::ptr::null_mut(),
+            body.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONINFORMATION,
+        );
+    }
+}
+
 /// Show the clip-llm window at `position` (logical points) WITHOUT activating it,
 /// so the foreground app stays the same and `SendInput(Ctrl+C)` still targets it.
 /// Like `show_no_activate()` but honors an explicit position (the capture spawn
