@@ -8,7 +8,7 @@
 //! loading never panics.
 //!
 //! The resolved config is stored once in a process-global [`OnceLock`] and read
-//! through [`prompt_config`]. Both call sites of `ProcessMode::system_prompt`
+//! through [`get`]. Both call sites of `ProcessMode::system_prompt`
 //! (the worker thread and the UI thread's cache key) read the same immutable
 //! snapshot without any plumbing.
 //!
@@ -130,7 +130,7 @@ const DEFAULT_SUMMARIZE_IMAGE_PROMPT: &str =
 /// any subset may be overridden by the TOML file.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub struct PromptConfig {
+pub struct Config {
     languages: LanguagesConfig,
     translate: TranslateConfig,
     rephrase: RephraseConfig,
@@ -200,7 +200,7 @@ struct SummarizeConfig {
     image_prompt: Option<String>,
 }
 
-impl PromptConfig {
+impl Config {
     /// Primary language name (`{primary_lang}`).
     pub fn primary_lang(&self) -> &str {
         &self.languages.primary
@@ -309,17 +309,17 @@ pub fn substitute(template: &str, primary: &str, secondary: &str) -> String {
     )
 }
 
-static CONFIG: OnceLock<PromptConfig> = OnceLock::new();
+static CONFIG: OnceLock<Config> = OnceLock::new();
 
 /// Returns the process-global prompt configuration, initializing it to the
-/// built-in defaults if [`init_prompt_config`] was never called (e.g. in tests).
-pub fn prompt_config() -> &'static PromptConfig {
-    CONFIG.get_or_init(PromptConfig::default)
+/// built-in defaults if [`init`] was never called (e.g. in tests).
+pub fn get() -> &'static Config {
+    CONFIG.get_or_init(Config::default)
 }
 
 /// Loads the external config once at startup. Safe to call multiple times; only
 /// the first call has any effect. Never panics — any error falls back to defaults.
-pub fn init_prompt_config() {
+pub fn init() {
     CONFIG.get_or_init(load_or_default);
 }
 
@@ -348,10 +348,10 @@ fn resolve_path() -> Option<PathBuf> {
 /// Full error details (which for a TOML error can echo a line of file content)
 /// go to `debug!` only; the `warn!` lines stay generic so a misdirected
 /// `CLIP_LLM_CONFIG` cannot leak file contents into ordinary logs.
-fn load_or_default() -> PromptConfig {
+fn load_or_default() -> Config {
     let Some(path) = resolve_path() else {
         info!("config: no {CONFIG_FILENAME} found, using built-in prompt defaults");
-        return PromptConfig::default();
+        return Config::default();
     };
 
     // Reject non-regular files (a FIFO would otherwise block startup forever) and
@@ -359,7 +359,7 @@ fn load_or_default() -> PromptConfig {
     match std::fs::metadata(&path) {
         Ok(meta) if !meta.is_file() => {
             warn!("config: {}: not a regular file — using built-in defaults", path.display());
-            return PromptConfig::default();
+            return Config::default();
         }
         Ok(meta) if meta.len() > MAX_CONFIG_BYTES => {
             warn!(
@@ -367,18 +367,18 @@ fn load_or_default() -> PromptConfig {
                 path.display(),
                 meta.len()
             );
-            return PromptConfig::default();
+            return Config::default();
         }
         Ok(_) => {}
         Err(e) => {
             warn!("config: {}: cannot read metadata — using built-in defaults", path.display());
             debug!("config metadata error: {e}");
-            return PromptConfig::default();
+            return Config::default();
         }
     }
 
     match std::fs::read_to_string(&path) {
-        Ok(contents) => match toml::from_str::<PromptConfig>(&contents) {
+        Ok(contents) => match toml::from_str::<Config>(&contents) {
             Ok(config) => {
                 info!("config: loaded prompts from {}", path.display());
                 config
@@ -386,13 +386,13 @@ fn load_or_default() -> PromptConfig {
             Err(e) => {
                 warn!("config: {}: invalid TOML — using built-in defaults", path.display());
                 debug!("config parse error: {e}");
-                PromptConfig::default()
+                Config::default()
             }
         },
         Err(e) => {
             warn!("config: {}: read failed — using built-in defaults", path.display());
             debug!("config read error: {e}");
-            PromptConfig::default()
+            Config::default()
         }
     }
 }
@@ -404,7 +404,7 @@ mod tests {
 
     /// Reconstructs the expected prompt from config accessors — an independent
     /// path used to validate `ProcessMode::system_prompt`.
-    fn assemble(config: &PromptConfig, mode: ProcessMode, params: RephraseParams, image_only: bool) -> String {
+    fn assemble(config: &Config, mode: ProcessMode, params: RephraseParams, image_only: bool) -> String {
         let primary = config.primary_lang();
         let secondary = config.secondary_lang();
         match mode {
@@ -422,7 +422,7 @@ mod tests {
     /// the established behavior across all 25 rephrase combos plus the other modes.
     #[test]
     fn defaults_match_system_prompt() {
-        let config = PromptConfig::default();
+        let config = Config::default();
         for image_only in [false, true] {
             assert_eq!(
                 assemble(&config, ProcessMode::Translate, RephraseParams::default(), image_only),
@@ -469,7 +469,7 @@ mod tests {
     fn rephrase_prompt_does_not_reexpand_style_into_length() {
         // A style override containing `{length}` must not pull in the length
         // modifier a second time.
-        let config: PromptConfig = toml::from_str(
+        let config: Config = toml::from_str(
             "[rephrase]\nbase = \"X {style}{length} Y\"\n[rephrase.style]\ncorrect = \"S{length}\"\n[rephrase.length]\nsame = \"L\"\n",
         )
         .unwrap();
@@ -481,13 +481,13 @@ mod tests {
 
     #[test]
     fn rephrase_length_same_is_empty() {
-        let config = PromptConfig::default();
+        let config = Config::default();
         assert_eq!(config.rephrase_length(RephraseLength::Same), "");
     }
 
     #[test]
     fn translate_override_leaves_other_modes_default() {
-        let config: PromptConfig = toml::from_str(
+        let config: Config = toml::from_str(
             "[translate]\nprompt = \"custom {primary_lang}\"\n",
         )
         .unwrap();
@@ -498,7 +498,7 @@ mod tests {
 
     #[test]
     fn languages_override_applies_to_translate_only() {
-        let config: PromptConfig =
+        let config: Config =
             toml::from_str("[languages]\nprimary = \"Japanese\"\n").unwrap();
         // Missing `secondary` falls back to the built-in default.
         assert_eq!(config.primary_lang(), "Japanese");
@@ -511,7 +511,7 @@ mod tests {
 
     #[test]
     fn partial_style_and_length_override() {
-        let config: PromptConfig = toml::from_str(
+        let config: Config = toml::from_str(
             "[rephrase.style]\nbusiness = \"BIZ\"\n[rephrase.length]\nterse = \"LEN\"\n",
         )
         .unwrap();
@@ -523,10 +523,10 @@ mod tests {
 
     #[test]
     fn empty_and_unknown_keys_tolerated() {
-        let from_empty: PromptConfig = toml::from_str("").unwrap();
+        let from_empty: Config = toml::from_str("").unwrap();
         assert_eq!(from_empty.translate_prompt(), DEFAULT_TRANSLATE_PROMPT);
         // Unknown keys are ignored (no deny_unknown_fields).
-        let with_unknown: PromptConfig =
+        let with_unknown: Config =
             toml::from_str("future_key = 42\n[translate]\nprompt = \"x\"\n").unwrap();
         assert_eq!(with_unknown.translate_prompt(), "x");
     }
@@ -535,6 +535,6 @@ mod tests {
     fn invalid_toml_is_rejected_by_parser() {
         // load_or_default() turns this into a defaults fallback; here we assert the
         // parser itself errors so that fallback path is exercised.
-        assert!(toml::from_str::<PromptConfig>("not = = valid").is_err());
+        assert!(toml::from_str::<Config>("not = = valid").is_err());
     }
 }

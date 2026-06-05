@@ -17,7 +17,7 @@ use thiserror::Error;
 // -- Language constants --
 //
 // Default language names. Crate-internal: callers must read the runtime values
-// via `config::prompt_config().primary_lang()` / `secondary_lang()` so external
+// via `config::get().primary_lang()` / `secondary_lang()` so external
 // config overrides are honored, rather than hardcoding these defaults.
 
 pub(crate) const PRIMARY_LANG: &str = "Korean";
@@ -178,10 +178,10 @@ impl ProcessMode {
     }
 
     /// Builds the system prompt for this mode from the runtime
-    /// [`PromptConfig`](crate::config::PromptConfig). Templates and language
+    /// [`Config`](crate::config::Config). Templates and language
     /// names come from the external config when present, else built-in defaults.
     pub fn system_prompt(self, params: RephraseParams, image_only: bool) -> String {
-        let config = crate::config::prompt_config();
+        let config = crate::config::get();
         let primary = config.primary_lang();
         let secondary = config.secondary_lang();
         match self {
