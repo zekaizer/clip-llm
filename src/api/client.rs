@@ -205,6 +205,8 @@ struct LlmClientInner {
     model: String,
     api_key: Option<String>,
     custom_headers: Vec<(String, String)>,
+    temperature: f64,
+    max_tokens: u32,
     supports_vision: OnceCell<bool>,
     thinking_control: OnceCell<ThinkingControlMethod>,
 }
@@ -286,23 +288,29 @@ impl LlmClient {
                     .collect(),
             };
 
+        // Generation parameters: config file > built-in default (no env var).
+        let temperature = config.generation_temperature().unwrap_or(TEMPERATURE);
+        let max_tokens = config.generation_max_tokens().unwrap_or(MAX_TOKENS);
+        let timeout = Duration::from_secs(
+            config
+                .generation_request_timeout_secs()
+                .unwrap_or(REQUEST_TIMEOUT_SECS),
+        );
+
         info!(
-            "endpoint={endpoint}, model={model}, api_key={}, custom_headers={}",
+            "endpoint={endpoint}, model={model}, api_key={}, custom_headers={}, temperature={temperature}, max_tokens={max_tokens}, timeout={}s",
             if api_key.is_some() { "set" } else { "unset" },
             if custom_headers.is_empty() {
                 "none".to_string()
             } else {
                 custom_headers.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(",")
             },
+            timeout.as_secs(),
         );
 
-        let client = Client::builder()
-            .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
-            .build()?;
+        let client = Client::builder().timeout(timeout).build()?;
         // Streaming client: connect timeout only, no total body timeout.
-        let streaming_client = Client::builder()
-            .connect_timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
-            .build()?;
+        let streaming_client = Client::builder().connect_timeout(timeout).build()?;
         Ok(Self(Arc::new(LlmClientInner {
             client,
             streaming_client,
@@ -310,6 +318,8 @@ impl LlmClient {
             model,
             api_key,
             custom_headers,
+            temperature,
+            max_tokens,
             supports_vision: OnceCell::new(),
             thinking_control: OnceCell::new(),
         })))
@@ -600,8 +610,8 @@ impl LlmClient {
                     content: Self::build_user_content(content, use_images),
                 },
             ],
-            temperature: TEMPERATURE,
-            max_tokens: MAX_TOKENS,
+            temperature: inner.temperature,
+            max_tokens: inner.max_tokens,
             stream: if stream { Some(true) } else { None },
             chat_template_kwargs: template_kwargs,
         };
