@@ -1,4 +1,6 @@
-//! Runtime prompt configuration loaded from an optional external TOML file.
+//! Runtime configuration loaded from an optional external TOML file: the system
+//! prompts and the `[api]` connection settings (endpoint, model, key, headers,
+//! streaming).
 //!
 //! Every prompt defaults to a built-in string (the `DEFAULT_*` constants below,
 //! the single source of truth). If a `config.toml` is found next to the
@@ -6,6 +8,11 @@
 //! variable — its values override the defaults field by field. Missing keys,
 //! malformed files, and unknown keys all degrade gracefully to the defaults;
 //! loading never panics.
+//!
+//! The `[api]` accessors expose the raw configured values only; the
+//! `CLIP_LLM_*` environment variables still take precedence over them and are
+//! applied by the consumers (`LlmClient::new`, the worker), so the order is
+//! env var > config file > built-in default.
 //!
 //! The resolved config is stored once in a process-global [`OnceLock`] and read
 //! through [`get`]. Both call sites of `ProcessMode::system_prompt`
@@ -15,6 +22,7 @@
 //! Limitation: the config is immutable after init — there is no hot-reload.
 //! Phase 7 may replace the `OnceLock` with an `ArcSwap`/`RwLock` to support it.
 
+use std::collections::BTreeMap;
 use std::env;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -126,15 +134,33 @@ const DEFAULT_SUMMARIZE_IMAGE_PROMPT: &str =
 
 // -- Deserialized config schema --
 
-/// Top-level prompt configuration. Every field defaults to the built-in prompts;
-/// any subset may be overridden by the TOML file.
+/// Top-level configuration. Every field defaults to the built-in values; any
+/// subset may be overridden by the TOML file.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    api: ApiConfig,
     languages: LanguagesConfig,
     translate: TranslateConfig,
     rephrase: RephraseConfig,
     summarize: SummarizeConfig,
+}
+
+/// `[api]` — connection settings. Each is an alternative to the matching
+/// `CLIP_LLM_*` environment variable, which still wins when set.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ApiConfig {
+    /// API base URL (alternative to `CLIP_LLM_API_ENDPOINT`).
+    endpoint: Option<String>,
+    /// Model name (alternative to `CLIP_LLM_MODEL`).
+    model: Option<String>,
+    /// Bearer token (alternative to `CLIP_LLM_API_KEY`).
+    api_key: Option<String>,
+    /// Whether to use SSE streaming (alternative to the inverse `CLIP_LLM_NO_STREAM`).
+    streaming: Option<bool>,
+    /// `[api.headers]` — custom HTTP headers (alternative to `CLIP_LLM_CUSTOM_HEADERS`).
+    headers: BTreeMap<String, String>,
 }
 
 /// `[languages]` — substituted into `{primary_lang}` / `{secondary_lang}`.
@@ -201,6 +227,31 @@ struct SummarizeConfig {
 }
 
 impl Config {
+    /// Configured API endpoint, if any (`[api].endpoint`).
+    pub fn api_endpoint(&self) -> Option<&str> {
+        self.api.endpoint.as_deref()
+    }
+
+    /// Configured model name, if any (`[api].model`).
+    pub fn api_model(&self) -> Option<&str> {
+        self.api.model.as_deref()
+    }
+
+    /// Configured API key, if any (`[api].api_key`).
+    pub fn api_key(&self) -> Option<&str> {
+        self.api.api_key.as_deref()
+    }
+
+    /// Configured streaming preference, if any (`[api].streaming`).
+    pub fn api_streaming(&self) -> Option<bool> {
+        self.api.streaming
+    }
+
+    /// Configured custom HTTP headers (`[api.headers]`); empty if none.
+    pub fn api_headers(&self) -> &BTreeMap<String, String> {
+        &self.api.headers
+    }
+
     /// Primary language name (`{primary_lang}`).
     pub fn primary_lang(&self) -> &str {
         &self.languages.primary
@@ -519,6 +570,42 @@ mod tests {
         assert_eq!(config.rephrase_style(RephraseStyle::Correct), DEFAULT_REPHRASE_STYLE_CORRECT);
         assert_eq!(config.rephrase_length(RephraseLength::Terse), "LEN");
         assert_eq!(config.rephrase_length(RephraseLength::Same), "");
+    }
+
+    #[test]
+    fn api_section_parses_all_fields() {
+        let config: Config = toml::from_str(
+            "[api]\n\
+             endpoint = \"http://host:9000/v1\"\n\
+             model = \"my-model\"\n\
+             api_key = \"secret\"\n\
+             streaming = false\n\
+             [api.headers]\n\
+             X-Dep-Ticket = \"abc\"\n\
+             User-Id = \"u1\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.api_endpoint(), Some("http://host:9000/v1"));
+        assert_eq!(config.api_model(), Some("my-model"));
+        assert_eq!(config.api_key(), Some("secret"));
+        assert_eq!(config.api_streaming(), Some(false));
+        assert_eq!(config.api_headers().get("X-Dep-Ticket").map(String::as_str), Some("abc"));
+        assert_eq!(config.api_headers().get("User-Id").map(String::as_str), Some("u1"));
+    }
+
+    #[test]
+    fn api_defaults_are_absent() {
+        // No [api] section: every accessor reports "unset" so the consumer can
+        // fall back to env vars / built-in defaults.
+        let config = Config::default();
+        assert_eq!(config.api_endpoint(), None);
+        assert_eq!(config.api_model(), None);
+        assert_eq!(config.api_key(), None);
+        assert_eq!(config.api_streaming(), None);
+        assert!(config.api_headers().is_empty());
+        // A prompt-only config also leaves [api] unset.
+        let prompt_only: Config = toml::from_str("[translate]\nprompt = \"x\"\n").unwrap();
+        assert_eq!(prompt_only.api_endpoint(), None);
     }
 
     #[test]
