@@ -469,6 +469,9 @@ fn render_tab_bar(
     thinking: ThinkingState,
     action: &mut OverlayAction,
 ) {
+    // Content is loaded whenever any mode is available; when empty the overlay
+    // is idle (no clipboard content) rather than restricted, so skip the tooltip.
+    let has_content = !available_modes.is_empty();
     ui.horizontal(|ui| {
         // Mode tabs (left side)
         for &mode in ProcessMode::ALL {
@@ -491,6 +494,13 @@ fn render_tab_bar(
                 .corner_radius(6.0);
 
             let response = ui.add(button);
+            // Explain why a tab is disabled (e.g. image-only clipboard locks all
+            // modes except Summarize) instead of silently swallowing the click.
+            let response = if !is_available && has_content {
+                response.on_hover_text("Requires text — image-only clipboard")
+            } else {
+                response
+            };
             let underline_color = if is_selected {
                 Some(accent_color())
             } else if response.hovered() && is_available {
