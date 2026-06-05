@@ -507,6 +507,21 @@ impl StateMachine {
         if matches!(self.state, OverlayState::Hidden) || !self.has_been_focused {
             return vec![];
         }
+        // Processing: abandoning the overlay must also cancel the in-flight
+        // request, otherwise it runs to completion and its response is silently
+        // dropped (on_worker_result rejects results once we leave Processing).
+        if matches!(self.state, OverlayState::Processing) {
+            self.reset_to_hidden();
+            return vec![UiEffect::SendCancel, UiEffect::HideWindow];
+        }
+        // Single-tap result (auto_copy == false): the result was NOT written to
+        // the clipboard, so auto-hiding here would lose it with no recovery path.
+        // Keep the overlay open; the user dismisses it explicitly (Escape or a new
+        // hotkey trigger). A double-tap result is already safely in the clipboard,
+        // and the Error state carries no user data, so both still auto-hide below.
+        if matches!(self.state, OverlayState::Result(_)) && !self.auto_copy {
+            return vec![];
+        }
         self.reset_to_hidden();
         vec![UiEffect::HideWindow]
     }
@@ -986,6 +1001,56 @@ mod tests {
 
         assert_eq!(*sm.state(), OverlayState::Hidden);
         assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn focus_lost_during_processing_cancels_request() {
+        let mut sm = new_sm();
+        start_processing(&mut sm, "hello");
+        sm.handle(UiEvent::FocusGained);
+
+        let effects = sm.handle(UiEvent::FocusLost);
+
+        assert_eq!(*sm.state(), OverlayState::Hidden);
+        // Must cancel the in-flight request, not just hide.
+        assert!(effects.contains(&UiEffect::SendCancel));
+        assert!(effects.contains(&UiEffect::HideWindow));
+    }
+
+    #[test]
+    fn focus_lost_keeps_single_tap_result() {
+        let mut sm = new_sm();
+        // Single-tap: result is NOT auto-copied to the clipboard.
+        let effects = sm.handle(UiEvent::ContentReady {
+            content: ClipboardContent::text_only("hello".into()),
+            auto_copy: false,
+        });
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerResult { text: "translated".into(), think_content: None, request_id: rid });
+        sm.handle(UiEvent::FocusGained);
+        assert_eq!(*sm.state(), OverlayState::Result("translated".into()));
+
+        // Clicking away must NOT destroy the result (no clipboard copy happened).
+        let effects = sm.handle(UiEvent::FocusLost);
+        assert!(effects.is_empty());
+        assert_eq!(*sm.state(), OverlayState::Result("translated".into()));
+    }
+
+    #[test]
+    fn focus_lost_hides_double_tap_result() {
+        let mut sm = new_sm();
+        // Double-tap: result is already in the clipboard, so auto-hide is safe.
+        let effects = sm.handle(UiEvent::ContentReady {
+            content: ClipboardContent::text_only("hello".into()),
+            auto_copy: true,
+        });
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerResult { text: "translated".into(), think_content: None, request_id: rid });
+        sm.handle(UiEvent::FocusGained);
+
+        let effects = sm.handle(UiEvent::FocusLost);
+        assert_eq!(*sm.state(), OverlayState::Hidden);
+        assert!(effects.contains(&UiEffect::HideWindow));
     }
 
     // === Edge cases ===
