@@ -49,7 +49,7 @@ const MAX_CONFIG_BYTES: u64 = 1 << 20; // 1 MiB
 // the rephrase base template.
 
 const DEFAULT_TRANSLATE_PROMPT: &str =
-    "You are a {primary_lang}↔{secondary_lang} translator for software engineering text. \
+    "You are a {primary_lang} ↔ {secondary_lang} translator for software engineering text. \
      Auto-detect the input language: if {primary_lang}, translate to {secondary_lang}; \
      if {secondary_lang}, translate to {primary_lang}. \
      Rules: \
@@ -67,7 +67,7 @@ const DEFAULT_REPHRASE_BASE: &str =
      Always return the corrected text, even if the input is incomplete, informal, or unclear. \
      Auto-detect the input language and output in the same language. \
      Preserve all code, variable names, and identifiers unchanged. \
-     {style}{length} \
+     {style} {length} \
      Output the rewritten text only — no preamble, labels, answers, or markdown.";
 
 const DEFAULT_REPHRASE_STYLE_CORRECT: &str =
@@ -81,17 +81,18 @@ const DEFAULT_REPHRASE_STYLE_BUSINESS: &str =
 const DEFAULT_REPHRASE_STYLE_TECHNICAL: &str =
     "Rewrite using precise technical/engineering terminology naturally. Fix any errors.";
 
-// Length modifiers begin with a leading space so they append cleanly after the
-// style modifier inside `{style}{length}`. `Same` contributes nothing.
+// Length modifiers carry no surrounding whitespace; the `{style} {length}` base
+// supplies the separator, and `rephrase_prompt` collapses the doubled space left
+// when `Same` (empty) sits between the two template spaces. `Same` contributes nothing.
 const DEFAULT_REPHRASE_LENGTH_TERSE: &str =
-    " Target output length: 40% of input. Cut aggressively — keep only the single core point per sentence. Do not pad.";
+    "Target output length: 40% of input. Cut aggressively — keep only the single core point per sentence. Do not pad.";
 const DEFAULT_REPHRASE_LENGTH_BRIEF: &str =
-    " Target output length: 70% of input. Remove all redundancy and filler. Do not pad.";
+    "Target output length: 70% of input. Remove all redundancy and filler. Do not pad.";
 const DEFAULT_REPHRASE_LENGTH_SAME: &str = "";
 const DEFAULT_REPHRASE_LENGTH_DETAILED: &str =
-    " Target output length: 150% of input. Do not exceed 160%. Add only concrete context — no padding or filler.";
+    "Target output length: 150% of input. Do not exceed 160%. Add only concrete context — no padding or filler.";
 const DEFAULT_REPHRASE_LENGTH_FULL: &str =
-    " Target output length: 200% of input. Do not exceed 220%. Add substantive detail only — no padding or repetition.";
+    "Target output length: 200% of input. Do not exceed 220%. Add substantive detail only — no padding or repetition.";
 
 const DEFAULT_SUMMARIZE_PROMPT: &str =
     "You are a text summarizer for software engineering content. \
@@ -363,14 +364,39 @@ impl Config {
     /// Builds the Rephrase prompt by substituting the `{style}` / `{length}`
     /// tokens in the base template in a single pass.
     pub fn rephrase_prompt(&self, style: RephraseStyle, length: RephraseLength) -> String {
-        substitute_tokens(
+        let assembled = substitute_tokens(
             self.rephrase_base(),
             &[
                 ("{style}", self.rephrase_style(style)),
                 ("{length}", self.rephrase_length(length)),
             ],
-        )
+        );
+        // The base uses explicit `{style} {length}` spacing, so an empty length
+        // (Same) leaves a doubled space between the two template spaces. Collapse
+        // runs of spaces so every style/length combination renders single-spaced.
+        collapse_spaces(&assembled)
     }
+}
+
+/// Collapse runs of ASCII spaces to a single space and trim the ends. Used to
+/// keep the Rephrase prompt clean when an optional segment (an empty length such
+/// as `Same`) leaves a doubled space between explicit template spaces. Newlines
+/// and tabs are left untouched.
+fn collapse_spaces(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_space = false;
+    for ch in s.chars() {
+        if ch == ' ' {
+            if !prev_space {
+                out.push(' ');
+            }
+            prev_space = true;
+        } else {
+            out.push(ch);
+            prev_space = false;
+        }
+    }
+    out.trim().to_string()
 }
 
 /// Replaces every `{token}` in `template` with its mapped value in a single
@@ -602,6 +628,36 @@ mod tests {
     fn rephrase_length_same_is_empty() {
         let config = Config::default();
         assert_eq!(config.rephrase_length(RephraseLength::Same), "");
+    }
+
+    #[test]
+    fn collapse_spaces_squeezes_runs_and_trims() {
+        assert_eq!(collapse_spaces("a  b"), "a b");
+        assert_eq!(collapse_spaces("  a   b  "), "a b");
+        assert_eq!(collapse_spaces("a b"), "a b");
+        // Newlines are preserved (only spaces collapse).
+        assert_eq!(collapse_spaces("a\n\nb"), "a\n\nb");
+    }
+
+    #[test]
+    fn rephrase_prompt_single_spaced_for_all_combos() {
+        // Explicit `{style} {length}` spacing must not leave a doubled space for
+        // any combination, including the empty `Same` length.
+        let config = Config::default();
+        for &style in RephraseStyle::ALL {
+            for &length in RephraseLength::ALL {
+                let prompt = config.rephrase_prompt(style, length);
+                assert!(
+                    !prompt.contains("  "),
+                    "double space for {style:?}/{length:?}: {prompt:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn translate_default_uses_spaced_arrow() {
+        assert!(DEFAULT_TRANSLATE_PROMPT.contains("{primary_lang} ↔ {secondary_lang}"));
     }
 
     #[test]
