@@ -10,6 +10,7 @@ arboard = "3"
 reqwest = { version = "0.13", features = ["rustls", "json"], default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = { version = "0.8", default-features = false, features = ["parse"] }
 thiserror = "2"
 regex = "1"
 tracing = "0.1"
