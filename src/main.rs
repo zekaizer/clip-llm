@@ -108,6 +108,10 @@ fn select_wgpu_adapter(
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // Load prompt overrides from config.toml (if any) before any worker or UI
+    // thread reads them. Falls back to built-in defaults on any error.
+    clip_llm::config::init_prompt_config();
+
     // Check platform permissions before anything else.
     {
         use clip_llm::platform::{NativePlatform, Platform};
