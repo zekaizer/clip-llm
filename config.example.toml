@@ -1,0 +1,61 @@
+# clip-llm prompt configuration (example)
+#
+# Copy this file to `config.toml` next to the clip-llm executable, or point the
+# CLIP_LLM_CONFIG environment variable at it (absolute path recommended).
+#
+# Every key below is OPTIONAL. Any key you omit keeps its built-in default, so a
+# config.toml may contain just the few prompts you want to change. A missing
+# file, malformed TOML, or unknown keys all fall back to the built-in defaults
+# without stopping the app.
+#
+# Placeholders (substituted at runtime):
+#   {primary_lang}, {secondary_lang}  -> usable in [translate] and [summarize]
+#   {style}, {length}                 -> usable only in [rephrase].base
+# Any other {token} is passed through to the model unchanged.
+
+# Language names substituted into {primary_lang} / {secondary_lang}.
+[languages]
+primary   = "Korean"
+secondary = "English"
+
+# Translate mode. Placeholders: {primary_lang}, {secondary_lang}.
+[translate]
+prompt = "You are a {primary_lang}↔{secondary_lang} translator. Output the translation only."
+
+# Rephrase mode. `base` is the shared template; {style} and {length} are filled
+# in from the tables below according to the selected style/length.
+[rephrase]
+base = "You are a proofreader/rewriter. Preserve all code and identifiers unchanged. {style}{length} Output the rewritten text only."
+
+# One key per style. Override only the ones you want; the rest stay default.
+[rephrase.style]
+correct   = "Fix grammar, spelling, and punctuation. Preserve original tone and style exactly."
+casual    = "Rewrite in a friendly, conversational tone. Fix any errors."
+formal    = "Rewrite in a polite, formal register. Fix any errors."
+business  = "Rewrite in a concise, professional business tone. Fix any errors."
+technical = "Rewrite using precise technical/engineering terminology naturally. Fix any errors."
+
+# One key per length. `same` is intentionally empty (no length instruction).
+# Non-empty values should start with a leading space so they append cleanly.
+[rephrase.length]
+terse    = " Target output length: 40% of input. Cut aggressively. Do not pad."
+brief    = " Target output length: 70% of input. Remove redundancy and filler."
+same     = ""
+detailed = " Target output length: 150% of input. Add only concrete context."
+full     = " Target output length: 200% of input. Add substantive detail only."
+
+# Summarize mode. `prompt` is used for text input, `image_prompt` for
+# image-only clipboards (vision models). Placeholders: {primary_lang}.
+# TOML multi-line strings (""") are handy for the markdown template.
+[summarize]
+prompt = """
+You are a text summarizer. Produce a concise summary in {primary_lang}, \
+keeping technical terms intact. Use this markdown template, omitting empty sections:
+# [Title]
+
+> Few-line summary
+
+## Key Points
+
+## Conclusion"""
+image_prompt = "You are an image analyst. Describe the image(s) in {primary_lang}. Describe ONLY what is visible — do not speculate."
