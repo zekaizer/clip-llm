@@ -34,11 +34,14 @@ jobs:
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package binary (macOS)
+      - name: Package .app (macOS)
         if: runner.os == 'macOS'
         run: |
-          cp target/${{ matrix.target }}/release/clip-llm ${{ matrix.artifact }}
-          chmod +x ${{ matrix.artifact }}
+          VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          bash scripts/package-macos-app.sh \
+            "target/${{ matrix.target }}/release/clip-llm" \
+            "$VERSION" \
+            "${{ matrix.artifact }}.app.zip"
 
       - name: Package binary (Windows)
         if: runner.os == 'Windows'
@@ -66,7 +69,7 @@ jobs:
           gh release upload "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --clobber \
-            artifacts/clip-llm-macos-arm64/clip-llm-macos-arm64 \
+            artifacts/clip-llm-macos-arm64/clip-llm-macos-arm64.app.zip \
             artifacts/clip-llm-windows-x64/clip-llm-windows-x64.exe
 
       - name: Promote to full release

@@ -13,11 +13,30 @@ System-wide LLM clipboard assistant. Captures text via global hotkey, sends it t
 - **OpenAI-compatible API** — works with vLLM or any `/v1/chat/completions` endpoint
 - **Single binary, cross-platform** — macOS & Windows 11, no runtime dependencies
 
+## Install
+
+Download the latest build from the [Releases](../../releases) page.
+
+**macOS** — `clip-llm-macos-arm64.app.zip` (Apple Silicon):
+1. Unzip and move `clip-llm.app` wherever you like.
+2. It is ad-hoc signed, so on first launch **right-click → Open** (or run
+   `xattr -dr com.apple.quarantine clip-llm.app`) to get past Gatekeeper.
+3. Grant **System Settings → Privacy & Security → Accessibility** — required to
+   simulate Cmd+C/Cmd+V. The app is a menu-bar agent (no Dock icon); quit from
+   its menu-bar icon.
+
+**Windows 11** — `clip-llm-windows-x64.exe`: run the portable `.exe`; no install,
+no special permissions.
+
+Settings come from a `config.toml` next to the executable (inside
+`clip-llm.app/Contents/MacOS/` on macOS) or `CLIP_LLM_*` env vars — see
+[Configuration](#configuration).
+
 ## Roadmap
 
 - [x] Phase 1 — Basic Pipeline
 - [x] Phase 2 — Async API + SSE Streaming
-- [ ] Phase 3 — Status Feedback + System Tray (partial: Windows tray done, no macOS tray/toast/retry)
+- [ ] Phase 3 — Status Feedback + System Tray (partial: Windows + macOS tray + friendly errors done; no toast/retry)
 - [ ] Phase 4 — Config File + Multiple Templates (partial: TOML config for prompts + API settings done)
 - [ ] Phase 5 — Template Cycle Selection UI
 - [x] Phase 6 — Windows Build & Distribution (partial: no CI/E2E tests)
