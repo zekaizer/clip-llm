@@ -668,6 +668,7 @@ impl eframe::App for OverlayApp {
                 think_expanded: self.think_expanded,
             },
             self.sm.available_modes(),
+            self.preview_mode,
             self.sm.rephrase_params(),
             overlay::ThinkingState {
                 mode: self.sm.effective_thinking_mode(),

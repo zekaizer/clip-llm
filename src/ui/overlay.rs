@@ -15,6 +15,11 @@ fn accent_color() -> egui::Color32 {
 fn accent_color_dim() -> egui::Color32 {
     egui::Color32::from_rgba_unmultiplied(108, 166, 255, 80)
 }
+/// Accent color for the uncommitted cycling preview underline — between the
+/// hover dim and the committed accent, signalling "not yet selected".
+fn accent_color_preview() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(108, 166, 255, 140)
+}
 /// Action button: distance (px) at which the button becomes fully transparent.
 const ACTION_BTN_FADE_RADIUS: f32 = 80.0;
 /// Action button: maximum alpha value at zero distance from cursor.
@@ -68,6 +73,7 @@ pub fn render(
     mode: ProcessMode,
     streaming: StreamingState<'_>,
     available_modes: &[ProcessMode],
+    preview_mode: Option<ProcessMode>,
     rephrase_params: RephraseParams,
     thinking: ThinkingState,
     pinned: bool,
@@ -121,15 +127,29 @@ pub fn render(
             frame.show(ui, |ui| {
                 ui.set_width(OVERLAY_WIDTH);
 
-                // Capturing has no content/modes yet — show only a spinner, no tab bar.
+                // Capturing has no content/modes yet — normally just a spinner.
+                // During a hold-to-cycle gesture (double-tap path) the capture is
+                // deferred, so show the tab bar with the live preview above the
+                // spinner. Content type is unknown here, so all modes are offered;
+                // image-only is reconciled on capture in on_content_ready.
                 if matches!(state, OverlayState::Capturing) {
+                    if preview_mode.is_some() {
+                        render_tab_bar(
+                            ui, mode, ProcessMode::ALL,
+                            thinking, pinned, preview_mode,
+                            &mut action,
+                        );
+                        ui.add_space(4.0);
+                        ui.add(egui::Separator::default().spacing(4.0));
+                        ui.add_space(4.0);
+                    }
                     render_capturing(ui, elapsed, &mut action);
                     return;
                 }
 
                 render_tab_bar(
                     ui, mode, available_modes,
-                    thinking, pinned,
+                    thinking, pinned, preview_mode,
                     &mut action,
                 );
 
@@ -506,16 +526,21 @@ fn render_tab_bar(
     available_modes: &[ProcessMode],
     thinking: ThinkingState,
     pinned: bool,
+    preview_mode: Option<ProcessMode>,
     action: &mut OverlayAction,
 ) {
     // Content is loaded whenever any mode is available; when empty the overlay
     // is idle (no clipboard content) rather than restricted, so skip the tooltip.
     let has_content = !available_modes.is_empty();
+    // While cycling, the highlight follows the (uncommitted) preview — the tab
+    // that would be selected on modifier release — Alt+Tab style.
+    let cycling = preview_mode.is_some();
+    let highlight = preview_mode.unwrap_or(current);
     ui.horizontal(|ui| {
         // Mode tabs (left side)
         for &mode in ProcessMode::ALL {
             let is_available = available_modes.contains(&mode);
-            let is_selected = mode == current && is_available;
+            let is_selected = mode == highlight && is_available;
 
             let text = egui::RichText::new(mode.label())
                 .size(13.0)
@@ -541,7 +566,12 @@ fn render_tab_bar(
                 response
             };
             let underline_color = if is_selected {
-                Some(accent_color())
+                // Distinguish the uncommitted cycling preview from the committed mode.
+                if cycling {
+                    Some(accent_color_preview())
+                } else {
+                    Some(accent_color())
+                }
             } else if response.hovered() && is_available {
                 Some(accent_color_dim())
             } else {
