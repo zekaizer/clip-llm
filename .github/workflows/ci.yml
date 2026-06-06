@@ -24,3 +24,12 @@ jobs:
 
       - name: Test
         run: cargo test
+
+      # The `diagnostics` feature gates an entire scenario-runner module (and its
+      # tests) plus cfg-branches in the UI/worker. Without these steps that code
+      # is never compiled or run in CI and can rot undetected.
+      - name: Clippy (diagnostics feature)
+        run: cargo clippy --features diagnostics -- -D warnings
+
+      - name: Test (diagnostics feature)
+        run: cargo test --features diagnostics
