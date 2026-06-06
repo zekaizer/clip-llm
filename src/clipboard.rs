@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -105,11 +106,19 @@ impl ClipboardManager {
     pub fn copy_and_read(
         &mut self,
         platform: &dyn Platform,
+        cancel: &AtomicBool,
     ) -> Result<ClipboardContent, ClipboardError> {
         info!("simulating copy to capture selection");
         // Wait for user to release modifier keys (Ctrl+Shift) after double-tap,
         // otherwise simulate_copy sends Cmd+Ctrl+Shift+C instead of Cmd+C.
         thread::sleep(Duration::from_millis(200));
+        // Bail out before touching the clipboard if this capture was cancelled or
+        // superseded during the release wait — otherwise clear() + Cmd+C would
+        // overwrite whatever the user has copied since with stale selection.
+        if cancel.load(Ordering::SeqCst) {
+            debug!("capture cancelled before copy simulation");
+            return Err(ClipboardError::Cancelled);
+        }
         let _ = self.board.clear();
         platform.simulate_copy()?;
 
@@ -119,6 +128,13 @@ impl ClipboardManager {
 
         loop {
             thread::sleep(interval);
+
+            // Stop polling promptly once superseded so overlapping captures don't
+            // keep issuing clipboard reads in parallel.
+            if cancel.load(Ordering::SeqCst) {
+                debug!("capture cancelled during clipboard poll");
+                return Err(ClipboardError::Cancelled);
+            }
 
             let text = self.board.get_text().ok().filter(|s| !s.trim().is_empty());
             let images = read_image_from_board(&mut self.board)?;
@@ -255,7 +271,7 @@ mod tests {
             copy_text: Some("  \n  ".into()),
         };
 
-        let result = mgr.copy_and_read(&mock);
+        let result = mgr.copy_and_read(&mock, &AtomicBool::new(false));
         assert!(matches!(result, Err(ClipboardError::NoTextAfterCopy)));
     }
 
@@ -280,7 +296,7 @@ mod tests {
 
         // Pre-existing clipboard content should be replaced by copy simulation.
         mgr.write_text("old content").unwrap();
-        let content = mgr.copy_and_read(&mock).unwrap();
+        let content = mgr.copy_and_read(&mock, &AtomicBool::new(false)).unwrap();
         assert_eq!(content.text.as_deref(), Some("selected text"));
         // Text-only selection: no images captured.
         assert!(!content.has_images());
@@ -297,7 +313,7 @@ mod tests {
             copy_text: None,
         };
 
-        let result = mgr.copy_and_read(&mock);
+        let result = mgr.copy_and_read(&mock, &AtomicBool::new(false));
         assert!(matches!(result, Err(ClipboardError::NoTextAfterCopy)));
     }
 
@@ -312,7 +328,7 @@ mod tests {
             copy_text: None,
         };
 
-        let result = mgr.copy_and_read(&mock);
+        let result = mgr.copy_and_read(&mock, &AtomicBool::new(false));
         assert!(matches!(result, Err(ClipboardError::CopyFailed(_))));
     }
 

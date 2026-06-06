@@ -160,32 +160,39 @@ impl Platform for WindowsPlatform {
     }
 
     fn paste_to_foreground(&self) -> Result<(), PlatformError> {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{
-            ShowWindow, ShowWindowAsync, SW_HIDE, SW_SHOWNA,
-        };
-
-        let hwnd = find_clip_llm_hwnd();
+        use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
 
         // SW_HIDE transfers foreground to the previous app. move_window_offscreen()
         // alone keeps us as foreground, so SendInput would target the overlay.
-        if let Some(h) = hwnd {
+        // Done synchronously on the calling thread (fast).
+        if let Some(h) = find_clip_llm_hwnd() {
             unsafe { ShowWindow(h, SW_HIDE); }
             debug!("yielded focus via ShowWindow(SW_HIDE)");
         } else {
             warn!("paste_to_foreground: window not found, paste may target wrong app");
         }
 
-        // Wait for the target app to become foreground and ready for input.
-        thread::sleep(Duration::from_millis(FOCUS_TRANSFER_DELAY_MS));
-        let result = self.simulate_paste();
-
-        // Restore offscreen-but-visible state to avoid eframe CPU spin (egui#5229).
-        // SW_HIDE triggers ControlFlow::Poll; SW_SHOWNA at (-32000,-32000) restores Wait.
-        // Do NOT use show_no_activate() — it repositions to cursor.
-        if let Some(h) = hwnd {
-            unsafe { ShowWindowAsync(h, SW_SHOWNA); }
-        }
-        result
+        // The focus-transfer wait + key simulation + visibility restore (~150ms)
+        // run on a short-lived background thread so the egui render loop is not
+        // frozen on every paste. HWND is !Send, so re-find it inside the thread
+        // (FindWindowW is callable from any thread). WindowsPlatform is a ZST.
+        thread::spawn(|| {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindowAsync, SW_SHOWNA};
+            // Wait for the target app to become foreground and ready for input.
+            thread::sleep(Duration::from_millis(FOCUS_TRANSFER_DELAY_MS));
+            let result = WindowsPlatform.simulate_paste();
+            // Restore offscreen-but-visible state to avoid eframe CPU spin
+            // (egui#5229): SW_HIDE triggers ControlFlow::Poll; SW_SHOWNA at
+            // (-32000,-32000) restores Wait. Do NOT use show_no_activate() — it
+            // repositions to cursor.
+            if let Some(h) = find_clip_llm_hwnd() {
+                unsafe { ShowWindowAsync(h, SW_SHOWNA); }
+            }
+            if let Err(e) = result {
+                warn!("paste simulation failed: {e}");
+            }
+        });
+        Ok(())
     }
 }
 

@@ -410,9 +410,10 @@ impl Platform for MacOsPlatform {
 
     fn paste_to_foreground(&self) -> Result<(), PlatformError> {
         // Deactivate this app so the OS activates the previously focused app.
-        // [NSApp hide:nil] itself is synchronous, but the WindowServer IPC for
-        // focus transfer to the target app is asynchronous — the target needs
-        // time to become first responder before it can receive key events.
+        // [NSApp hide:nil] is AppKit and must run on the main thread, so it stays
+        // synchronous here; it is fast. The slow part — the WindowServer focus-
+        // transfer wait plus key simulation (~150ms) — runs on a short-lived
+        // background thread so the egui render loop is not frozen on every paste.
         unsafe {
             let cls = objc_getClass(c"NSApplication".as_ptr());
             let app = objc_msgSend(cls, sel_registerName(c"sharedApplication".as_ptr()));
@@ -424,8 +425,15 @@ impl Platform for MacOsPlatform {
                 debug!("yielded focus via [NSApp hide:]");
             }
         }
-        // Wait for WindowServer focus transfer to complete.
-        thread::sleep(Duration::from_millis(FOCUS_TRANSFER_DELAY_MS));
-        self.simulate_paste()
+        // CGEvent posting is thread-safe, so the delayed paste is safe off-thread.
+        // MacOsPlatform is a ZST, so construct a fresh one for the thread.
+        thread::spawn(|| {
+            // Wait for WindowServer focus transfer to complete before pasting.
+            thread::sleep(Duration::from_millis(FOCUS_TRANSFER_DELAY_MS));
+            if let Err(e) = MacOsPlatform.simulate_paste() {
+                warn!("paste simulation failed: {e}");
+            }
+        });
+        Ok(())
     }
 }

@@ -18,7 +18,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 eframe = { version = "0.33", default-features = false, features = ["default_fonts", "wgpu"] }
 egui-wgpu = "0.33"
 wgpu = "27"
-tokio = { version = "1", features = ["rt", "macros", "sync"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
 zstd = "0.13"
 png = "0.18"
 base64 = "0.22"

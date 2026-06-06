@@ -115,6 +115,9 @@ pub enum UiEffect {
     ResetAreas,
     /// Simulate paste (Cmd+V / Ctrl+V) into the previously focused app.
     PasteClipboard,
+    /// Signal the in-flight background selection capture to abort before it
+    /// mutates the clipboard (clear + simulated Cmd+C), e.g. on cancel/close.
+    CancelCapture,
 }
 
 // ---------------------------------------------------------------------------
@@ -476,11 +479,16 @@ impl StateMachine {
             OverlayState::Hidden => vec![],
             // Closing mid-request (Escape or the ✕ button) must also cancel the
             // in-flight LLM request, or it runs to completion and its response is
-            // silently dropped. Capturing has no request yet (its background result
-            // is discarded by the adapter's seq + state gate).
+            // silently dropped.
             OverlayState::Processing => {
                 self.reset_to_hidden();
                 vec![UiEffect::SendCancel, UiEffect::HideWindow]
+            }
+            // Closing mid-capture must abort the background capture before it
+            // clears the clipboard and fires Cmd+C, or it corrupts the clipboard.
+            OverlayState::Capturing => {
+                self.reset_to_hidden();
+                vec![UiEffect::CancelCapture, UiEffect::HideWindow]
             }
             _ => {
                 self.reset_to_hidden();
@@ -496,12 +504,12 @@ impl StateMachine {
                 self.reset_to_hidden();
                 vec![UiEffect::SendCancel, UiEffect::HideWindow]
             }
-            // Capture in flight: there is no LLM request yet, just hide. The
-            // background capture's result is ignored via the adapter's seq + state
-            // gate once we leave Capturing.
+            // Capture in flight: there is no LLM request yet. Abort the background
+            // capture (its result is also ignored via the adapter's seq + state
+            // gate) so it cannot clear the clipboard and fire Cmd+C after cancel.
             OverlayState::Capturing => {
                 self.reset_to_hidden();
-                vec![UiEffect::HideWindow]
+                vec![UiEffect::CancelCapture, UiEffect::HideWindow]
             }
             _ => vec![],
         }
@@ -648,13 +656,36 @@ impl StateMachine {
         vec![UiEffect::ResetAreas, UiEffect::ShowWindow]
     }
 
-    /// Cache key for the current mode + rephrase params + thinking mode combination.
+    /// Whether the loaded content is image-only (no usable text). This selects the
+    /// image-specific Summarize prompt in the API client, so it is part of the
+    /// cache identity. Mirrors `LlmClient`'s `image_only` derivation for every case
+    /// that is actually cached (an image-only request with no vision support errors
+    /// out before producing a cacheable result).
+    fn is_image_only(&self) -> bool {
+        self.original_content
+            .as_ref()
+            .is_some_and(|c| c.text.is_none() && c.has_images())
+    }
+
+    /// Cache key identifying the request that would be sent for the current state.
+    ///
+    /// Keyed on exactly the inputs that change the system prompt + thinking control
+    /// — never on the rendered prompt string. This keeps the state machine
+    /// independent of the global `config` (the prompt text) and is cheaper than
+    /// formatting the full prompt. Two states that would produce an identical
+    /// request share a cache entry; modes whose prompt ignores an axis omit it.
     fn cache_key(&self) -> String {
-        format!(
-            "{}|{:?}",
-            self.mode.system_prompt(self.rephrase_params, false),
-            self.effective_thinking_mode(),
-        )
+        let thinking = self.effective_thinking_mode();
+        match self.mode {
+            ProcessMode::Translate => format!("translate|{thinking:?}"),
+            ProcessMode::Summarize => {
+                format!("summarize|{}|{thinking:?}", self.is_image_only())
+            }
+            ProcessMode::Rephrase => format!(
+                "rephrase|{:?}|{:?}|{thinking:?}",
+                self.rephrase_params.style, self.rephrase_params.length,
+            ),
+        }
     }
 
     fn on_change_rephrase_style(&mut self, style: RephraseStyle) -> Vec<UiEffect> {
@@ -904,6 +935,32 @@ mod tests {
 
         assert_eq!(*sm.state(), OverlayState::Hidden);
         assert!(effects.contains(&UiEffect::SendCancel));
+        assert!(effects.contains(&UiEffect::HideWindow));
+    }
+
+    #[test]
+    fn cancel_during_capturing_aborts_capture() {
+        let mut sm = new_sm();
+        sm.handle(UiEvent::CaptureStarted);
+        assert_eq!(*sm.state(), OverlayState::Capturing);
+
+        let effects = sm.handle(UiEvent::UserCancel);
+
+        assert_eq!(*sm.state(), OverlayState::Hidden);
+        assert!(effects.contains(&UiEffect::CancelCapture));
+        assert!(effects.contains(&UiEffect::HideWindow));
+    }
+
+    #[test]
+    fn close_during_capturing_aborts_capture() {
+        let mut sm = new_sm();
+        sm.handle(UiEvent::CaptureStarted);
+        assert_eq!(*sm.state(), OverlayState::Capturing);
+
+        let effects = sm.handle(UiEvent::UserClose);
+
+        assert_eq!(*sm.state(), OverlayState::Hidden);
+        assert!(effects.contains(&UiEffect::CancelCapture));
         assert!(effects.contains(&UiEffect::HideWindow));
     }
 
@@ -1435,6 +1492,32 @@ mod tests {
         let effects = sm.handle(UiEvent::ContentReady { content: ClipboardContent::text_only("hello".into()), auto_copy: true });
         assert_eq!(*sm.state(), OverlayState::Processing);
         assert!(effects.iter().any(|e| matches!(e, UiEffect::SendProcess { .. })));
+    }
+
+    #[test]
+    fn image_only_summarize_does_not_share_cache_key_with_text() {
+        use std::sync::Arc;
+        // The API client uses the image-specific Summarize prompt for image-only
+        // content, so its result must not collide with a text Summarize result.
+        let mut sm = StateMachine::new(ProcessMode::Summarize);
+
+        // Text Summarize → Result, cached under the text key.
+        let e = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&e);
+        sm.handle(UiEvent::WorkerResult { text: "text summary".into(), think_content: None, request_id: rid });
+        let text_key = sm.cache_key();
+
+        // New image-only content (stays Summarize) → distinct key.
+        let e = sm.handle(UiEvent::ContentReady {
+            content: ClipboardContent { text: None, images: vec![Arc::new(vec![0x89, 0x50])] },
+            auto_copy: true,
+        });
+        let rid = last_request_id(&e);
+        let image_key = sm.cache_key();
+        assert_ne!(text_key, image_key, "image-only and text Summarize must key differently");
+
+        sm.handle(UiEvent::WorkerResult { text: "image summary".into(), think_content: None, request_id: rid });
+        assert_eq!(*sm.state(), OverlayState::Result("image summary".into()));
     }
 
     // === Streaming text ===

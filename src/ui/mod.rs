@@ -1,7 +1,9 @@
 mod overlay;
 pub mod state_machine;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use tokio::sync::mpsc as tokio_mpsc;
 
 use eframe::egui;
@@ -51,6 +53,10 @@ pub struct OverlayApp {
     /// Monotonic capture id; a returning capture result is honored only if it
     /// matches the latest and the state machine is still Capturing.
     capture_seq: u64,
+    /// Cancel flag for the in-flight capture thread; armed fresh per capture and
+    /// set when the capture is superseded or aborted (cancel/close) so it stops
+    /// before mutating the clipboard (clear + Cmd+C).
+    capture_cancel: Arc<AtomicBool>,
     #[cfg(feature = "diagnostics")]
     diag: crate::diagnostics::DiagCollector,
     #[cfg(feature = "diagnostics")]
@@ -88,6 +94,7 @@ impl OverlayApp {
             capture_rx,
             capture_tx,
             capture_seq: 0,
+            capture_cancel: Arc::new(AtomicBool::new(false)),
             diag: crate::diagnostics::DiagCollector::new(),
             diag_action_rx,
             diag_state_tx,
@@ -121,6 +128,7 @@ impl OverlayApp {
             capture_rx,
             capture_tx,
             capture_seq: 0,
+            capture_cancel: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -199,6 +207,11 @@ impl OverlayApp {
                         error!("paste simulation failed: {e}");
                     }
                 }
+                UiEffect::CancelCapture => {
+                    // Tell the in-flight capture thread to stop before it mutates
+                    // the clipboard; its (now stale) result is gated out separately.
+                    self.capture_cancel.store(true, Ordering::SeqCst);
+                }
             }
         }
     }
@@ -206,7 +219,15 @@ impl OverlayApp {
     // -- Tap action handling (from coordinator thread) --
 
     fn poll_tap_actions(&mut self, ctx: &egui::Context) {
-        while let Ok(tap_event) = self.tap_rx.try_recv() {
+        loop {
+            let tap_event = match self.tap_rx.try_recv() {
+                Ok(e) => e,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.fatal_disconnect(ctx, "coordinator");
+                    break;
+                }
+            };
             // Set spawn_position from coordinator's first-press capture.
             // This runs before sm.handle() so CaptureMousePosition effect
             // (which skips if already set) preserves the first-press position.
@@ -249,6 +270,11 @@ impl OverlayApp {
             // one finished. The seq check covers re-triggers; the state check covers
             // close/cancel.
             if seq != self.capture_seq || !matches!(self.sm.state(), OverlayState::Capturing) {
+                continue;
+            }
+            // A cancelled/superseded capture is normally gated out above; ignore it
+            // explicitly too so an abort never surfaces as a user-facing error.
+            if matches!(result, Err(crate::ClipboardError::Cancelled)) {
                 continue;
             }
             let event = match result {
@@ -298,7 +324,15 @@ impl OverlayApp {
     // -- Worker response polling --
 
     fn poll_responses(&mut self, ctx: &egui::Context) {
-        while let Ok(response) = self.resp_rx.try_recv() {
+        loop {
+            let response = match self.resp_rx.try_recv() {
+                Ok(r) => r,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.fatal_disconnect(ctx, "worker");
+                    break;
+                }
+            };
             let event = match response {
                 WorkerResponse::Complete { result, think_content, request_id } => {
                     UiEvent::WorkerResult {
@@ -328,6 +362,15 @@ impl OverlayApp {
         }
     }
 
+    /// A background thread (worker or coordinator) dropped its channel sender,
+    /// which only happens when that thread has exited (normally via panic). The
+    /// app can no longer process LLM responses or hotkeys, so rather than linger
+    /// as a silent zombie, log the cause and close the window to exit cleanly.
+    fn fatal_disconnect(&self, ctx: &egui::Context, which: &str) {
+        error!("{which} thread disconnected — clip-llm can no longer function, exiting");
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
     // -- Focus handling --
 
     #[cfg(not(feature = "diagnostics"))]
@@ -337,7 +380,11 @@ impl OverlayApp {
         }
         let focused = ctx.input(|i| i.viewport().focused);
         if focused == Some(true) {
-            self.sm.handle(UiEvent::FocusGained);
+            // Execute the effects symmetrically with FocusLost. The list is empty
+            // today, but discarding it silently would hide any future FocusGained
+            // effect with no compiler warning.
+            let effects = self.sm.handle(UiEvent::FocusGained);
+            self.execute_effects(effects, ctx);
         } else if focused == Some(false) {
             let effects = self.sm.handle(UiEvent::FocusLost);
             self.execute_effects(effects, ctx);
@@ -421,13 +468,18 @@ impl OverlayApp {
     fn start_capture(&mut self, ctx: &egui::Context) {
         self.capture_seq += 1;
         let seq = self.capture_seq;
+        // Abort any previous in-flight capture, then arm a fresh flag for this one
+        // so rapid re-triggers don't run overlapping clear()/Cmd+C in parallel.
+        self.capture_cancel.store(true, Ordering::SeqCst);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.capture_cancel = cancel.clone();
         let tx = self.capture_tx.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             // Build a clipboard handle on this thread (avoids sharing the main
             // thread's, and sidesteps Send concerns). NativePlatform is a ZST.
             let result = match ClipboardManager::new() {
-                Ok(mut cm) => cm.copy_and_read(&NativePlatform),
+                Ok(mut cm) => cm.copy_and_read(&NativePlatform, &cancel),
                 Err(e) => Err(e),
             };
             let _ = tx.send((seq, result));
@@ -612,6 +664,9 @@ fn friendly_clipboard_error(e: &crate::ClipboardError) -> String {
         NoTextAfterCopy => {
             "Could not capture selected text. Try selecting it again and double-tapping.".to_string()
         }
+        // A cancelled/superseded capture is gated out before display; this arm
+        // exists only for exhaustiveness.
+        Cancelled => "Capture cancelled.".to_string(),
         AccessFailed(_) | CopyFailed(_) => "Clipboard is unavailable.".to_string(),
         WriteFailed(_) => "Could not write to clipboard.".to_string(),
         ImageEncodeFailed(_) => "Could not process the clipboard image.".to_string(),
