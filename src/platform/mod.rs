@@ -47,6 +47,11 @@ pub(crate) mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::WindowsPlatform as NativePlatform;
 
+// Listen-only keyboard watcher for the cycle-modifier (Ctrl+Shift) release
+// signal. Cross-platform; cfg-gated internally.
+pub mod modifier_watcher;
+pub use modifier_watcher::{spawn_modifier_watcher, ModifierState};
+
 // -- System tray (Windows taskbar / macOS menu bar) --
 //
 // `tray-icon` is cross-platform, so the implementation is shared here; only the
