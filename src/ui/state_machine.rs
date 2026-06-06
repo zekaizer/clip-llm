@@ -115,6 +115,9 @@ pub enum UiEffect {
     ResetAreas,
     /// Simulate paste (Cmd+V / Ctrl+V) into the previously focused app.
     PasteClipboard,
+    /// Signal the in-flight background selection capture to abort before it
+    /// mutates the clipboard (clear + simulated Cmd+C), e.g. on cancel/close.
+    CancelCapture,
 }
 
 // ---------------------------------------------------------------------------
@@ -476,11 +479,16 @@ impl StateMachine {
             OverlayState::Hidden => vec![],
             // Closing mid-request (Escape or the ✕ button) must also cancel the
             // in-flight LLM request, or it runs to completion and its response is
-            // silently dropped. Capturing has no request yet (its background result
-            // is discarded by the adapter's seq + state gate).
+            // silently dropped.
             OverlayState::Processing => {
                 self.reset_to_hidden();
                 vec![UiEffect::SendCancel, UiEffect::HideWindow]
+            }
+            // Closing mid-capture must abort the background capture before it
+            // clears the clipboard and fires Cmd+C, or it corrupts the clipboard.
+            OverlayState::Capturing => {
+                self.reset_to_hidden();
+                vec![UiEffect::CancelCapture, UiEffect::HideWindow]
             }
             _ => {
                 self.reset_to_hidden();
@@ -496,12 +504,12 @@ impl StateMachine {
                 self.reset_to_hidden();
                 vec![UiEffect::SendCancel, UiEffect::HideWindow]
             }
-            // Capture in flight: there is no LLM request yet, just hide. The
-            // background capture's result is ignored via the adapter's seq + state
-            // gate once we leave Capturing.
+            // Capture in flight: there is no LLM request yet. Abort the background
+            // capture (its result is also ignored via the adapter's seq + state
+            // gate) so it cannot clear the clipboard and fire Cmd+C after cancel.
             OverlayState::Capturing => {
                 self.reset_to_hidden();
-                vec![UiEffect::HideWindow]
+                vec![UiEffect::CancelCapture, UiEffect::HideWindow]
             }
             _ => vec![],
         }
@@ -927,6 +935,32 @@ mod tests {
 
         assert_eq!(*sm.state(), OverlayState::Hidden);
         assert!(effects.contains(&UiEffect::SendCancel));
+        assert!(effects.contains(&UiEffect::HideWindow));
+    }
+
+    #[test]
+    fn cancel_during_capturing_aborts_capture() {
+        let mut sm = new_sm();
+        sm.handle(UiEvent::CaptureStarted);
+        assert_eq!(*sm.state(), OverlayState::Capturing);
+
+        let effects = sm.handle(UiEvent::UserCancel);
+
+        assert_eq!(*sm.state(), OverlayState::Hidden);
+        assert!(effects.contains(&UiEffect::CancelCapture));
+        assert!(effects.contains(&UiEffect::HideWindow));
+    }
+
+    #[test]
+    fn close_during_capturing_aborts_capture() {
+        let mut sm = new_sm();
+        sm.handle(UiEvent::CaptureStarted);
+        assert_eq!(*sm.state(), OverlayState::Capturing);
+
+        let effects = sm.handle(UiEvent::UserClose);
+
+        assert_eq!(*sm.state(), OverlayState::Hidden);
+        assert!(effects.contains(&UiEffect::CancelCapture));
         assert!(effects.contains(&UiEffect::HideWindow));
     }
 

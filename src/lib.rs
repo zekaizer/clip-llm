@@ -237,6 +237,9 @@ pub enum ClipboardError {
     #[error("no text in clipboard after copy simulation")]
     NoTextAfterCopy,
 
+    #[error("capture cancelled")]
+    Cancelled,
+
     #[error("clipboard write failed: {0}")]
     WriteFailed(String),
 

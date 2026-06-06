@@ -1,7 +1,9 @@
 mod overlay;
 pub mod state_machine;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use tokio::sync::mpsc as tokio_mpsc;
 
 use eframe::egui;
@@ -51,6 +53,10 @@ pub struct OverlayApp {
     /// Monotonic capture id; a returning capture result is honored only if it
     /// matches the latest and the state machine is still Capturing.
     capture_seq: u64,
+    /// Cancel flag for the in-flight capture thread; armed fresh per capture and
+    /// set when the capture is superseded or aborted (cancel/close) so it stops
+    /// before mutating the clipboard (clear + Cmd+C).
+    capture_cancel: Arc<AtomicBool>,
     #[cfg(feature = "diagnostics")]
     diag: crate::diagnostics::DiagCollector,
     #[cfg(feature = "diagnostics")]
@@ -88,6 +94,7 @@ impl OverlayApp {
             capture_rx,
             capture_tx,
             capture_seq: 0,
+            capture_cancel: Arc::new(AtomicBool::new(false)),
             diag: crate::diagnostics::DiagCollector::new(),
             diag_action_rx,
             diag_state_tx,
@@ -121,6 +128,7 @@ impl OverlayApp {
             capture_rx,
             capture_tx,
             capture_seq: 0,
+            capture_cancel: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -199,6 +207,11 @@ impl OverlayApp {
                         error!("paste simulation failed: {e}");
                     }
                 }
+                UiEffect::CancelCapture => {
+                    // Tell the in-flight capture thread to stop before it mutates
+                    // the clipboard; its (now stale) result is gated out separately.
+                    self.capture_cancel.store(true, Ordering::SeqCst);
+                }
             }
         }
     }
@@ -257,6 +270,11 @@ impl OverlayApp {
             // one finished. The seq check covers re-triggers; the state check covers
             // close/cancel.
             if seq != self.capture_seq || !matches!(self.sm.state(), OverlayState::Capturing) {
+                continue;
+            }
+            // A cancelled/superseded capture is normally gated out above; ignore it
+            // explicitly too so an abort never surfaces as a user-facing error.
+            if matches!(result, Err(crate::ClipboardError::Cancelled)) {
                 continue;
             }
             let event = match result {
@@ -446,13 +464,18 @@ impl OverlayApp {
     fn start_capture(&mut self, ctx: &egui::Context) {
         self.capture_seq += 1;
         let seq = self.capture_seq;
+        // Abort any previous in-flight capture, then arm a fresh flag for this one
+        // so rapid re-triggers don't run overlapping clear()/Cmd+C in parallel.
+        self.capture_cancel.store(true, Ordering::SeqCst);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.capture_cancel = cancel.clone();
         let tx = self.capture_tx.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             // Build a clipboard handle on this thread (avoids sharing the main
             // thread's, and sidesteps Send concerns). NativePlatform is a ZST.
             let result = match ClipboardManager::new() {
-                Ok(mut cm) => cm.copy_and_read(&NativePlatform),
+                Ok(mut cm) => cm.copy_and_read(&NativePlatform, &cancel),
                 Err(e) => Err(e),
             };
             let _ = tx.send((seq, result));
@@ -637,6 +660,9 @@ fn friendly_clipboard_error(e: &crate::ClipboardError) -> String {
         NoTextAfterCopy => {
             "Could not capture selected text. Try selecting it again and double-tapping.".to_string()
         }
+        // A cancelled/superseded capture is gated out before display; this arm
+        // exists only for exhaustiveness.
+        Cancelled => "Capture cancelled.".to_string(),
         AccessFailed(_) | CopyFailed(_) => "Clipboard is unavailable.".to_string(),
         WriteFailed(_) => "Could not write to clipboard.".to_string(),
         ImageEncodeFailed(_) => "Could not process the clipboard image.".to_string(),
