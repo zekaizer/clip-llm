@@ -526,69 +526,8 @@ impl StateMachine {
             return vec![];
         }
         self.mode = new_mode;
-        // Cache key is computed after setting the new mode.
-        let key = self.cache_key();
-
-        match &self.state {
-            OverlayState::Processing => {
-                if let Some((cached_text, cached_think)) = self.cache.get(&key).cloned() {
-                    // Cache hit: cancel in-flight, return cached result.
-                    self.streaming_text.clear();
-                    self.think_started = false;
-                    let mut effects = self.apply_cached_result(cached_text, cached_think);
-                    effects.insert(0, UiEffect::SendCancel);
-                    effects
-                } else if let Some(content) = self.original_content.clone() {
-                    // Cache miss: cancel current, re-send with new mode.
-                    self.streaming_text.clear();
-                    self.think_started = false;
-                    self.think_content = None;
-                    self.next_request_id += 1;
-                    self.current_request_id = self.next_request_id;
-                    vec![
-                        UiEffect::SendCancel,
-                        UiEffect::SendProcess {
-                            content,
-                            mode: self.mode,
-                            rephrase_params: self.rephrase_params,
-                            thinking_mode: self.effective_thinking_mode(),
-                            request_id: self.current_request_id,
-                        },
-                    ]
-                } else {
-                    // Defensive: no content to reprocess — just cancel.
-                    vec![UiEffect::SendCancel]
-                }
-            }
-            OverlayState::Result(_) | OverlayState::Error(_) => {
-                if let Some((cached_text, cached_think)) = self.cache.get(&key).cloned() {
-                    // Cache hit: return cached result directly.
-                    self.apply_cached_result(cached_text, cached_think)
-                } else if let Some(content) = self.original_content.clone() {
-                    // Cache miss: re-process with new mode.
-                    self.think_started = false;
-                    self.think_content = None;
-                    self.next_request_id += 1;
-                    self.current_request_id = self.next_request_id;
-                    self.state = OverlayState::Processing;
-                    vec![
-                        UiEffect::SendProcess {
-                            content,
-                            mode: self.mode,
-                            rephrase_params: self.rephrase_params,
-                            thinking_mode: self.effective_thinking_mode(),
-                            request_id: self.current_request_id,
-                        },
-                        UiEffect::ResetAreas,
-                    ]
-                } else {
-                    // No content to reprocess (e.g. error from clipboard read failure).
-                    vec![]
-                }
-            }
-            // No content loaded (idle) or capture still running: nothing to re-process.
-            OverlayState::Hidden | OverlayState::Capturing => vec![],
-        }
+        // The cache key (computed inside) now reflects the new mode.
+        self.reprocess_or_cache()
     }
 
     /// Applies a cached result: updates think_content and state,
@@ -709,7 +648,7 @@ impl StateMachine {
             return vec![];
         }
         self.mode_thinking.insert(self.mode, thinking);
-        self.on_params_changed()
+        self.reprocess_or_cache()
     }
 
     /// Re-process or serve from cache when rephrase params change (Rephrase mode only).
@@ -717,11 +656,20 @@ impl StateMachine {
         if self.mode != ProcessMode::Rephrase {
             return vec![];
         }
-        self.on_params_changed()
+        self.reprocess_or_cache()
     }
 
-    /// Common logic for re-processing after params (rephrase or thinking) change.
-    fn on_params_changed(&mut self) -> Vec<UiEffect> {
+    /// Re-process the current content, or serve it from cache, for the current
+    /// (mode, rephrase params, thinking) combination. Shared by mode switches and
+    /// rephrase/thinking parameter changes: the caller mutates the relevant field
+    /// first, then this computes the cache key and dispatches uniformly.
+    ///
+    /// - Processing: cache hit cancels the in-flight request and shows the cached
+    ///   result; cache miss cancels and re-sends with a new request id.
+    /// - Result/Error: cache hit shows it directly; cache miss re-sends and
+    ///   returns to Processing.
+    /// - Hidden/Capturing: nothing to re-process.
+    fn reprocess_or_cache(&mut self) -> Vec<UiEffect> {
         let key = self.cache_key();
         match &self.state {
             OverlayState::Processing => {
