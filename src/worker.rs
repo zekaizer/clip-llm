@@ -2,11 +2,17 @@ use std::sync::mpsc;
 use std::thread;
 
 use tokio::sync::mpsc as tokio_mpsc;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::api::client::{LlmClient, SseEvent, SseParser};
 use crate::api::response::{extract_first_think_content, strip_think_blocks, ThinkBlockFilter};
 use crate::{ApiError, ClipboardContent, ProcessMode, RephraseParams, ThinkingMode};
+
+/// Maximum time to wait for the next streaming chunk before treating the stream
+/// as stalled. The streaming HTTP client has only a connect timeout (no overall
+/// body timeout), so without this a server that connects and then goes silent
+/// would leave the request hanging forever on a permanent spinner.
+const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Runtime configuration resolved from environment variables once at worker startup.
 #[derive(Copy, Clone)]
@@ -167,7 +173,20 @@ async fn run_streaming(
 
     loop {
         let chunk = tokio::select! {
-            c = resp.chunk() => c,
+            c = tokio::time::timeout(STREAM_IDLE_TIMEOUT, resp.chunk()) => match c {
+                Ok(chunk) => chunk,
+                Err(_elapsed) => {
+                    warn!(
+                        "worker: stream idle for {}s — treating as stalled",
+                        STREAM_IDLE_TIMEOUT.as_secs()
+                    );
+                    let _ = resp_tx.send(WorkerResponse::Error {
+                        message: "The server stopped responding mid-reply. Try again.".to_string(),
+                        request_id,
+                    });
+                    return;
+                }
+            },
             _ = &mut cancel_rx => {
                 debug!("worker: request cancelled during streaming");
                 return;
