@@ -326,7 +326,10 @@ impl LlmClient {
     }
 
     /// Probe whether the model supports vision by sending a tiny image request.
-    /// Result is cached in `OnceCell`. Network/server errors skip caching (retry next time).
+    /// The result is cached in `OnceCell` only on a definitive verdict — a 2xx
+    /// (supported) or a 400/422 rejection of the image payload (unsupported).
+    /// Transient or ambiguous responses (401/403/404/429/5xx) and network errors
+    /// skip caching so the next request re-probes.
     pub async fn probe_vision(&self) -> bool {
         let inner = &self.0;
         if let Some(&cached) = inner.supports_vision.get() {
@@ -364,10 +367,24 @@ impl LlmClient {
         match req.send().await {
             Ok(resp) => {
                 let status = resp.status().as_u16();
-                let supported = (200..300).contains(&status);
-                info!("model vision support: {supported} (HTTP {status})");
-                let _ = inner.supports_vision.set(supported);
-                supported
+                if (200..300).contains(&status) {
+                    info!("model vision support: true (HTTP {status})");
+                    let _ = inner.supports_vision.set(true);
+                    true
+                } else if status == 400 || status == 422 {
+                    // The server understood the multimodal request and rejected
+                    // the image payload — a definitive "no vision" verdict worth
+                    // caching for the process lifetime.
+                    info!("model vision support: false (HTTP {status})");
+                    let _ = inner.supports_vision.set(false);
+                    false
+                } else {
+                    // Transient or ambiguous (401/403/404/429/5xx): do NOT cache,
+                    // so the next request re-probes. Treat as unsupported only for
+                    // this request rather than permanently disabling vision.
+                    warn!("vision probe inconclusive (HTTP {status}); will retry");
+                    false
+                }
             }
             Err(e) => {
                 warn!("vision probe failed (will retry): {e}");
@@ -378,7 +395,9 @@ impl LlmClient {
 
     /// Probe whether the model supports controllable thinking mode.
     /// Tries `chat_template_kwargs` first, then falls back to system prompt tag.
-    /// Result is cached in `OnceCell`. Network errors skip caching (retry next time).
+    /// The result is cached in `OnceCell` only on a definitive verdict; transient
+    /// or ambiguous responses (401/403/404/429/5xx) and network errors skip
+    /// caching so the next request re-probes.
     pub async fn probe_thinking(&self) -> ThinkingControlMethod {
         let inner = &self.0;
         if let Some(&cached) = inner.thinking_control.get() {
@@ -428,18 +447,20 @@ impl LlmClient {
                 // for trivial prompts even with enable_thinking=true.
                 Some(ThinkingControlMethod::ChatTemplateKwargs)
             }
-            Ok(resp) if resp.status().is_server_error() => {
-                // 5xx: transient server error — don't cache, retry next time.
+            Ok(resp) if resp.status().as_u16() == 400 || resp.status().as_u16() == 422 => {
+                trace!("thinking kwargs probe rejected: HTTP {}", resp.status().as_u16());
+                // Server understood but rejected the kwargs field — try the
+                // system-prompt tag fallback to determine the real method.
+                self.probe_thinking_prompt_tag(inner).await
+            }
+            Ok(resp) => {
+                // Transient or ambiguous (401/403/404/429/5xx): don't cache, retry
+                // next time rather than permanently deciding the method.
                 warn!(
-                    "thinking kwargs probe got {} (will retry)",
+                    "thinking kwargs probe inconclusive (HTTP {}); will retry",
                     resp.status().as_u16()
                 );
                 None
-            }
-            Ok(resp) => {
-                trace!("thinking kwargs probe rejected: HTTP {}", resp.status().as_u16());
-                // 4xx: server rejected the kwargs field — try prompt tag fallback.
-                self.probe_thinking_prompt_tag(inner).await
             }
             Err(e) => {
                 warn!("thinking probe failed (will retry): {e}");
@@ -498,14 +519,19 @@ impl LlmClient {
                     Some(ThinkingControlMethod::Unsupported)
                 }
             }
-            Ok(resp) if resp.status().is_server_error() => {
+            Ok(resp) if resp.status().as_u16() == 400 || resp.status().as_u16() == 422 => {
+                // Server understood and rejected the /think system tag —
+                // thinking is definitively uncontrollable. Worth caching.
+                Some(ThinkingControlMethod::Unsupported)
+            }
+            Ok(resp) => {
+                // Transient or ambiguous (401/403/404/429/5xx): don't cache, retry.
                 warn!(
-                    "thinking prompt-tag probe got {} (will retry)",
+                    "thinking prompt-tag probe inconclusive (HTTP {}); will retry",
                     resp.status().as_u16()
                 );
                 None
             }
-            Ok(_) => Some(ThinkingControlMethod::Unsupported),
             Err(e) => {
                 warn!("thinking prompt-tag probe failed (will retry): {e}");
                 None
