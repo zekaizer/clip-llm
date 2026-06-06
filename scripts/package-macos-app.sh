@@ -15,11 +15,14 @@ BIN="${1:?binary path required}"
 VERSION="${2:?version required}"
 OUT="${3:?output zip path required}"
 
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
 APP="clip-llm.app"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/clip-llm"
 chmod +x "$APP/Contents/MacOS/clip-llm"
+cp "$REPO_ROOT/assets/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -30,6 +33,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleDisplayName</key><string>clip-llm</string>
   <key>CFBundleIdentifier</key><string>com.zekaizer.clip-llm</string>
   <key>CFBundleExecutable</key><string>clip-llm</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>${VERSION}</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>

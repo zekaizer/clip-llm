@@ -19,4 +19,15 @@ fn main() {
 
     fs::write(&out_path, compressed).expect("failed to write compressed font");
     println!("cargo:rerun-if-changed={font_path}");
+
+    // Embed the app icon into the Windows executable (target-gated; a no-op for
+    // other targets). A failure (e.g. no resource compiler) only warns.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        println!("cargo:rerun-if-changed=assets/app-icon.ico");
+        let mut res = winresource::WindowsResource::new();
+        res.set_icon("assets/app-icon.ico");
+        if let Err(e) = res.compile() {
+            println!("cargo:warning=failed to embed Windows app icon: {e}");
+        }
+    }
 }

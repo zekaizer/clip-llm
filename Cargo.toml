@@ -31,6 +31,8 @@ diagnostics = ["image", "chrono"]
 
 [build-dependencies]
 zstd = "0.13"
+# Embeds the Windows app icon (build.rs); only runs for a Windows target.
+winresource = "0.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.25"
