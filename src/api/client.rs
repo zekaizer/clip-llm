@@ -663,7 +663,7 @@ impl LlmClient {
     ) -> Result<String, ApiError> {
         let inner = &self.0;
         info!("sending request to {}", inner.endpoint);
-        debug!("model={}, temperature={}, max_tokens={}", inner.model, TEMPERATURE, MAX_TOKENS);
+        debug!("model={}, temperature={}, max_tokens={}", inner.model, inner.temperature, inner.max_tokens);
 
         let resp = self
             .build_and_send(content, mode, rephrase_params, thinking_mode, false)
