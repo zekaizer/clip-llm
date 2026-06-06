@@ -206,7 +206,15 @@ impl OverlayApp {
     // -- Tap action handling (from coordinator thread) --
 
     fn poll_tap_actions(&mut self, ctx: &egui::Context) {
-        while let Ok(tap_event) = self.tap_rx.try_recv() {
+        loop {
+            let tap_event = match self.tap_rx.try_recv() {
+                Ok(e) => e,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.fatal_disconnect(ctx, "coordinator");
+                    break;
+                }
+            };
             // Set spawn_position from coordinator's first-press capture.
             // This runs before sm.handle() so CaptureMousePosition effect
             // (which skips if already set) preserves the first-press position.
@@ -298,7 +306,15 @@ impl OverlayApp {
     // -- Worker response polling --
 
     fn poll_responses(&mut self, ctx: &egui::Context) {
-        while let Ok(response) = self.resp_rx.try_recv() {
+        loop {
+            let response = match self.resp_rx.try_recv() {
+                Ok(r) => r,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.fatal_disconnect(ctx, "worker");
+                    break;
+                }
+            };
             let event = match response {
                 WorkerResponse::Complete { result, think_content, request_id } => {
                     UiEvent::WorkerResult {
@@ -326,6 +342,15 @@ impl OverlayApp {
             let effects = self.sm.handle(event);
             self.execute_effects(effects, ctx);
         }
+    }
+
+    /// A background thread (worker or coordinator) dropped its channel sender,
+    /// which only happens when that thread has exited (normally via panic). The
+    /// app can no longer process LLM responses or hotkeys, so rather than linger
+    /// as a silent zombie, log the cause and close the window to exit cleanly.
+    fn fatal_disconnect(&self, ctx: &egui::Context, which: &str) {
+        error!("{which} thread disconnected — clip-llm can no longer function, exiting");
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
     // -- Focus handling --
