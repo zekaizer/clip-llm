@@ -174,8 +174,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             // System tray icon (Windows: replaces taskbar icon).
             clip_llm::platform::init_tray(&cc.egui_ctx);
 
+            // Listen-only OS keyboard watcher for the Ctrl+Shift release (commit)
+            // signal that global-hotkey cannot observe. Accessibility was already
+            // verified above, so the macOS tap installs with the same permission.
+            let modifier_state = clip_llm::platform::spawn_modifier_watcher();
+
             // Coordinator thread: event-driven hotkey detection (off-UI).
-            let tap_rx = spawn_coordinator_thread(hotkey_rx, cc.egui_ctx.clone());
+            let tap_rx =
+                spawn_coordinator_thread(hotkey_rx, cc.egui_ctx.clone(), modifier_state);
 
             // Diagnostics: spawn scenario runner thread (off-UI, like coordinator).
             #[cfg(feature = "diagnostics")]
@@ -247,6 +253,7 @@ fn build_native_options() -> eframe::NativeOptions {
 fn spawn_coordinator_thread(
     hotkey_rx: mpsc::Receiver<GlobalHotKeyEvent>,
     ctx: egui::Context,
+    modifier_state: clip_llm::platform::ModifierState,
 ) -> mpsc::Receiver<TapEvent> {
     let pre_show = clip_llm::platform::pre_show_callback();
     let mouse_pos_fn: Box<dyn Fn() -> Option<(f64, f64)> + Send> = {
@@ -263,7 +270,15 @@ fn spawn_coordinator_thread(
     info!("double-tap window: {}ms", double_tap_timeout.as_millis());
     let (tap_tx, tap_rx) = mpsc::channel::<TapEvent>();
     std::thread::spawn(move || {
-        clip_llm::coordinator::run(hotkey_rx, tap_tx, ctx, pre_show, mouse_pos_fn, double_tap_timeout);
+        clip_llm::coordinator::run(
+            hotkey_rx,
+            tap_tx,
+            ctx,
+            pre_show,
+            mouse_pos_fn,
+            double_tap_timeout,
+            modifier_state,
+        );
     });
     tap_rx
 }

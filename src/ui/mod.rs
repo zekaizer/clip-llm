@@ -57,6 +57,18 @@ pub struct OverlayApp {
     /// set when the capture is superseded or aborted (cancel/close) so it stops
     /// before mutating the clipboard (clear + Cmd+C).
     capture_cancel: Arc<AtomicBool>,
+    /// Transient mode-cycle preview while the cycle modifiers are held (Alt+Tab
+    /// style). `None` outside a cycling gesture; the committed mode is always
+    /// `sm.mode()`. Committed on modifier release.
+    preview_mode: Option<crate::ProcessMode>,
+    /// A capture deferred until the modifiers are released. For a double-tap the
+    /// copy is simulated at commit; for a single-tap the clipboard was already
+    /// read into `pending_content` and is processed at commit.
+    pending_capture: bool,
+    /// Single-tap clipboard content read at trigger time, shown in the picking
+    /// overlay and processed on commit. `None` for the double-tap (selection)
+    /// path, whose content only exists after release.
+    pending_content: Option<crate::ClipboardContent>,
     #[cfg(feature = "diagnostics")]
     diag: crate::diagnostics::DiagCollector,
     #[cfg(feature = "diagnostics")]
@@ -95,6 +107,9 @@ impl OverlayApp {
             capture_tx,
             capture_seq: 0,
             capture_cancel: Arc::new(AtomicBool::new(false)),
+            preview_mode: None,
+            pending_capture: false,
+            pending_content: None,
             diag: crate::diagnostics::DiagCollector::new(),
             diag_action_rx,
             diag_state_tx,
@@ -129,6 +144,9 @@ impl OverlayApp {
             capture_tx,
             capture_seq: 0,
             capture_cancel: Arc::new(AtomicBool::new(false)),
+            preview_mode: None,
+            pending_capture: false,
+            pending_content: None,
         }
     }
 }
@@ -182,11 +200,20 @@ impl OverlayApp {
                 }
                 UiEffect::ShowWindow => self.show_window(ctx),
                 UiEffect::ShowWindowNoActivate => self.show_window_no_activate(ctx),
-                UiEffect::StartCapture => self.start_capture(ctx),
+                UiEffect::StartCapture => {
+                    // Defer the Cmd+C simulation until the cycle modifiers are
+                    // released (handled in the CycleCommit tap arm). Copying while
+                    // Ctrl+Shift are still held would send Cmd+Ctrl+Shift+C.
+                    self.pending_capture = true;
+                }
                 UiEffect::HideWindow => {
                     ctx.memory_mut(|m| m.reset_areas());
                     self.hide_window(ctx);
                     self.spawn_position = None;
+                    // Cancel any in-progress cycling gesture / deferred capture.
+                    self.preview_mode = None;
+                    self.pending_capture = false;
+                    self.pending_content = None;
                 }
                 UiEffect::CaptureMousePosition => self.capture_mouse_position(),
                 UiEffect::ResetAreas => {
@@ -211,6 +238,10 @@ impl OverlayApp {
                     // Tell the in-flight capture thread to stop before it mutates
                     // the clipboard; its (now stale) result is gated out separately.
                     self.capture_cancel.store(true, Ordering::SeqCst);
+                    // A deferred (not-yet-started) capture is also abandoned.
+                    self.pending_capture = false;
+                    self.preview_mode = None;
+                    self.pending_content = None;
                 }
             }
         }
@@ -237,24 +268,87 @@ impl OverlayApp {
 
             match tap_event.action {
                 TapAction::SingleTap => {
-                    info!("single-tap triggered, using clipboard content...");
-                    let event = match self.clipboard.read_content() {
-                        Ok(content) => UiEvent::ContentReady { content, auto_copy: false },
+                    info!("single-tap triggered, reading clipboard...");
+                    // A fresh trigger ends any prior cycling preview.
+                    self.preview_mode = None;
+                    match self.clipboard.read_content() {
+                        Ok(content) => {
+                            // Defer processing until commit (modifier release) so
+                            // the mode can be cycled first, showing the content in
+                            // the picking overlay meanwhile. A quick tap (modifiers
+                            // already up) commits at once and flows straight to
+                            // processing. CaptureStarted shows the overlay and sets
+                            // pending_capture via StartCapture.
+                            self.pending_content = Some(content);
+                            let effects = self.sm.handle(UiEvent::CaptureStarted);
+                            self.execute_effects(effects, ctx);
+                        }
                         Err(e) => {
                             error!("clipboard read failed: {e}");
-                            UiEvent::ClipboardError(friendly_clipboard_error(&e))
+                            let effects = self
+                                .sm
+                                .handle(UiEvent::ClipboardError(friendly_clipboard_error(&e)));
+                            self.execute_effects(effects, ctx);
                         }
-                    };
-                    let effects = self.sm.handle(event);
-                    self.execute_effects(effects, ctx);
+                    }
                 }
                 TapAction::DoubleTap => {
                     info!("double-tap triggered, capturing selection...");
-                    // Show the spinner immediately (non-activating) and run the
-                    // blocking copy+poll on a background thread (see start_capture),
-                    // instead of freezing the render thread for 250-700ms.
+                    self.preview_mode = None;
+                    self.pending_content = None; // selection comes from copy-sim at commit
+                    // Show the picking overlay (spinner) immediately (non-activating).
+                    // The actual copy is deferred (StartCapture -> pending_capture)
+                    // until the modifiers are released, then started in CycleCommit.
                     let effects = self.sm.handle(UiEvent::CaptureStarted);
                     self.execute_effects(effects, ctx);
+                }
+                TapAction::CycleAdvance => {
+                    // Advance the preview to the next available mode (wrapping).
+                    // Before content is known (double-tap capture in flight),
+                    // cycle over all modes; once loaded, respect availability.
+                    let available = self.sm.available_modes();
+                    let targets: &[crate::ProcessMode] = if available.is_empty() {
+                        crate::ProcessMode::ALL
+                    } else {
+                        available
+                    };
+                    let current = self.preview_mode.unwrap_or_else(|| self.sm.mode());
+                    let next = current.next_available(targets);
+                    if next != current {
+                        self.preview_mode = Some(next);
+                        info!("cycle preview: {}", next.label());
+                    }
+                }
+                TapAction::CycleCommit { is_double_tap } => {
+                    let preview = self.preview_mode.take();
+                    let starting = self.pending_capture;
+                    self.pending_capture = false;
+                    info!(
+                        "cycle commit: preview={:?}, is_double_tap={is_double_tap}",
+                        preview.map(|m| m.label())
+                    );
+                    // Commit the chosen mode first so the deferred processing runs
+                    // in it. In Capturing this only sets the mode (no effects).
+                    if let Some(mode) = preview
+                        && mode != self.sm.mode()
+                    {
+                        let effects = self.sm.handle(UiEvent::UserSwitchMode(mode));
+                        self.execute_effects(effects, ctx);
+                    }
+                    // Run the deferred capture/processing now the modifiers are up.
+                    if starting {
+                        if is_double_tap {
+                            // Selection copy is safe now (modifiers released).
+                            self.start_capture(ctx);
+                        } else if let Some(content) = self.pending_content.take() {
+                            // Single-tap: process the clipboard content read at trigger.
+                            let effects = self
+                                .sm
+                                .handle(UiEvent::ContentReady { content, auto_copy: false });
+                            self.execute_effects(effects, ctx);
+                        }
+                    }
+                    self.pending_content = None;
                 }
                 TapAction::Pending => {}
             }
@@ -607,6 +701,8 @@ impl eframe::App for OverlayApp {
                 think_expanded: self.think_expanded,
             },
             self.sm.available_modes(),
+            self.preview_mode,
+            self.pending_content.as_ref().and_then(|c| c.text.as_deref()),
             self.sm.rephrase_params(),
             overlay::ThinkingState {
                 mode: self.sm.effective_thinking_mode(),

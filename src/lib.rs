@@ -168,6 +168,27 @@ impl ProcessMode {
         }
     }
 
+    /// Next mode in `ALL` (display order), wrapping around, skipping any mode
+    /// not present in `targets`. Returns `self` unchanged when no other mode is
+    /// available (empty `targets`, or `targets` holds only `self`). Used to
+    /// cycle the mode while the hotkey modifiers are held.
+    pub fn next_available(self, targets: &[ProcessMode]) -> ProcessMode {
+        if targets.is_empty() {
+            return self;
+        }
+        let all = Self::ALL;
+        let start = all.iter().position(|&m| m == self).unwrap_or(0);
+        // Walk forward from the mode after `self`, wrapping; first match wins.
+        // The final offset returns to `self`, so a single-mode target yields self.
+        for offset in 1..=all.len() {
+            let candidate = all[(start + offset) % all.len()];
+            if targets.contains(&candidate) {
+                return candidate;
+            }
+        }
+        self
+    }
+
     /// Returns the processing label, using style-aware label for Rephrase mode.
     pub fn processing_label_rephrase(self, params: RephraseParams) -> &'static str {
         if self == Self::Rephrase && params.style == RephraseStyle::Correct {
@@ -257,5 +278,41 @@ pub enum HotkeyError {
 
     #[error("failed to register hotkey: {0}")]
     RegisterFailed(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn next_available_wraps_through_all() {
+        let all = ProcessMode::ALL;
+        assert_eq!(ProcessMode::Translate.next_available(all), ProcessMode::Rephrase);
+        assert_eq!(ProcessMode::Rephrase.next_available(all), ProcessMode::Summarize);
+        // Wraps back to the first mode.
+        assert_eq!(ProcessMode::Summarize.next_available(all), ProcessMode::Translate);
+    }
+
+    #[test]
+    fn next_available_skips_unavailable() {
+        // Rephrase is not a target — it is skipped.
+        let targets = &[ProcessMode::Translate, ProcessMode::Summarize];
+        assert_eq!(ProcessMode::Translate.next_available(targets), ProcessMode::Summarize);
+        assert_eq!(ProcessMode::Summarize.next_available(targets), ProcessMode::Translate);
+    }
+
+    #[test]
+    fn next_available_single_target_stays_put() {
+        // Image-only content restricts cycling to Summarize alone.
+        let targets = &[ProcessMode::Summarize];
+        assert_eq!(ProcessMode::Summarize.next_available(targets), ProcessMode::Summarize);
+        // Even starting from a non-target mode resolves to the only target.
+        assert_eq!(ProcessMode::Translate.next_available(targets), ProcessMode::Summarize);
+    }
+
+    #[test]
+    fn next_available_empty_targets_returns_self() {
+        assert_eq!(ProcessMode::Translate.next_available(&[]), ProcessMode::Translate);
+    }
 }
 
