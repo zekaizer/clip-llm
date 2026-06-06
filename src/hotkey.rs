@@ -15,6 +15,13 @@ pub enum TapAction {
     SingleTap,
     /// Double-tap confirmed within the timeout window.
     DoubleTap,
+    /// An extra C tap while the modifiers stay held after the trigger — advance
+    /// the mode-cycle preview by one step.
+    CycleAdvance,
+    /// The cycle modifiers (Ctrl+Shift) were released — commit the previewed
+    /// mode. `is_double_tap` carries the trigger kind so the UI can run the
+    /// deferred selection capture when committing a double-tap gesture.
+    CycleCommit { is_double_tap: bool },
 }
 
 /// Tap action with mouse position captured at first key press.

@@ -6,6 +6,20 @@ use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
 use tracing::info;
 
 use crate::hotkey::{HotkeyDetector, TapAction, TapEvent};
+use crate::platform::ModifierState;
+
+/// Coordinator gesture phase. After a trigger resolves while the modifiers stay
+/// held, additional C taps advance the mode-cycle preview until the modifiers
+/// are released (commit).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// No gesture in progress.
+    Idle,
+    /// A first tap was seen; waiting to confirm single vs double tap.
+    AwaitingTrigger,
+    /// Trigger committed and modifiers still held; C taps cycle the mode.
+    Cycling { is_double_tap: bool },
+}
 
 /// Run the coordinator loop on the current thread (blocking).
 ///
@@ -28,14 +42,34 @@ pub fn run(
     pre_show: Box<dyn Fn() + Send>,
     mouse_pos_fn: Box<dyn Fn() -> Option<(f64, f64)> + Send>,
     double_tap_timeout: Duration,
+    modifier_state: ModifierState,
 ) {
     let mut detector = HotkeyDetector::with_timeout(double_tap_timeout);
     let mut pending_mouse_pos: Option<(f64, f64)> = None;
+    let mut phase = Phase::Idle;
     info!("coordinator thread started");
 
+    // After a trigger resolves: if the modifiers are still held, enter the
+    // cycling phase; otherwise commit immediately so the UI runs its deferred
+    // capture / no-op mode commit. Returns the next phase.
+    let resolve_trigger = |is_double_tap: bool, held: bool| -> Phase {
+        if held {
+            Phase::Cycling { is_double_tap }
+        } else {
+            let _ = tap_tx.send(TapEvent {
+                action: TapAction::CycleCommit { is_double_tap },
+                mouse_pos: None,
+            });
+            ctx.request_repaint();
+            Phase::Idle
+        }
+    };
+
     loop {
-        // Event-driven: block when idle, poll only during double-tap window.
-        let event = if detector.is_pending() {
+        // Poll while waiting for a second tap or while cycling (so a modifier
+        // release is noticed within ~50ms); block with zero CPU when idle.
+        let polling = detector.is_pending() || matches!(phase, Phase::Cycling { .. });
+        let event = if polling {
             match hotkey_rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(e) => Some(e),
                 Err(mpsc::RecvTimeoutError::Timeout) => None,
@@ -48,33 +82,60 @@ pub fn run(
             }
         };
 
+        let held = modifier_state.combo_held();
+
         if let Some(event) = event
             && event.state == HotKeyState::Pressed
         {
-            match detector.on_press() {
-                TapAction::Pending => {
-                    // Capture mouse position at first key press.
-                    pending_mouse_pos = mouse_pos_fn();
-                }
-                TapAction::DoubleTap => {
-                    pre_show();
+            match phase {
+                Phase::Idle | Phase::AwaitingTrigger => match detector.on_press() {
+                    TapAction::Pending => {
+                        // Capture mouse position at first key press.
+                        pending_mouse_pos = mouse_pos_fn();
+                        phase = Phase::AwaitingTrigger;
+                    }
+                    TapAction::DoubleTap => {
+                        pre_show();
+                        let _ = tap_tx.send(TapEvent {
+                            action: TapAction::DoubleTap,
+                            mouse_pos: pending_mouse_pos.take(),
+                        });
+                        ctx.request_repaint();
+                        phase = resolve_trigger(true, held);
+                    }
+                    other => unreachable!("on_press returned {other:?}"),
+                },
+                Phase::Cycling { .. } => {
+                    // Each further C tap while held advances the mode preview.
                     let _ = tap_tx.send(TapEvent {
-                        action: TapAction::DoubleTap,
-                        mouse_pos: pending_mouse_pos.take(),
+                        action: TapAction::CycleAdvance,
+                        mouse_pos: None,
                     });
                     ctx.request_repaint();
                 }
-                TapAction::SingleTap => unreachable!("on_press never returns SingleTap"),
             }
         }
 
-        if detector.check_timeout() {
+        if matches!(phase, Phase::AwaitingTrigger) && detector.check_timeout() {
             pre_show();
             let _ = tap_tx.send(TapEvent {
                 action: TapAction::SingleTap,
                 mouse_pos: pending_mouse_pos.take(),
             });
             ctx.request_repaint();
+            phase = resolve_trigger(false, held);
+        }
+
+        // Commit the cycle once the modifiers are released.
+        if let Phase::Cycling { is_double_tap } = phase
+            && !held
+        {
+            let _ = tap_tx.send(TapEvent {
+                action: TapAction::CycleCommit { is_double_tap },
+                mouse_pos: None,
+            });
+            ctx.request_repaint();
+            phase = Phase::Idle;
         }
     }
 
@@ -105,6 +166,13 @@ mod tests {
         Box::new(|| Some((100.0, 200.0)))
     }
 
+    /// A modifier state seeded to a fixed held/released value.
+    fn modifiers(held: bool) -> ModifierState {
+        let s = ModifierState::default();
+        s.set_combo_held(held);
+        s
+    }
+
     #[test]
     fn single_tap_sends_action_and_calls_pre_show() {
         let (htx, hrx) = mpsc::channel();
@@ -123,6 +191,7 @@ mod tests {
                 }),
                 noop_mouse(),
                 Duration::from_millis(500),
+                modifiers(false),
             );
         });
 
@@ -144,7 +213,7 @@ mod tests {
         let ctx = egui::Context::default();
 
         let h = std::thread::spawn(move || {
-            run(hrx, ttx, ctx, Box::new(|| {}), noop_mouse(), Duration::from_millis(500));
+            run(hrx, ttx, ctx, Box::new(|| {}), noop_mouse(), Duration::from_millis(500), modifiers(false));
         });
 
         htx.send(press_event()).unwrap();
@@ -166,7 +235,7 @@ mod tests {
         let ctx = egui::Context::default();
 
         let h = std::thread::spawn(move || {
-            run(hrx, ttx, ctx, Box::new(|| {}), noop_mouse(), Duration::from_millis(500));
+            run(hrx, ttx, ctx, Box::new(|| {}), noop_mouse(), Duration::from_millis(500), modifiers(false));
         });
 
         htx.send(release_event()).unwrap();
@@ -183,8 +252,73 @@ mod tests {
         let ctx = egui::Context::default();
 
         let h = std::thread::spawn(move || {
-            run(hrx, ttx, ctx, Box::new(|| {}), noop_mouse(), Duration::from_millis(500));
+            run(hrx, ttx, ctx, Box::new(|| {}), noop_mouse(), Duration::from_millis(500), modifiers(false));
         });
+
+        drop(htx);
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn cycling_advances_then_commits_on_release() {
+        let (htx, hrx) = mpsc::channel();
+        let (ttx, trx) = mpsc::channel();
+        let ctx = egui::Context::default();
+        let state = modifiers(true); // Ctrl+Shift held throughout the gesture
+        let state_run = state.clone();
+
+        let h = std::thread::spawn(move || {
+            run(hrx, ttx, ctx, Box::new(|| {}), noop_mouse(), Duration::from_millis(500), state_run);
+        });
+
+        // Double-tap trigger while the modifiers are held.
+        htx.send(press_event()).unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+        htx.send(press_event()).unwrap();
+        assert_eq!(
+            trx.recv_timeout(Duration::from_millis(300)).unwrap().action,
+            TapAction::DoubleTap
+        );
+
+        // A further tap advances the cycle preview (no new trigger).
+        htx.send(press_event()).unwrap();
+        assert_eq!(
+            trx.recv_timeout(Duration::from_millis(300)).unwrap().action,
+            TapAction::CycleAdvance
+        );
+
+        // Releasing the modifiers commits the cycle.
+        state.set_combo_held(false);
+        assert_eq!(
+            trx.recv_timeout(Duration::from_millis(300)).unwrap().action,
+            TapAction::CycleCommit { is_double_tap: true }
+        );
+
+        drop(htx);
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn trigger_commits_immediately_when_not_held() {
+        // Modifiers already released at trigger time: no cycling, a single
+        // CycleCommit follows the trigger so downstream handling is uniform.
+        let (htx, hrx) = mpsc::channel();
+        let (ttx, trx) = mpsc::channel();
+        let ctx = egui::Context::default();
+
+        let h = std::thread::spawn(move || {
+            run(hrx, ttx, ctx, Box::new(|| {}), noop_mouse(), Duration::from_millis(500), modifiers(false));
+        });
+
+        htx.send(press_event()).unwrap();
+        assert_eq!(
+            trx.recv_timeout(Duration::from_millis(700)).unwrap().action,
+            TapAction::SingleTap
+        );
+        assert_eq!(
+            trx.recv_timeout(Duration::from_millis(200)).unwrap().action,
+            TapAction::CycleCommit { is_double_tap: false }
+        );
 
         drop(htx);
         h.join().unwrap();

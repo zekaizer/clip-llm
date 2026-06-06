@@ -57,6 +57,14 @@ pub struct OverlayApp {
     /// set when the capture is superseded or aborted (cancel/close) so it stops
     /// before mutating the clipboard (clear + Cmd+C).
     capture_cancel: Arc<AtomicBool>,
+    /// Transient mode-cycle preview while the cycle modifiers are held (Alt+Tab
+    /// style). `None` outside a cycling gesture; the committed mode is always
+    /// `sm.mode()`. Committed on modifier release.
+    preview_mode: Option<crate::ProcessMode>,
+    /// A double-tap selection capture deferred until the modifiers are released:
+    /// simulating Cmd+C while Ctrl+Shift are still held would send the wrong
+    /// chord, so the copy is started at commit time instead.
+    pending_capture: bool,
     #[cfg(feature = "diagnostics")]
     diag: crate::diagnostics::DiagCollector,
     #[cfg(feature = "diagnostics")]
@@ -95,6 +103,8 @@ impl OverlayApp {
             capture_tx,
             capture_seq: 0,
             capture_cancel: Arc::new(AtomicBool::new(false)),
+            preview_mode: None,
+            pending_capture: false,
             diag: crate::diagnostics::DiagCollector::new(),
             diag_action_rx,
             diag_state_tx,
@@ -129,6 +139,8 @@ impl OverlayApp {
             capture_tx,
             capture_seq: 0,
             capture_cancel: Arc::new(AtomicBool::new(false)),
+            preview_mode: None,
+            pending_capture: false,
         }
     }
 }
@@ -182,11 +194,19 @@ impl OverlayApp {
                 }
                 UiEffect::ShowWindow => self.show_window(ctx),
                 UiEffect::ShowWindowNoActivate => self.show_window_no_activate(ctx),
-                UiEffect::StartCapture => self.start_capture(ctx),
+                UiEffect::StartCapture => {
+                    // Defer the Cmd+C simulation until the cycle modifiers are
+                    // released (handled in the CycleCommit tap arm). Copying while
+                    // Ctrl+Shift are still held would send Cmd+Ctrl+Shift+C.
+                    self.pending_capture = true;
+                }
                 UiEffect::HideWindow => {
                     ctx.memory_mut(|m| m.reset_areas());
                     self.hide_window(ctx);
                     self.spawn_position = None;
+                    // Cancel any in-progress cycling gesture / deferred capture.
+                    self.preview_mode = None;
+                    self.pending_capture = false;
                 }
                 UiEffect::CaptureMousePosition => self.capture_mouse_position(),
                 UiEffect::ResetAreas => {
@@ -211,6 +231,9 @@ impl OverlayApp {
                     // Tell the in-flight capture thread to stop before it mutates
                     // the clipboard; its (now stale) result is gated out separately.
                     self.capture_cancel.store(true, Ordering::SeqCst);
+                    // A deferred (not-yet-started) capture is also abandoned.
+                    self.pending_capture = false;
+                    self.preview_mode = None;
                 }
             }
         }
@@ -238,6 +261,8 @@ impl OverlayApp {
             match tap_event.action {
                 TapAction::SingleTap => {
                     info!("single-tap triggered, using clipboard content...");
+                    // A fresh trigger ends any prior cycling preview.
+                    self.preview_mode = None;
                     let event = match self.clipboard.read_content() {
                         Ok(content) => UiEvent::ContentReady { content, auto_copy: false },
                         Err(e) => {
@@ -250,11 +275,47 @@ impl OverlayApp {
                 }
                 TapAction::DoubleTap => {
                     info!("double-tap triggered, capturing selection...");
-                    // Show the spinner immediately (non-activating) and run the
-                    // blocking copy+poll on a background thread (see start_capture),
-                    // instead of freezing the render thread for 250-700ms.
+                    self.preview_mode = None;
+                    // Show the spinner immediately (non-activating). The actual
+                    // copy is deferred (StartCapture -> pending_capture) until the
+                    // modifiers are released, then started in the CycleCommit arm.
                     let effects = self.sm.handle(UiEvent::CaptureStarted);
                     self.execute_effects(effects, ctx);
+                }
+                TapAction::CycleAdvance => {
+                    // Advance the preview to the next available mode (wrapping).
+                    // Before content is known (double-tap capture in flight),
+                    // cycle over all modes; once loaded, respect availability.
+                    let available = self.sm.available_modes();
+                    let targets: &[crate::ProcessMode] = if available.is_empty() {
+                        crate::ProcessMode::ALL
+                    } else {
+                        available
+                    };
+                    let current = self.preview_mode.unwrap_or_else(|| self.sm.mode());
+                    let next = current.next_available(targets);
+                    if next != current {
+                        self.preview_mode = Some(next);
+                        info!("cycle preview: {}", next.label());
+                    }
+                }
+                TapAction::CycleCommit { is_double_tap } => {
+                    let preview = self.preview_mode.take();
+                    info!("cycle commit: preview={:?}", preview.map(|m| m.label()));
+                    // Deferred double-tap capture: modifiers are now released, so
+                    // simulating Cmd+C is safe. Start it here (no-op otherwise).
+                    if is_double_tap && self.pending_capture {
+                        self.pending_capture = false;
+                        self.start_capture(ctx);
+                    }
+                    // Commit a mode change only if the preview diverged from the
+                    // committed mode; reuses the normal switch path.
+                    if let Some(mode) = preview
+                        && mode != self.sm.mode()
+                    {
+                        let effects = self.sm.handle(UiEvent::UserSwitchMode(mode));
+                        self.execute_effects(effects, ctx);
+                    }
                 }
                 TapAction::Pending => {}
             }

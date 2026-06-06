@@ -42,6 +42,12 @@ impl ModifierState {
     fn set(&self, ctrl: bool, shift: bool) {
         self.held.store(ctrl && shift, Ordering::Release);
     }
+
+    /// Test-only: directly drive the combo-held state to simulate the OS watcher.
+    #[cfg(test)]
+    pub(crate) fn set_combo_held(&self, held: bool) {
+        self.held.store(held, Ordering::Release);
+    }
 }
 
 /// Spawn the platform keyboard watcher and return the shared modifier state.
