@@ -380,7 +380,11 @@ impl OverlayApp {
         }
         let focused = ctx.input(|i| i.viewport().focused);
         if focused == Some(true) {
-            self.sm.handle(UiEvent::FocusGained);
+            // Execute the effects symmetrically with FocusLost. The list is empty
+            // today, but discarding it silently would hide any future FocusGained
+            // effect with no compiler warning.
+            let effects = self.sm.handle(UiEvent::FocusGained);
+            self.execute_effects(effects, ctx);
         } else if focused == Some(false) {
             let effects = self.sm.handle(UiEvent::FocusLost);
             self.execute_effects(effects, ctx);
