@@ -74,6 +74,7 @@ pub fn render(
     streaming: StreamingState<'_>,
     available_modes: &[ProcessMode],
     preview_mode: Option<ProcessMode>,
+    picking_text: Option<&str>,
     rephrase_params: RephraseParams,
     thinking: ThinkingState,
     pinned: bool,
@@ -127,23 +128,23 @@ pub fn render(
             frame.show(ui, |ui| {
                 ui.set_width(OVERLAY_WIDTH);
 
-                // Capturing has no content/modes yet — normally just a spinner.
-                // During a hold-to-cycle gesture (double-tap path) the capture is
-                // deferred, so show the tab bar with the live preview above the
-                // spinner. Content type is unknown here, so all modes are offered;
-                // image-only is reconciled on capture in on_content_ready.
+                // Picking overlay (hold-to-cycle, before commit). Show the mode
+                // tabs from the start so the user sees and cycles the mode, and
+                // the content area shows the data to be processed when available
+                // (single-tap clipboard). The double-tap selection is captured on
+                // release, so it shows a spinner until then. Content type is not
+                // yet known, so all modes are offered; image-only is reconciled on
+                // capture in on_content_ready.
                 if matches!(state, OverlayState::Capturing) {
-                    if preview_mode.is_some() {
-                        render_tab_bar(
-                            ui, mode, ProcessMode::ALL,
-                            thinking, pinned, preview_mode,
-                            &mut action,
-                        );
-                        ui.add_space(4.0);
-                        ui.add(egui::Separator::default().spacing(4.0));
-                        ui.add_space(4.0);
-                    }
-                    render_capturing(ui, elapsed, &mut action);
+                    render_tab_bar(
+                        ui, mode, ProcessMode::ALL,
+                        thinking, pinned, preview_mode,
+                        &mut action,
+                    );
+                    ui.add_space(4.0);
+                    ui.add(egui::Separator::default().spacing(4.0));
+                    ui.add_space(4.0);
+                    render_capturing(ui, picking_text, elapsed, &mut action);
                     return;
                 }
 
@@ -285,18 +286,27 @@ fn render_elapsed_label(ui: &mut egui::Ui, elapsed: Option<std::time::Duration>)
 /// selection is copied on a background thread (no content/tabs yet).
 fn render_capturing(
     ui: &mut egui::Ui,
+    picking_text: Option<&str>,
     elapsed: Option<std::time::Duration>,
     action: &mut OverlayAction,
 ) {
-    ui.horizontal(|ui| {
-        ui.spinner();
-        ui.label(
-            egui::RichText::new("Copying selection...")
-                .color(egui::Color32::WHITE)
-                .size(15.0),
-        );
-        render_elapsed_label(ui, elapsed);
-    });
+    if let Some(text) = picking_text {
+        // Single-tap picking: the clipboard content is already available, so show
+        // the data that will be processed in the chosen mode on release.
+        render_scrollable_text(ui, "picking", text, MAX_RESULT_HEIGHT, false);
+    } else {
+        // Double-tap: the selection is captured on modifier release (copy
+        // simulation needs the modifiers up), so until then show a spinner.
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(
+                egui::RichText::new("Copying selection...")
+                    .color(egui::Color32::WHITE)
+                    .size(15.0),
+            );
+            render_elapsed_label(ui, elapsed);
+        });
+    }
     ui.add_space(4.0);
     let cancel_btn = egui::Button::new(
         egui::RichText::new("Cancel")
