@@ -181,6 +181,9 @@ struct GenerationConfig {
     max_tokens: Option<u32>,
     /// Per-request timeout in seconds (also the streaming connect timeout).
     request_timeout_secs: Option<u64>,
+    /// Maximum wait in seconds for response headers on streaming requests
+    /// before the attempt is treated as transient and retried.
+    initial_response_timeout_secs: Option<u64>,
 }
 
 /// `[hotkey]` — hotkey behavior. No environment-variable equivalent; each falls
@@ -307,6 +310,12 @@ impl Config {
     /// (`[generation].request_timeout_secs`).
     pub fn generation_request_timeout_secs(&self) -> Option<u64> {
         self.generation.request_timeout_secs
+    }
+
+    /// Configured initial-response (headers) timeout in seconds, if any
+    /// (`[generation].initial_response_timeout_secs`).
+    pub fn generation_initial_response_timeout_secs(&self) -> Option<u64> {
+        self.generation.initial_response_timeout_secs
     }
 
     /// Configured double-tap timeout in milliseconds, if any
@@ -743,12 +752,13 @@ mod tests {
     #[test]
     fn generation_section_parses() {
         let config: Config = toml::from_str(
-            "[generation]\ntemperature = 0.7\nmax_tokens = 2048\nrequest_timeout_secs = 60\n",
+            "[generation]\ntemperature = 0.7\nmax_tokens = 2048\nrequest_timeout_secs = 60\ninitial_response_timeout_secs = 5\n",
         )
         .unwrap();
         assert_eq!(config.generation_temperature(), Some(0.7));
         assert_eq!(config.generation_max_tokens(), Some(2048));
         assert_eq!(config.generation_request_timeout_secs(), Some(60));
+        assert_eq!(config.generation_initial_response_timeout_secs(), Some(5));
     }
 
     #[test]
@@ -785,6 +795,7 @@ mod tests {
         assert_eq!(config.generation_temperature(), None);
         assert_eq!(config.generation_max_tokens(), None);
         assert_eq!(config.generation_request_timeout_secs(), None);
+        assert_eq!(config.generation_initial_response_timeout_secs(), None);
     }
 
     #[test]

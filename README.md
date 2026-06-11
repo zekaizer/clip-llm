@@ -80,8 +80,10 @@ kinds of settings:
   **env var > config file > built-in default**. (Exception: `CLIP_LLM_NO_STREAM`
   only forces streaming off — it cannot force `streaming = false` back on.)
 - **`[generation]`** — request parameters (`temperature`, `max_tokens`,
-  `request_timeout_secs`). No environment-variable equivalent: **config file >
-  built-in default**.
+  `request_timeout_secs`, `initial_response_timeout_secs`). No
+  environment-variable equivalent: **config file > built-in default**.
+  Transient request failures (connection errors, timeouts, HTTP 5xx) are
+  retried once automatically before reporting an error.
 - **`[hotkey]`** — `double_tap_timeout_ms`, the single/double-tap detection
   window in milliseconds (default `500`). Lower it (e.g. `300`) to shorten the
   silent wait before a single-tap resolves. No environment-variable equivalent.

@@ -237,6 +237,9 @@ pub enum ApiError {
     #[error("http request failed: {0}")]
     Http(#[from] reqwest::Error),
 
+    #[error("no response headers within {0}s")]
+    InitialResponseTimeout(u64),
+
     #[error("empty response from model")]
     EmptyResponse,
 
