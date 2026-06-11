@@ -16,6 +16,13 @@ const DEFAULT_MODEL_NAME: &str = "MiniMaxAI/MiniMax-M2.5";
 const TEMPERATURE: f64 = 0.1;
 const MAX_TOKENS: u32 = 16384;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
+/// Streaming only: max wait for response headers before the attempt is retried.
+/// Non-streaming responses arrive only after full generation, so they are
+/// bounded by the regular client's total timeout instead.
+const INITIAL_RESPONSE_TIMEOUT_SECS: u64 = 10;
+/// Transient-failure retries per request (total attempts = MAX_RETRIES + 1).
+const MAX_RETRIES: u32 = 1;
+const RETRY_DELAY: Duration = Duration::from_millis(500);
 
 // -- Request types (OpenAI chat completions schema) --
 
@@ -207,6 +214,7 @@ struct LlmClientInner {
     custom_headers: Vec<(String, String)>,
     temperature: f64,
     max_tokens: u32,
+    initial_response_timeout: Duration,
     supports_vision: OnceCell<bool>,
     thinking_control: OnceCell<ThinkingControlMethod>,
 }
@@ -238,6 +246,18 @@ fn resolve_setting(env_value: Option<String>, config_value: Option<&str>, defaul
         .filter(|s| !s.is_empty())
         .or_else(|| config_value.filter(|s| !s.is_empty()).map(str::to_owned))
         .unwrap_or_else(|| default.to_owned())
+}
+
+/// Whether a request failure is transient and worth a retry: connect errors,
+/// timeouts (total or initial-response), and HTTP 5xx.
+fn is_transient_error(e: &ApiError) -> bool {
+    match e {
+        ApiError::InitialResponseTimeout(_) => true,
+        ApiError::Http(e) => {
+            e.is_connect() || e.is_timeout() || e.status().is_some_and(|s| s.is_server_error())
+        }
+        _ => false,
+    }
 }
 
 /// Parses the `CLIP_LLM_CUSTOM_HEADERS` env format: comma-separated `Key:Value`
@@ -296,9 +316,14 @@ impl LlmClient {
                 .generation_request_timeout_secs()
                 .unwrap_or(REQUEST_TIMEOUT_SECS),
         );
+        let initial_response_timeout = Duration::from_secs(
+            config
+                .generation_initial_response_timeout_secs()
+                .unwrap_or(INITIAL_RESPONSE_TIMEOUT_SECS),
+        );
 
         info!(
-            "endpoint={endpoint}, model={model}, api_key={}, custom_headers={}, temperature={temperature}, max_tokens={max_tokens}, timeout={}s",
+            "endpoint={endpoint}, model={model}, api_key={}, custom_headers={}, temperature={temperature}, max_tokens={max_tokens}, timeout={}s, initial_response_timeout={}s",
             if api_key.is_some() { "set" } else { "unset" },
             if custom_headers.is_empty() {
                 "none".to_string()
@@ -306,6 +331,7 @@ impl LlmClient {
                 custom_headers.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(",")
             },
             timeout.as_secs(),
+            initial_response_timeout.as_secs(),
         );
 
         let client = Client::builder().timeout(timeout).build()?;
@@ -320,6 +346,7 @@ impl LlmClient {
             custom_headers,
             temperature,
             max_tokens,
+            initial_response_timeout,
             supports_vision: OnceCell::new(),
             thinking_control: OnceCell::new(),
         })))
@@ -648,8 +675,44 @@ impl LlmClient {
             trace!("LLM request body:\n{json}");
         }
         let client = if stream { &inner.streaming_client } else { &inner.client };
-        let req = inner.apply_auth(client.post(&inner.endpoint).json(&body));
-        Ok(req.send().await?.error_for_status()?)
+        let mut req = inner.apply_auth(client.post(&inner.endpoint).json(&body));
+        // The streaming client has no total timeout, so without this bound a
+        // server that accepts the connection but never sends headers would
+        // hang the request forever.
+        let headers_timeout = stream.then_some(inner.initial_response_timeout);
+
+        for attempt in 1..=MAX_RETRIES {
+            // try_clone() fails only for stream bodies; JSON bodies always clone.
+            let Some(retry_req) = req.try_clone() else { break };
+            match Self::send_request(req, headers_timeout).await {
+                Err(e) if is_transient_error(&e) => {
+                    warn!(
+                        "transient request failure (attempt {attempt}/{}): {e}; retrying in {}ms",
+                        MAX_RETRIES + 1,
+                        RETRY_DELAY.as_millis(),
+                    );
+                    tokio::time::sleep(RETRY_DELAY).await;
+                    req = retry_req;
+                }
+                result => return result,
+            }
+        }
+        Self::send_request(req, headers_timeout).await
+    }
+
+    /// Send a single request attempt. When `headers_timeout` is set, the wait
+    /// for response headers is bounded.
+    async fn send_request(
+        req: reqwest::RequestBuilder,
+        headers_timeout: Option<Duration>,
+    ) -> Result<reqwest::Response, ApiError> {
+        let resp = match headers_timeout {
+            Some(t) => tokio::time::timeout(t, req.send())
+                .await
+                .map_err(|_| ApiError::InitialResponseTimeout(t.as_secs()))??,
+            None => req.send().await?,
+        };
+        Ok(resp.error_for_status()?)
     }
 
     /// Send content to the vLLM server and return the raw response content.
@@ -733,6 +796,16 @@ mod tests {
         assert_eq!(resolve_setting(Some(String::new()), Some("cfg"), "def"), "cfg");
         // an empty config string is treated as unset and falls through to default.
         assert_eq!(resolve_setting(Some(String::new()), Some(""), "def"), "def");
+    }
+
+    #[test]
+    fn is_transient_error_classification() {
+        // Initial-response timeout is transient (worth a retry).
+        assert!(is_transient_error(&ApiError::InitialResponseTimeout(10)));
+        // Permanent failures must not be retried.
+        assert!(!is_transient_error(&ApiError::EmptyResponse));
+        assert!(!is_transient_error(&ApiError::NoUsableContent));
+        assert!(!is_transient_error(&ApiError::Cancelled));
     }
 
     #[test]

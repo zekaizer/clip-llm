@@ -636,6 +636,7 @@ impl OverlayApp {
             overlay::OverlayAction::CopyToClipboard => UiEvent::UserCopy,
             overlay::OverlayAction::PasteReplace => UiEvent::UserPaste,
             overlay::OverlayAction::TogglePin => UiEvent::UserTogglePin,
+            overlay::OverlayAction::Retry => UiEvent::UserRetry,
         };
         let effects = self.sm.handle(event);
         self.execute_effects(effects, ctx);

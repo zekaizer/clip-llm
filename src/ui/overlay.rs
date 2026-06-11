@@ -55,6 +55,7 @@ pub enum OverlayAction {
     CopyToClipboard,
     PasteReplace,
     TogglePin,
+    Retry,
 }
 
 pub struct OverlayOutput {
@@ -180,7 +181,11 @@ pub fn render(
                             &mut action,
                         );
                     }
-                    OverlayState::Error(msg) => render_error(ui, msg),
+                    OverlayState::Error(msg) => {
+                        // Retry needs loaded content; a capture failure leaves
+                        // none (available_modes is empty), so hide the button.
+                        render_error(ui, msg, !available_modes.is_empty(), &mut action);
+                    }
                     // Hidden returns early at the top of render(); Capturing is handled above.
                     OverlayState::Hidden | OverlayState::Capturing => unreachable!(),
                 }
@@ -385,12 +390,23 @@ fn render_processing(
     }
 }
 
-fn render_error(ui: &mut egui::Ui, message: &str) {
+fn render_error(ui: &mut egui::Ui, message: &str, can_retry: bool, action: &mut OverlayAction) {
     ui.label(
         egui::RichText::new(format!("Error: {message}"))
             .color(egui::Color32::from_rgb(255, 100, 100))
             .size(14.0),
     );
+    if can_retry {
+        ui.add_space(4.0);
+        let retry_btn = egui::Button::new(
+            egui::RichText::new("Retry").size(12.0).color(egui::Color32::WHITE),
+        )
+        .fill(egui::Color32::from_rgba_unmultiplied(50, 50, 50, 200))
+        .corner_radius(6.0);
+        if ui.add(retry_btn).clicked() {
+            *action = OverlayAction::Retry;
+        }
+    }
 }
 
 fn render_result(
@@ -407,9 +423,10 @@ fn render_result(
         ui.add_space(4.0);
     }
 
-    // Action button: always rendered at top-right of result area.
+    // Action buttons: always rendered at top-right of result area.
     // auto_copy (double-tap): paste/replace button (↩)
     // !auto_copy (single-tap): copy button (📋)
+    // plus a retry button (↻) to its left, for a fresh generation.
     // Opacity changes on hover (subtle when idle, prominent when hovered).
     let result_top = ui.cursor().min;
     render_scrollable_text(ui, ("result", mode), text, MAX_RESULT_HEIGHT, false);
@@ -421,9 +438,28 @@ fn render_result(
     );
     let btn_rect = egui::Rect::from_min_size(btn_pos, btn_size);
 
+    let icon = if auto_copy { "\u{21a9}" } else { "\u{1f4cb}" };
+    if floating_action_button(ui, btn_rect, icon) {
+        *action = if auto_copy {
+            OverlayAction::PasteReplace
+        } else {
+            OverlayAction::CopyToClipboard
+        };
+    }
+
+    let retry_rect = btn_rect.translate(egui::vec2(-(ACTION_BTN_SIZE + 4.0), 0.0));
+    if floating_action_button(ui, retry_rect, "\u{21bb}") {
+        *action = OverlayAction::Retry;
+    }
+}
+
+/// Floating action button with distance-based fade: fully transparent beyond
+/// [`ACTION_BTN_FADE_RADIUS`] from the cursor, ramping to [`ACTION_BTN_ALPHA_MAX`]
+/// at the button. Returns true when clicked.
+fn floating_action_button(ui: &mut egui::Ui, rect: egui::Rect, icon: &str) -> bool {
     let alpha = ui.input(|i| {
         i.pointer.hover_pos().map_or(0u8, |p| {
-            let dist = btn_rect.center().distance(p);
+            let dist = rect.center().distance(p);
             if dist >= ACTION_BTN_FADE_RADIUS {
                 0
             } else {
@@ -431,7 +467,6 @@ fn render_result(
             }
         })
     });
-    let icon = if auto_copy { "\u{21a9}" } else { "\u{1f4cb}" };
     let btn = egui::Button::new(
         egui::RichText::new(icon)
             .size(14.0)
@@ -440,14 +475,7 @@ fn render_result(
     .fill(egui::Color32::from_rgba_unmultiplied(50, 50, 50, alpha))
     .stroke(egui::Stroke::NONE)
     .corner_radius(4.0);
-
-    if ui.put(btn_rect, btn).clicked() {
-        *action = if auto_copy {
-            OverlayAction::PasteReplace
-        } else {
-            OverlayAction::CopyToClipboard
-        };
-    }
+    ui.put(rect, btn).clicked()
 }
 
 fn render_param_pills<T: Copy + PartialEq>(

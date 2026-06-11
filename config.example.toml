@@ -33,6 +33,7 @@ streaming = true                          # set false to disable SSE (like CLIP_
 temperature          = 0.1     # sampling temperature (0.0–2.0)
 max_tokens           = 16384   # max tokens generated per response
 request_timeout_secs = 30      # per-request timeout (also the streaming connect timeout)
+initial_response_timeout_secs = 10  # streaming only: max wait for response headers before retry
 
 # Hotkey behavior. No environment-variable equivalent.
 [hotkey]

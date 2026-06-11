@@ -73,6 +73,9 @@ fn friendly_reqwest_error(e: &reqwest::Error) -> String {
 fn friendly_api_error(e: &ApiError) -> String {
     match e {
         ApiError::Http(inner) => friendly_reqwest_error(inner),
+        ApiError::InitialResponseTimeout(_) => {
+            "The server is slow to respond. Try again in a moment.".to_string()
+        }
         ApiError::EmptyResponse => {
             "The model returned no visible output. Try switching mode or disabling thinking."
                 .to_string()
