@@ -30,6 +30,9 @@ type CaptureResult = (u64, Result<crate::ClipboardContent, crate::ClipboardError
 /// instead of firing a cancel + new round-trip per click.
 const PARAM_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(300);
 
+/// How long the copy button shows the ✓ confirmation after a copy (#16).
+const COPY_CONFIRM: std::time::Duration = std::time::Duration::from_millis(1500);
+
 pub struct OverlayApp {
     sm: StateMachine,
     cmd_tx: tokio_mpsc::UnboundedSender<WorkerCommand>,
@@ -94,6 +97,14 @@ pub struct OverlayApp {
     /// Rapid pill clicks replace it; it is sent once the window expires. The
     /// state machine already shows Processing — only the send is delayed.
     pending_process: Option<(ProcessTask, std::time::Instant)>,
+    /// When the user last copied via the 📋 button / Cmd+C — drives the ✓
+    /// confirmation on the copy button for [`COPY_CONFIRM`] (#16a).
+    copy_confirmed_at: Option<std::time::Instant>,
+    /// Text of our last clipboard write and the change counter right after
+    /// it. Lets `WriteClipboard` skip rewriting identical content that is
+    /// still on the clipboard — the ↩ paste otherwise double-writes the
+    /// result that auto-copy already placed (#16b).
+    last_clipboard_write: Option<(String, u64)>,
     #[cfg(feature = "diagnostics")]
     diag: crate::diagnostics::DiagCollector,
     #[cfg(feature = "diagnostics")]
@@ -140,6 +151,8 @@ impl OverlayApp {
             single_commit_pending: false,
             pending_content: None,
             pending_process: None,
+            copy_confirmed_at: None,
+            last_clipboard_write: None,
             diag: crate::diagnostics::DiagCollector::new(),
             diag_action_rx,
             diag_state_tx,
@@ -182,6 +195,8 @@ impl OverlayApp {
             single_commit_pending: false,
             pending_content: None,
             pending_process: None,
+            copy_confirmed_at: None,
+            last_clipboard_write: None,
         }
     }
 }
@@ -225,7 +240,20 @@ impl OverlayApp {
                     let _ = self.cmd_tx.send(WorkerCommand::Cancel);
                 }
                 UiEffect::WriteClipboard(text) => {
-                    if let Err(e) = self.clipboard.write_text(&text) {
+                    // Skip rewriting identical content that is still on the
+                    // clipboard (#16b): the ↩ paste otherwise double-writes the
+                    // result auto-copy already placed, polluting clipboard
+                    // managers. If anything else touched the clipboard since
+                    // (change counter moved), write again so the button still
+                    // delivers the result it promises.
+                    let counter = self.platform.clipboard_change_count();
+                    let already_ours = self
+                        .last_clipboard_write
+                        .as_ref()
+                        .is_some_and(|(t, c)| *t == text && *c == counter);
+                    if already_ours {
+                        info!("clipboard already holds this text; skipping rewrite");
+                    } else if let Err(e) = self.clipboard.write_text(&text) {
                         error!("clipboard write failed: {e}");
                         let err_effects =
                             self.sm.handle(UiEvent::ClipboardError(friendly_clipboard_error(&e)));
@@ -236,6 +264,8 @@ impl OverlayApp {
                         // original chain are stale and must not execute.
                         return;
                     } else {
+                        self.last_clipboard_write =
+                            Some((text.clone(), self.platform.clipboard_change_count()));
                         info!(
                             "{} complete ({} chars), copied to clipboard",
                             self.sm.mode().label(),
@@ -750,6 +780,15 @@ impl OverlayApp {
         } else {
             self.execute_effects(effects, ctx);
         }
+
+        // Copy confirmation (#16a): flip the 📋 button to ✓ for a moment.
+        // Gated on Result — UserCopy is a no-op in any other state.
+        if matches!(action, overlay::OverlayAction::CopyToClipboard)
+            && matches!(self.sm.state(), OverlayState::Result(_))
+        {
+            self.copy_confirmed_at = Some(std::time::Instant::now());
+            ctx.request_repaint_after(COPY_CONFIRM);
+        }
     }
 
     /// Execute effects, deferring any `SendProcess` into `pending_process`
@@ -846,6 +885,16 @@ impl eframe::App for OverlayApp {
         self.poll_tap_actions(ctx);
         self.poll_captures(ctx);
         self.flush_pending_process(ctx);
+
+        // Expire the copy ✓ confirmation (#16a).
+        if let Some(at) = self.copy_confirmed_at {
+            let elapsed = at.elapsed();
+            if elapsed >= COPY_CONFIRM {
+                self.copy_confirmed_at = None;
+            } else {
+                ctx.request_repaint_after(COPY_CONFIRM - elapsed);
+            }
+        }
         #[cfg(feature = "diagnostics")]
         self.poll_diag_actions(ctx);
 
@@ -880,6 +929,7 @@ impl eframe::App for OverlayApp {
             self.sm.pinned(),
             self.sm.auto_copy(),
             self.sm.capture_source(),
+            self.copy_confirmed_at.is_some(),
             elapsed,
             ctx,
         );

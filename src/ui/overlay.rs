@@ -81,6 +81,7 @@ pub fn render(
     pinned: bool,
     auto_copy: bool,
     source: CaptureSource,
+    copy_confirmed: bool,
     elapsed: Option<std::time::Duration>,
     ctx: &egui::Context,
 ) -> OverlayOutput {
@@ -185,6 +186,7 @@ pub fn render(
                             streaming.think_content,
                             streaming.think_expanded,
                             auto_copy,
+                            copy_confirmed,
                             &mut action,
                         );
                     }
@@ -448,6 +450,7 @@ fn render_error(ui: &mut egui::Ui, message: &str, can_retry: bool, action: &mut 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_result(
     ui: &mut egui::Ui,
     mode: ProcessMode,
@@ -455,6 +458,7 @@ fn render_result(
     think_content: Option<&str>,
     think_expanded: bool,
     auto_copy: bool,
+    copy_confirmed: bool,
     action: &mut OverlayAction,
 ) {
     if let Some(content) = think_content {
@@ -477,7 +481,14 @@ fn render_result(
     );
     let btn_rect = egui::Rect::from_min_size(btn_pos, btn_size);
 
-    let icon = if auto_copy { "\u{21a9}" } else { "\u{1f4cb}" };
+    // ✓ confirms a just-completed copy for a moment (#16a).
+    let icon = if auto_copy {
+        "\u{21a9}"
+    } else if copy_confirmed {
+        "\u{2713}"
+    } else {
+        "\u{1f4cb}"
+    };
     if floating_action_button(ui, btn_rect, icon) {
         *action = if auto_copy {
             OverlayAction::PasteReplace
