@@ -25,6 +25,9 @@ type MsgSendPtr = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void);
 type MsgSendRetI64 = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i64;
 type MsgSendRetI32 = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
 type MsgSendRetBool = unsafe extern "C" fn(*mut c_void, *mut c_void) -> bool;
+type MsgSendUlongRetPtr = unsafe extern "C" fn(*mut c_void, *mut c_void, c_ulong) -> *mut c_void;
+#[cfg(target_arch = "aarch64")]
+type MsgSendRetRect = unsafe extern "C" fn(*mut c_void, *mut c_void) -> CGRect;
 
 /// Delay between key-down and key-up events (ms).
 const KEY_EVENT_DELAY_MS: u64 = 50;
@@ -64,6 +67,25 @@ unsafe extern "C" {
     fn objc_getClass(name: *const c_char) -> *mut c_void;
     fn sel_registerName(name: *const c_char) -> *mut c_void;
     fn objc_msgSend(obj: *mut c_void, sel: *mut c_void) -> *mut c_void;
+    // Struct-return variant: on x86_64 a 32-byte struct comes back via a hidden
+    // sret pointer, which Rust's extern "C" struct return matches exactly.
+    // arm64 has no _stret — CGRect (4 doubles) returns in d0-d3 via objc_msgSend.
+    #[cfg(target_arch = "x86_64")]
+    fn objc_msgSend_stret(obj: *mut c_void, sel: *mut c_void) -> CGRect;
+}
+
+/// Send a message returning a `CGRect` (e.g. `frame`, `visibleFrame`),
+/// dispatching to the correct ABI per architecture.
+unsafe fn msg_send_rect(obj: *mut c_void, sel: *mut c_void) -> CGRect {
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        let send: MsgSendRetRect = std::mem::transmute(objc_msgSend as *const ());
+        send(obj, sel)
+    }
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        objc_msgSend_stret(obj, sel)
+    }
 }
 
 /// Get the first NSWindow from [NSApp windows].
@@ -257,6 +279,14 @@ unsafe extern "C" {
 /// Get the display bounds (Quartz coordinates) of the screen containing the given point.
 /// Returns (origin_x, origin_y, width, height).
 pub fn display_bounds_at_point(x: f64, y: f64) -> Option<(f64, f64, f64, f64)> {
+    // Prefer the NSScreen work area (excludes Dock and menu bar) so the
+    // overlay is never clamped underneath the Dock (#36); fall back to the
+    // full display bounds if the NSScreen lookup fails.
+    work_area_at_point(x, y).or_else(|| full_display_bounds_at_point(x, y))
+}
+
+/// Full display bounds via CGDisplayBounds (includes Dock and menu bar).
+fn full_display_bounds_at_point(x: f64, y: f64) -> Option<(f64, f64, f64, f64)> {
     let point = CGPoint::new(x, y);
     let mut display: u32 = 0;
     let mut count: u32 = 0;
@@ -272,6 +302,75 @@ pub fn display_bounds_at_point(x: f64, y: f64) -> Option<(f64, f64, f64, f64)> {
             bounds.size.width,
             bounds.size.height,
         ))
+    }
+}
+
+/// Convert an AppKit rect (global bottom-left origin, y-up) to CG global
+/// coordinates (top-left origin, y-down). AppKit's global space is anchored
+/// at the bottom-left of the primary screen, so the flip uses its height.
+fn appkit_rect_to_cg(
+    rect: (f64, f64, f64, f64),
+    primary_height: f64,
+) -> (f64, f64, f64, f64) {
+    let (x, y, w, h) = rect;
+    (x, primary_height - (y + h), w, h)
+}
+
+/// Half-open containment check: `[origin, origin + size)` on both axes.
+fn bounds_contain(bounds: (f64, f64, f64, f64), x: f64, y: f64) -> bool {
+    let (bx, by, w, h) = bounds;
+    x >= bx && x < bx + w && y >= by && y < by + h
+}
+
+/// Work area (`NSScreen.visibleFrame`) of the screen containing the point,
+/// converted to CG global coordinates to match `mouse_position()` and
+/// `CGDisplayBounds`. Returns `None` when the lookup fails.
+fn work_area_at_point(x: f64, y: f64) -> Option<(f64, f64, f64, f64)> {
+    let msg_send_i64: MsgSendRetI64 = unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+    let msg_send_at: MsgSendUlongRetPtr =
+        unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+    unsafe {
+        let cls = objc_getClass(c"NSScreen".as_ptr());
+        if cls.is_null() {
+            return None;
+        }
+        let screens = objc_msgSend(cls, sel_registerName(c"screens".as_ptr()));
+        if screens.is_null() {
+            return None;
+        }
+        let count = msg_send_i64(screens, sel_registerName(c"count".as_ptr()));
+        if count <= 0 {
+            return None;
+        }
+        let at_index = sel_registerName(c"objectAtIndex:".as_ptr());
+        let frame_sel = sel_registerName(c"frame".as_ptr());
+
+        // Index 0 is the primary screen; its height anchors the AppKit→CG flip.
+        let primary = msg_send_at(screens, at_index, 0);
+        if primary.is_null() {
+            return None;
+        }
+        let primary_height = msg_send_rect(primary, frame_sel).size.height;
+
+        for i in 0..count {
+            let screen = msg_send_at(screens, at_index, i as c_ulong);
+            if screen.is_null() {
+                continue;
+            }
+            let frame = msg_send_rect(screen, frame_sel);
+            let frame_cg = appkit_rect_to_cg(
+                (frame.origin.x, frame.origin.y, frame.size.width, frame.size.height),
+                primary_height,
+            );
+            if bounds_contain(frame_cg, x, y) {
+                let vis = msg_send_rect(screen, sel_registerName(c"visibleFrame".as_ptr()));
+                return Some(appkit_rect_to_cg(
+                    (vis.origin.x, vis.origin.y, vis.size.width, vis.size.height),
+                    primary_height,
+                ));
+            }
+        }
+        None
     }
 }
 
@@ -489,5 +588,37 @@ impl Platform for MacOsPlatform {
             }
         });
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{appkit_rect_to_cg, bounds_contain};
+
+    #[test]
+    fn appkit_to_cg_flips_y_around_primary_height() {
+        // Primary screen 2560x1440, menu bar 25pt, Dock 70pt at the bottom:
+        // visibleFrame (AppKit, y-up) = origin y 70, height 1345.
+        let cg = appkit_rect_to_cg((0.0, 70.0, 2560.0, 1345.0), 1440.0);
+        // In CG (top-left origin) the work area starts below the menu bar.
+        assert_eq!(cg, (0.0, 25.0, 2560.0, 1345.0));
+    }
+
+    #[test]
+    fn appkit_to_cg_secondary_screen_above_primary() {
+        // Secondary 1920x1080 sitting above the primary (AppKit y = 1440).
+        let cg = appkit_rect_to_cg((100.0, 1440.0, 1920.0, 1080.0), 1440.0);
+        // Above the primary in CG means negative y.
+        assert_eq!(cg, (100.0, -1080.0, 1920.0, 1080.0));
+    }
+
+    #[test]
+    fn bounds_contain_is_half_open() {
+        let b = (0.0, 0.0, 100.0, 50.0);
+        assert!(bounds_contain(b, 0.0, 0.0));
+        assert!(bounds_contain(b, 99.9, 49.9));
+        assert!(!bounds_contain(b, 100.0, 0.0));
+        assert!(!bounds_contain(b, 0.0, 50.0));
+        assert!(!bounds_contain(b, -0.1, 0.0));
     }
 }
