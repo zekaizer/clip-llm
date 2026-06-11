@@ -556,7 +556,7 @@ const STARTER_TEMPLATE: &str = "\
 # initial_response_timeout_secs = 10
 
 # [hotkey]
-# double_tap_timeout_ms = 500
+# double_tap_timeout_ms = 350
 
 # [ui]
 # single_tap_pinned = false

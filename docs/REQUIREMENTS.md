@@ -80,7 +80,7 @@ Hardcoded single prompt template. macOS + Windows. Console log for status. Block
 
 2. **Global hotkey registration**
    - Register `Ctrl+Shift+C` via `global-hotkey` (same on both platforms)
-   - Two activation modes via tap detection (500ms timeout window):
+   - Two activation modes via tap detection (350ms timeout window):
      - **Single-tap**: use existing clipboard content as LLM input
      - **Double-tap**: copy current selection first, then use as LLM input
    - macOS: requires Accessibility permission (detect and prompt)

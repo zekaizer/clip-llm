@@ -37,7 +37,7 @@ initial_response_timeout_secs = 10  # streaming only: max wait for response head
 
 # Hotkey behavior. No environment-variable equivalent.
 [hotkey]
-double_tap_timeout_ms = 500     # single/double-tap detection window (lower = snappier)
+double_tap_timeout_ms = 350     # single/double-tap detection window (lower = snappier)
 
 # Overlay behavior. `*_pinned` sets whether a result starts "pinned" (stays open
 # on focus loss instead of auto-hiding). A single-tap result is NOT auto-copied to

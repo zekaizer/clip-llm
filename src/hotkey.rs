@@ -4,7 +4,12 @@ use tracing::debug;
 
 /// Default timeout window for double-tap detection, used when the config does
 /// not override it (`[hotkey].double_tap_timeout_ms`).
-pub const DEFAULT_DOUBLE_TAP_TIMEOUT: Duration = Duration::from_millis(500);
+///
+/// A single-tap shows nothing until this window expires, so the value is a
+/// direct perceived-latency cost on every single-tap. Typical double-tap gaps
+/// are 250-350ms; 350ms keeps double-taps reliable while cutting the
+/// single-tap dead time from ~550ms to ~400ms (window + 50ms poll tick).
+pub const DEFAULT_DOUBLE_TAP_TIMEOUT: Duration = Duration::from_millis(350);
 
 /// Result of a hotkey press event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
