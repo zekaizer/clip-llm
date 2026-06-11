@@ -35,6 +35,9 @@ pub struct OverlayApp {
     spawn_position: Option<egui::Pos2>,
     /// Whether the initial Visible(false) command has been sent at startup.
     initial_hide_done: bool,
+    /// One-shot startup notice (e.g. a failed config load) surfaced via the
+    /// error overlay on the first frame after the initial hide settles.
+    startup_notice: Option<String>,
     /// Tap events from coordinator thread (hotkey detection runs off-UI).
     tap_rx: mpsc::Receiver<TapEvent>,
     /// Cached desired_size to avoid redundant send_viewport_cmd calls.
@@ -98,6 +101,7 @@ impl OverlayApp {
             platform: NativePlatform,
             spawn_position: None,
             initial_hide_done: false,
+            startup_notice: None,
             tap_rx,
             last_desired_size: None,
             think_expanded: false,
@@ -135,6 +139,7 @@ impl OverlayApp {
             platform: NativePlatform,
             spawn_position: None,
             initial_hide_done: false,
+            startup_notice: None,
             tap_rx,
             last_desired_size: None,
             think_expanded: false,
@@ -152,6 +157,12 @@ impl OverlayApp {
 }
 
 impl OverlayApp {
+    /// Set a one-shot notice (e.g. "config ignored" from the startup config
+    /// load) shown in the error overlay once the app is up.
+    pub fn with_startup_notice(mut self, notice: Option<String>) -> Self {
+        self.startup_notice = notice;
+        self
+    }
 
     // -- Effect execution --
 
@@ -673,7 +684,23 @@ impl OverlayApp {
 
 impl eframe::App for OverlayApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let startup_settled = self.initial_hide_done;
         self.maybe_initial_hide(ctx);
+
+        // Surface a pending startup notice via the error overlay, one frame
+        // after the initial hide so the ShowWindow effect cannot race the
+        // startup Visible(false) command.
+        if startup_settled {
+            if let Some(msg) = self.startup_notice.take() {
+                self.capture_mouse_position();
+                let effects = self.sm.handle(UiEvent::ClipboardError(msg));
+                self.execute_effects(effects, ctx);
+            }
+        } else if self.startup_notice.is_some() {
+            // Guarantee the follow-up frame; the event-driven repaint model
+            // would otherwise sleep until the next external event.
+            ctx.request_repaint();
+        }
 
         self.poll_responses(ctx);
         self.poll_tap_actions(ctx);

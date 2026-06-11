@@ -112,6 +112,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // thread reads them. Falls back to built-in defaults on any error.
     clip_llm::config::init();
 
+    // A failed config load is surfaced via the overlay once the UI is up —
+    // the stderr fallback is invisible in the .app bundle distribution.
+    let startup_notice = match clip_llm::config::load_outcome() {
+        clip_llm::config::LoadOutcome::Failed { path, reason } => Some(format!(
+            "Config file ignored ({reason}): {} — using built-in defaults.",
+            path.display()
+        )),
+        _ => None,
+    };
+
     // Check platform permissions before anything else. On macOS this also shows
     // the system permission dialog; if still denied, print an actionable path
     // (the app has no window/Dock icon on this code path, so stderr is the only
@@ -205,6 +215,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             );
             #[cfg(not(feature = "diagnostics"))]
             let app = OverlayApp::new(cmd_tx, resp_rx, clipboard, tap_rx);
+            let app = app.with_startup_notice(startup_notice);
 
             Ok(Box::new(app))
         }),
