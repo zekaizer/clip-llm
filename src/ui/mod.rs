@@ -25,6 +25,11 @@ const IDLE_POLL_MS: u64 = 100;
 /// produced it, so stale captures (after a re-trigger / close) can be discarded.
 type CaptureResult = (u64, Result<crate::ClipboardContent, crate::ClipboardError>);
 
+/// Debounce window for parameter-change re-requests (#22): sweeping the
+/// rephrase style/length or thinking pills coalesces into one LLM request
+/// instead of firing a cancel + new round-trip per click.
+const PARAM_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(300);
+
 pub struct OverlayApp {
     sm: StateMachine,
     cmd_tx: tokio_mpsc::UnboundedSender<WorkerCommand>,
@@ -85,6 +90,10 @@ pub struct OverlayApp {
     /// overlay and processed on commit. `None` for the double-tap (selection)
     /// path, whose content only exists after release.
     pending_content: Option<crate::ClipboardContent>,
+    /// A worker request deferred by the parameter-change debounce (#22).
+    /// Rapid pill clicks replace it; it is sent once the window expires. The
+    /// state machine already shows Processing — only the send is delayed.
+    pending_process: Option<(ProcessTask, std::time::Instant)>,
     #[cfg(feature = "diagnostics")]
     diag: crate::diagnostics::DiagCollector,
     #[cfg(feature = "diagnostics")]
@@ -130,6 +139,7 @@ impl OverlayApp {
             capture_kind: state_machine::CaptureSource::Selection,
             single_commit_pending: false,
             pending_content: None,
+            pending_process: None,
             diag: crate::diagnostics::DiagCollector::new(),
             diag_action_rx,
             diag_state_tx,
@@ -171,6 +181,7 @@ impl OverlayApp {
             capture_kind: state_machine::CaptureSource::Selection,
             single_commit_pending: false,
             pending_content: None,
+            pending_process: None,
         }
     }
 }
@@ -195,6 +206,10 @@ impl OverlayApp {
                     thinking_mode,
                     request_id,
                 } => {
+                    // An immediate request supersedes any debounce-parked one
+                    // (#22) — flushing the stale task later would queue a
+                    // wasted LLM round-trip behind this request.
+                    self.pending_process = None;
                     let text_len = content.text.as_ref().map_or(0, |t| t.len());
                     let img_count = content.images.len();
                     info!("starting {} ({} chars, {} images)", mode.label(), text_len, img_count);
@@ -244,11 +259,13 @@ impl OverlayApp {
                     ctx.memory_mut(|m| m.reset_areas());
                     self.hide_window(ctx);
                     self.spawn_position = None;
-                    // Cancel any in-progress cycling gesture / deferred capture.
+                    // Cancel any in-progress cycling gesture / deferred capture,
+                    // and drop a debounce-parked request (overlay is closing).
                     self.preview_mode = None;
                     self.pending_capture = false;
                     self.pending_content = None;
                     self.single_commit_pending = false;
+                    self.pending_process = None;
                 }
                 UiEffect::CaptureMousePosition => self.capture_mouse_position(),
                 UiEffect::ResetAreas => {
@@ -691,6 +708,15 @@ impl OverlayApp {
 
     /// Translate the overlay action returned by `render()` into state machine events.
     fn handle_overlay_action(&mut self, ctx: &egui::Context, action: overlay::OverlayAction) {
+        // Parameter pills (#22): the state machine applies the change at once
+        // (instant visual feedback, Processing state), but the resulting
+        // SendProcess is debounced so sweeping pills coalesces into one request.
+        let debounce = matches!(
+            action,
+            overlay::OverlayAction::ChangeRephraseStyle(_)
+                | overlay::OverlayAction::ChangeRephraseLength(_)
+                | overlay::OverlayAction::ChangeThinkingMode(_)
+        );
         let event = match action {
             overlay::OverlayAction::None => return,
             overlay::OverlayAction::Close => UiEvent::UserClose,
@@ -719,7 +745,52 @@ impl OverlayApp {
             overlay::OverlayAction::Retry => UiEvent::UserRetry,
         };
         let effects = self.sm.handle(event);
-        self.execute_effects(effects, ctx);
+        if debounce {
+            self.execute_effects_debounced(effects, ctx);
+        } else {
+            self.execute_effects(effects, ctx);
+        }
+    }
+
+    /// Execute effects, deferring any `SendProcess` into `pending_process`
+    /// (parameter-change debounce, #22). Everything else — notably the
+    /// `SendCancel` that aborts the in-flight request — runs immediately.
+    fn execute_effects_debounced(&mut self, effects: Vec<UiEffect>, ctx: &egui::Context) {
+        let mut immediate = Vec::with_capacity(effects.len());
+        for effect in effects {
+            match effect {
+                UiEffect::SendProcess {
+                    content,
+                    mode,
+                    rephrase_params,
+                    thinking_mode,
+                    request_id,
+                } => {
+                    self.pending_process = Some((
+                        ProcessTask { content, mode, rephrase_params, thinking_mode, request_id },
+                        std::time::Instant::now() + PARAM_DEBOUNCE,
+                    ));
+                    // Guarantee a frame after the deadline (the Processing
+                    // state repaints every frame anyway; this is a safety net).
+                    ctx.request_repaint_after(PARAM_DEBOUNCE);
+                }
+                other => immediate.push(other),
+            }
+        }
+        self.execute_effects(immediate, ctx);
+    }
+
+    /// Send a debounced request once its window expires (called every frame).
+    fn flush_pending_process(&mut self, ctx: &egui::Context) {
+        let Some(&(_, deadline)) = self.pending_process.as_ref() else { return };
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            let (task, _) = self.pending_process.take().expect("checked above");
+            info!("param debounce expired: sending request {}", task.request_id);
+            let _ = self.cmd_tx.send(WorkerCommand::Process(task));
+        } else {
+            ctx.request_repaint_after(deadline - now);
+        }
     }
 
     /// Track how long the active Processing request has been running, keyed on its
@@ -774,6 +845,7 @@ impl eframe::App for OverlayApp {
         self.poll_responses(ctx);
         self.poll_tap_actions(ctx);
         self.poll_captures(ctx);
+        self.flush_pending_process(ctx);
         #[cfg(feature = "diagnostics")]
         self.poll_diag_actions(ctx);
 
