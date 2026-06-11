@@ -469,6 +469,34 @@ pub fn substitute(template: &str, primary: &str, secondary: &str) -> String {
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
+/// What happened when the external config was loaded at startup. Consumed by
+/// UI surfacing (tray menu, startup notice) — the silent stderr/log fallback
+/// is invisible inside the .app bundle distribution.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LoadOutcome {
+    /// No config file present — built-in defaults active.
+    NoFile,
+    /// Config loaded successfully from this path.
+    Loaded(PathBuf),
+    /// A config file was found but could not be used — defaults active.
+    /// `reason` stays generic by design (file contents must not leak).
+    Failed { path: PathBuf, reason: &'static str },
+}
+
+static LOAD_OUTCOME: OnceLock<LoadOutcome> = OnceLock::new();
+
+/// Returns the result of the startup config load. Reports `NoFile` when
+/// called before [`init`] (e.g. in tests that never load a config).
+pub fn load_outcome() -> &'static LoadOutcome {
+    LOAD_OUTCOME.get_or_init(|| LoadOutcome::NoFile)
+}
+
+/// Records the load outcome; only the first call wins (mirrors the config
+/// `OnceLock` semantics).
+fn record_outcome(outcome: LoadOutcome) {
+    let _ = LOAD_OUTCOME.set(outcome);
+}
+
 /// Returns the process-global configuration (prompts and `[api]` settings),
 /// initializing it to the built-in defaults if [`init`] was never called
 /// (e.g. in tests).
@@ -482,16 +510,34 @@ pub fn init() {
     CONFIG.get_or_init(load_or_default);
 }
 
+/// The explicit config path from `CLIP_LLM_CONFIG`, if set. An exported-but-
+/// empty value is not a real path; callers fall through to the
+/// next-to-executable lookup instead of warning on a blank path.
+fn env_config_path() -> Option<PathBuf> {
+    match env::var(CONFIG_ENV) {
+        Ok(path) if !path.is_empty() => Some(PathBuf::from(path)),
+        _ => None,
+    }
+}
+
+/// The path where a config file is — or would be — picked up: a non-empty
+/// `CLIP_LLM_CONFIG`, otherwise `config.toml` next to the executable,
+/// regardless of whether the file currently exists. Used by UI surfacing
+/// (e.g. the tray's Open Config action) to point at the right location.
+pub fn candidate_path() -> Option<PathBuf> {
+    if let Some(path) = env_config_path() {
+        return Some(path);
+    }
+    Some(env::current_exe().ok()?.parent()?.join(CONFIG_FILENAME))
+}
+
 /// Resolves the config path: a non-empty `CLIP_LLM_CONFIG` (returned as-is, even
 /// if it does not exist, so a bad explicit path can be reported), otherwise a
 /// `config.toml` next to the executable — but only if it is a regular file, so a
 /// directory, symlink-to-directory, or FIFO never enters the load path.
 fn resolve_path() -> Option<PathBuf> {
-    match env::var(CONFIG_ENV) {
-        // An exported-but-empty value is not a real path; fall through to the
-        // next-to-executable lookup instead of warning on a blank path.
-        Ok(path) if !path.is_empty() => return Some(PathBuf::from(path)),
-        _ => {}
+    if let Some(path) = env_config_path() {
+        return Some(path);
     }
     let exe = env::current_exe().ok()?;
     let candidate = exe.parent()?.join(CONFIG_FILENAME);
@@ -509,6 +555,7 @@ fn resolve_path() -> Option<PathBuf> {
 /// `CLIP_LLM_CONFIG` cannot leak file contents into ordinary logs.
 fn load_or_default() -> Config {
     let Some(path) = resolve_path() else {
+        record_outcome(LoadOutcome::NoFile);
         info!("config: no {CONFIG_FILENAME} found, using built-in defaults");
         // Surface where a config file would be picked up so the app's
         // configurability is discoverable without reading the docs. Printed to
@@ -535,6 +582,7 @@ fn load_or_default() -> Config {
     match std::fs::metadata(&path) {
         Ok(meta) if !meta.is_file() => {
             warn!("config: {}: not a regular file — using built-in defaults", path.display());
+            record_outcome(LoadOutcome::Failed { path, reason: "not a regular file" });
             return Config::default();
         }
         Ok(meta) if meta.len() > MAX_CONFIG_BYTES => {
@@ -543,12 +591,14 @@ fn load_or_default() -> Config {
                 path.display(),
                 meta.len()
             );
+            record_outcome(LoadOutcome::Failed { path, reason: "file too large" });
             return Config::default();
         }
         Ok(_) => {}
         Err(e) => {
             warn!("config: {}: cannot read metadata — using built-in defaults", path.display());
             debug!("config metadata error: {e}");
+            record_outcome(LoadOutcome::Failed { path, reason: "file not accessible" });
             return Config::default();
         }
     }
@@ -558,17 +608,20 @@ fn load_or_default() -> Config {
             Ok(config) => {
                 info!("config: loaded from {}", path.display());
                 eprintln!("clip-llm: config loaded from {}", path.display());
+                record_outcome(LoadOutcome::Loaded(path));
                 config
             }
             Err(e) => {
                 warn!("config: {}: invalid TOML — using built-in defaults", path.display());
                 debug!("config parse error: {e}");
+                record_outcome(LoadOutcome::Failed { path, reason: "invalid TOML" });
                 Config::default()
             }
         },
         Err(e) => {
             warn!("config: {}: read failed — using built-in defaults", path.display());
             debug!("config read error: {e}");
+            record_outcome(LoadOutcome::Failed { path, reason: "file could not be read" });
             Config::default()
         }
     }
