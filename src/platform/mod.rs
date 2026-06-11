@@ -3,6 +3,12 @@ pub trait Platform {
     /// Simulate Cmd+C (macOS) or Ctrl+C (Windows) to copy selected text.
     fn simulate_copy(&self) -> Result<(), crate::PlatformError>;
 
+    /// Monotonic clipboard change counter (macOS `NSPasteboard.changeCount`,
+    /// Windows `GetClipboardSequenceNumber`). Bumps whenever any app takes
+    /// clipboard ownership, letting callers detect that a simulated copy has
+    /// landed without clearing the clipboard first.
+    fn clipboard_change_count(&self) -> u64;
+
     /// Check and prompt for required OS permissions (e.g. macOS Accessibility).
     fn check_accessibility(&self) -> Result<(), crate::PlatformError>;
 

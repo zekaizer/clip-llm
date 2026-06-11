@@ -92,6 +92,13 @@ impl Platform for WindowsPlatform {
         Ok(())
     }
 
+    /// Read the global clipboard sequence number — increments whenever the
+    /// clipboard contents change (e.g. a copy lands).
+    fn clipboard_change_count(&self) -> u64 {
+        use windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber;
+        u64::from(unsafe { GetClipboardSequenceNumber() })
+    }
+
     fn check_accessibility(&self) -> Result<(), PlatformError> {
         // No special permission required on Windows.
         Ok(())

@@ -261,6 +261,11 @@ pub enum ClipboardError {
     #[error("no text in clipboard after copy simulation")]
     NoTextAfterCopy,
 
+    /// A copy landed on the clipboard (change counter bumped) but carried
+    /// no usable text or image — e.g. a whitespace-only selection.
+    #[error("copy delivered no usable content")]
+    EmptyCopy,
+
     #[error("capture cancelled")]
     Cancelled,
 

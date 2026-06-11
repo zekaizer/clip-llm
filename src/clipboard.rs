@@ -100,8 +100,9 @@ impl ClipboardManager {
         Ok(text)
     }
 
-    /// Simulate copy via platform, then poll clipboard for new content.
-    /// Clears clipboard first so we can detect when new content arrives.
+    /// Simulate copy via platform, then poll the clipboard change counter
+    /// until the copy lands. The clipboard is never cleared, so a failed
+    /// capture leaves the user's existing content untouched (#48, #57).
     /// Returns both text and images captured by the copy simulation.
     pub fn copy_and_read(
         &mut self,
@@ -112,19 +113,20 @@ impl ClipboardManager {
         // Wait for user to release modifier keys (Ctrl+Shift) after double-tap,
         // otherwise simulate_copy sends Cmd+Ctrl+Shift+C instead of Cmd+C.
         thread::sleep(Duration::from_millis(200));
-        // Bail out before touching the clipboard if this capture was cancelled or
-        // superseded during the release wait — otherwise clear() + Cmd+C would
-        // overwrite whatever the user has copied since with stale selection.
+        // Bail out before simulating if this capture was cancelled or superseded
+        // during the release wait — otherwise Cmd+C would overwrite whatever the
+        // user has copied since with stale selection.
         if cancel.load(Ordering::SeqCst) {
             debug!("capture cancelled before copy simulation");
             return Err(ClipboardError::Cancelled);
         }
-        let _ = self.board.clear();
+        let baseline = platform.clipboard_change_count();
         platform.simulate_copy()?;
 
         let start = Instant::now();
         let deadline = start + Duration::from_millis(CLIPBOARD_POLL_TIMEOUT_MS);
         let interval = Duration::from_millis(CLIPBOARD_POLL_INTERVAL_MS);
+        let mut copy_landed = false;
 
         loop {
             thread::sleep(interval);
@@ -136,25 +138,35 @@ impl ClipboardManager {
                 return Err(ClipboardError::Cancelled);
             }
 
-            let text = self.board.get_text().ok().filter(|s| !s.trim().is_empty());
-            let images = read_image_from_board(&mut self.board)?;
+            // The counter bumps when the source app takes clipboard ownership,
+            // which can precede the actual data write (e.g. Windows
+            // EmptyClipboard before SetClipboardData) — so keep polling for
+            // content until the deadline instead of failing on an empty read.
+            if platform.clipboard_change_count() != baseline {
+                copy_landed = true;
+                let text = self.board.get_text().ok().filter(|s| !s.trim().is_empty());
+                let images = read_image_from_board(&mut self.board)?;
 
-            if text.is_some() || !images.is_empty() {
-
-                let content = ClipboardContent { text, images };
-                let elapsed = start.elapsed().as_millis();
-                info!(
-                    "clipboard content arrived in {}ms (text={}, images={})",
-                    elapsed,
-                    content.text.as_ref().map_or(0, |t| t.len()),
-                    content.images.len()
-                );
-                return Ok(content);
+                if text.is_some() || !images.is_empty() {
+                    let content = ClipboardContent { text, images };
+                    let elapsed = start.elapsed().as_millis();
+                    info!(
+                        "clipboard content arrived in {}ms (text={}, images={})",
+                        elapsed,
+                        content.text.as_ref().map_or(0, |t| t.len()),
+                        content.images.len()
+                    );
+                    return Ok(content);
+                }
             }
 
             if Instant::now() >= deadline {
                 let elapsed = start.elapsed().as_millis();
-                warn!("clipboard poll timed out after {}ms", elapsed);
+                if copy_landed {
+                    warn!("copy landed but carried no usable content ({elapsed}ms)");
+                    return Err(ClipboardError::EmptyCopy);
+                }
+                warn!("no copy detected within {elapsed}ms");
                 return Err(ClipboardError::NoTextAfterCopy);
             }
         }
@@ -216,6 +228,12 @@ mod tests {
             Ok(())
         }
 
+        // The mock writes through the real system clipboard, so delegate to
+        // the real platform counter to observe those writes.
+        fn clipboard_change_count(&self) -> u64 {
+            crate::platform::NativePlatform.clipboard_change_count()
+        }
+
         fn check_accessibility(&self) -> Result<(), PlatformError> {
             Ok(())
         }
@@ -263,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_and_read_whitespace_only_times_out() {
+    fn copy_and_read_whitespace_only_reports_empty_copy() {
         let _lock = CLIPBOARD_LOCK.lock().unwrap();
         let mut mgr = ClipboardManager::new().unwrap();
         let mock = MockPlatform {
@@ -271,8 +289,26 @@ mod tests {
             copy_text: Some("  \n  ".into()),
         };
 
+        // The copy lands (counter bumps) but carries only whitespace.
+        let result = mgr.copy_and_read(&mock, &AtomicBool::new(false));
+        assert!(matches!(result, Err(ClipboardError::EmptyCopy)));
+    }
+
+    #[test]
+    fn copy_and_read_failure_preserves_clipboard() {
+        let _lock = CLIPBOARD_LOCK.lock().unwrap();
+        let mut mgr = ClipboardManager::new().unwrap();
+        let mock = MockPlatform {
+            copy_result: Ok(()),
+            copy_text: None, // nothing selected — no copy ever lands
+        };
+
+        // Regression test for #48: a failed capture must not destroy the
+        // user's existing clipboard content (no clear-before-copy).
+        mgr.write_text("precious content").unwrap();
         let result = mgr.copy_and_read(&mock, &AtomicBool::new(false));
         assert!(matches!(result, Err(ClipboardError::NoTextAfterCopy)));
+        assert_eq!(mgr.read_clipboard().unwrap(), "precious content");
     }
 
     #[test]

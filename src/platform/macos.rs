@@ -363,6 +363,24 @@ impl Platform for MacOsPlatform {
         Ok(())
     }
 
+    /// Read `NSPasteboard.generalPasteboard.changeCount` — increments whenever
+    /// any app takes pasteboard ownership (e.g. a copy lands).
+    fn clipboard_change_count(&self) -> u64 {
+        let msg_send_i64: MsgSendRetI64 =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe {
+            let cls = objc_getClass(c"NSPasteboard".as_ptr());
+            if cls.is_null() {
+                return 0;
+            }
+            let pasteboard = objc_msgSend(cls, sel_registerName(c"generalPasteboard".as_ptr()));
+            if pasteboard.is_null() {
+                return 0;
+            }
+            msg_send_i64(pasteboard, sel_registerName(c"changeCount".as_ptr())) as u64
+        }
+    }
+
     fn mouse_position(&self) -> Option<(f64, f64)> {
         // CGEvent.location() returns Quartz logical points (top-left origin).
         // This matches egui's OuterPosition coordinate system directly.

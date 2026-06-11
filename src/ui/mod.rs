@@ -761,6 +761,7 @@ fn friendly_clipboard_error(e: &crate::ClipboardError) -> String {
         NoTextAfterCopy => {
             "Could not capture selected text. Try selecting it again and double-tapping.".to_string()
         }
+        EmptyCopy => "The selection contains no usable text or image.".to_string(),
         // A cancelled/superseded capture is gated out before display; this arm
         // exists only for exhaustiveness.
         Cancelled => "Capture cancelled.".to_string(),
