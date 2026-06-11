@@ -60,6 +60,7 @@ pub use modifier_watcher::{spawn_modifier_watcher, ModifierState};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static TRAY_QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
 static TRAY_ABOUT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Decode the embedded tray icon PNG into an RGBA `tray_icon::Icon`.
@@ -98,23 +99,36 @@ pub fn init_tray(ctx: &eframe::egui::Context) {
             // Leak: the tray icon lives for the entire process lifetime.
             std::mem::forget(tray);
 
-            // set_event_handler intercepts all menu events; signal via AtomicBool so
-            // poll_tray_events() acts inside update() — guaranteed on the main thread,
-            // which native dialogs (NSAlert / MessageBox) require.
+            // set_event_handler intercepts all menu events. Actions that must run
+            // on the main thread are signalled via AtomicBool and executed by
+            // poll_tray_events() inside update().
             let quit_id = quit_id.clone();
             let about_id = about_id.clone();
             let ctx = ctx.clone();
             MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
                 if event.id() == &quit_id {
                     TRAY_QUIT_REQUESTED.store(true, Ordering::SeqCst);
+                    // Windows: a hidden window gets no WM_PAINT, so nudge it
+                    // visible so update() runs and poll_tray_events() can act.
+                    // Not needed on macOS.
+                    #[cfg(target_os = "windows")]
+                    windows::show_no_activate();
+                    ctx.request_repaint();
                 } else if event.id() == &about_id {
-                    TRAY_ABOUT_REQUESTED.store(true, Ordering::SeqCst);
+                    // macOS: NSAlert must run on the main thread — signal and let
+                    // poll_tray_events() (inside update()) show it.
+                    #[cfg(target_os = "macos")]
+                    {
+                        TRAY_ABOUT_REQUESTED.store(true, Ordering::SeqCst);
+                        ctx.request_repaint();
+                    }
+                    // Windows: the message box runs on its own thread, so show it
+                    // directly — no main-thread round-trip, and no window nudge
+                    // (which would leave a stray transparent-but-visible overlay
+                    // intercepting clicks while the state machine is Hidden).
+                    #[cfg(target_os = "windows")]
+                    windows::show_about();
                 }
-                // Windows: a hidden window gets no WM_PAINT, so nudge it visible so
-                // update() runs and poll_tray_events() can act. Not needed on macOS.
-                #[cfg(target_os = "windows")]
-                windows::show_no_activate();
-                ctx.request_repaint();
             }));
 
             tracing::info!("system tray icon created");
@@ -126,13 +140,13 @@ pub fn init_tray(ctx: &eframe::egui::Context) {
 }
 
 /// Poll for tray menu actions inside `update()` (main thread): show the About
-/// dialog and/or quit. Called every frame from `OverlayApp::update`.
+/// dialog (macOS only — NSAlert requires the main thread; Windows shows its
+/// message box directly from the menu handler) and/or quit. Called every frame
+/// from `OverlayApp::update`.
 pub fn poll_tray_events(ctx: &eframe::egui::Context) {
+    #[cfg(target_os = "macos")]
     if TRAY_ABOUT_REQUESTED.swap(false, Ordering::SeqCst) {
-        #[cfg(target_os = "macos")]
         macos::show_about();
-        #[cfg(target_os = "windows")]
-        windows::show_about();
     }
     if TRAY_QUIT_REQUESTED.swap(false, Ordering::SeqCst) {
         tracing::info!("quit requested from tray menu");
