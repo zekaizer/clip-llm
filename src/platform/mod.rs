@@ -89,10 +89,17 @@ pub fn init_tray(ctx: &eframe::egui::Context) {
 
     let about_item = MenuItem::new("About clip-llm", true, None);
     let about_id = about_item.id().clone();
+    let config_item = MenuItem::new("Open Config", true, None);
+    let config_id = config_item.id().clone();
     let quit_item = MenuItem::new("Quit", true, None);
     let quit_id = quit_item.id().clone();
-    let menu = Menu::with_items(&[&about_item, &PredefinedMenuItem::separator(), &quit_item])
-        .expect("failed to create tray menu");
+    let menu = Menu::with_items(&[
+        &about_item,
+        &config_item,
+        &PredefinedMenuItem::separator(),
+        &quit_item,
+    ])
+    .expect("failed to create tray menu");
 
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
@@ -134,6 +141,9 @@ pub fn init_tray(ctx: &eframe::egui::Context) {
                     // intercepting clicks while the state machine is Hidden).
                     #[cfg(target_os = "windows")]
                     windows::show_about();
+                } else if event.id() == &config_id {
+                    // Spawning an editor process needs no main-thread round-trip.
+                    open_config_file();
                 }
             }));
 
@@ -142,6 +152,32 @@ pub fn init_tray(ctx: &eframe::egui::Context) {
         Err(e) => {
             tracing::warn!("failed to create tray icon: {e}");
         }
+    }
+}
+
+/// Open the config file in a text editor, writing a commented starter template
+/// first when no file exists yet (see `config::ensure_config_file`). Runs on
+/// the tray menu handler thread.
+fn open_config_file() {
+    let Some(path) = crate::config::ensure_config_file() else {
+        tracing::warn!("open config: no usable config path");
+        return;
+    };
+    // `open -t` (default text editor) / notepad: deterministic even when no
+    // app is associated with .toml files.
+    #[cfg(target_os = "macos")]
+    let spawned = std::process::Command::new("open").arg("-t").arg(&path).spawn();
+    #[cfg(target_os = "windows")]
+    let spawned = std::process::Command::new("notepad.exe").arg(&path).spawn();
+    match spawned {
+        Ok(mut child) => {
+            tracing::info!("opening config file: {}", path.display());
+            // Reap the launcher in the background so it never lingers as a zombie.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        Err(e) => tracing::warn!("failed to open config file: {e}"),
     }
 }
 

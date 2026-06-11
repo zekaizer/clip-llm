@@ -531,6 +531,67 @@ pub fn candidate_path() -> Option<PathBuf> {
     Some(env::current_exe().ok()?.parent()?.join(CONFIG_FILENAME))
 }
 
+/// Starter template written by [`ensure_config_file`]. Every key is commented
+/// out so the built-in defaults — notably the rich prompts — stay active until
+/// the user opts in (config.example.toml ships simplified sample prompts that
+/// would silently degrade output if copied verbatim).
+const STARTER_TEMPLATE: &str = "\
+# clip-llm configuration
+#
+# Every key is optional — omitted keys keep their built-in defaults.
+# Changes apply on the next app start (no hot-reload yet).
+# Full schema with prompt examples: config.example.toml in the repository,
+# https://github.com/zekaizer/clip-llm/blob/main/config.example.toml
+
+# [api]
+# endpoint  = \"http://localhost:8000/v1\"   # CLIP_LLM_API_ENDPOINT
+# model     = \"MiniMaxAI/MiniMax-M2.5\"     # CLIP_LLM_MODEL
+# api_key   = \"...\"                        # CLIP_LLM_API_KEY
+# streaming = true
+
+# [generation]
+# temperature = 0.1
+# max_tokens = 16384
+# request_timeout_secs = 30
+# initial_response_timeout_secs = 10
+
+# [hotkey]
+# double_tap_timeout_ms = 500
+
+# [ui]
+# single_tap_pinned = false
+# double_tap_pinned = false
+
+# [languages]
+# primary   = \"Korean\"
+# secondary = \"English\"
+";
+
+/// Returns the config file path, writing the commented [`STARTER_TEMPLATE`]
+/// at the candidate location first when no file exists yet. Returns `None`
+/// when the location cannot be determined or the file cannot be created.
+/// Used by the tray's Open Config action.
+pub fn ensure_config_file() -> Option<PathBuf> {
+    let path = candidate_path()?;
+    // create_new: never clobber a file that appeared since the exists-check.
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(mut file) => {
+            use std::io::Write;
+            if let Err(e) = file.write_all(STARTER_TEMPLATE.as_bytes()) {
+                warn!("config: failed to write starter template to {}: {e}", path.display());
+                return None;
+            }
+            info!("config: created starter template at {}", path.display());
+            Some(path)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Some(path),
+        Err(e) => {
+            warn!("config: cannot create {}: {e}", path.display());
+            None
+        }
+    }
+}
+
 /// Resolves the config path: a non-empty `CLIP_LLM_CONFIG` (returned as-is, even
 /// if it does not exist, so a bad explicit path can be reported), otherwise a
 /// `config.toml` next to the executable — but only if it is a regular file, so a
