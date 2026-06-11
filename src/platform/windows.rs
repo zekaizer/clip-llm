@@ -219,6 +219,30 @@ fn find_clip_llm_hwnd() -> Option<HWND> {
     if hwnd.is_null() { None } else { Some(hwnd) }
 }
 
+/// Add or remove `WS_EX_NOACTIVATE` on the overlay window.
+///
+/// While set, mouse clicks (including drag, which winit performs via
+/// `WM_NCLBUTTONDOWN`) no longer make the overlay the foreground window, so a
+/// click during the capture window cannot redirect `SendInput(Ctrl+C)` away
+/// from the source app (#56). Cleared again before the overlay is shown with
+/// focus so the user can interact with the Result state normally.
+fn set_no_activate(hwnd: HWND, enabled: bool) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
+    };
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let new_style = if enabled {
+            style | WS_EX_NOACTIVATE as isize
+        } else {
+            style & !(WS_EX_NOACTIVATE as isize)
+        };
+        if new_style != style {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_style);
+        }
+    }
+}
+
 /// DPI scale factor derived from the system primary DPI setting (physical pixels / logical points).
 fn system_dpi_scale() -> f64 {
     let dpi = unsafe { GetDpiForSystem() } as f64;
@@ -239,6 +263,7 @@ pub fn show_no_activate() {
         SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
     };
     if let Some(hwnd) = find_clip_llm_hwnd() {
+        set_no_activate(hwnd, true);
         unsafe {
             // Center window on cursor before showing to prevent flash.
             // Both GetCursorPos and GetWindowRect return physical pixels,
@@ -315,6 +340,7 @@ pub fn show_no_activate_at(position: Option<(f32, f32)>) {
         SWP_NOZORDER,
     };
     if let Some(hwnd) = find_clip_llm_hwnd() {
+        set_no_activate(hwnd, true);
         unsafe {
             if let Some((x, y)) = position {
                 let scale = system_dpi_scale();
@@ -347,6 +373,9 @@ pub fn show_and_focus_window(position: Option<(f32, f32)>) {
         SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
     };
     if let Some(hwnd) = find_clip_llm_hwnd() {
+        // The capture is over once the overlay is shown with focus — restore
+        // normal click-to-activate behavior for the Result/Error states.
+        set_no_activate(hwnd, false);
         unsafe {
             if let Some((x, y)) = position {
                 let scale = system_dpi_scale();
