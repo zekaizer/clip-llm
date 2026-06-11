@@ -73,6 +73,14 @@ pub struct OverlayApp {
     /// takes focus before it runs (#55). `None` on platforms without
     /// per-process key posting.
     capture_target_pid: Option<i32>,
+    /// What the in-flight capture thread is doing: Selection = copy simulation
+    /// (double-tap), Clipboard = plain clipboard read (single-tap, #38).
+    /// Decides how `poll_captures` routes the result.
+    capture_kind: state_machine::CaptureSource,
+    /// Single-tap only: the commit (modifier release) arrived while the
+    /// background clipboard read was still in flight — process the content as
+    /// soon as it lands instead of parking it in `pending_content`.
+    single_commit_pending: bool,
     /// Single-tap clipboard content read at trigger time, shown in the picking
     /// overlay and processed on commit. `None` for the double-tap (selection)
     /// path, whose content only exists after release.
@@ -119,6 +127,8 @@ impl OverlayApp {
             preview_mode: None,
             pending_capture: false,
             capture_target_pid: None,
+            capture_kind: state_machine::CaptureSource::Selection,
+            single_commit_pending: false,
             pending_content: None,
             diag: crate::diagnostics::DiagCollector::new(),
             diag_action_rx,
@@ -158,6 +168,8 @@ impl OverlayApp {
             preview_mode: None,
             pending_capture: false,
             capture_target_pid: None,
+            capture_kind: state_machine::CaptureSource::Selection,
+            single_commit_pending: false,
             pending_content: None,
         }
     }
@@ -236,6 +248,7 @@ impl OverlayApp {
                     self.preview_mode = None;
                     self.pending_capture = false;
                     self.pending_content = None;
+                    self.single_commit_pending = false;
                 }
                 UiEffect::CaptureMousePosition => self.capture_mouse_position(),
                 UiEffect::ResetAreas => {
@@ -264,6 +277,7 @@ impl OverlayApp {
                     self.pending_capture = false;
                     self.preview_mode = None;
                     self.pending_content = None;
+                    self.single_commit_pending = false;
                 }
             }
         }
@@ -293,33 +307,26 @@ impl OverlayApp {
                     info!("single-tap triggered, reading clipboard...");
                     // A fresh trigger ends any prior cycling preview.
                     self.preview_mode = None;
-                    match self.clipboard.read_content() {
-                        Ok(content) => {
-                            // Defer processing until commit (modifier release) so
-                            // the mode can be cycled first, showing the content in
-                            // the picking overlay meanwhile. A quick tap (modifiers
-                            // already up) commits at once and flows straight to
-                            // processing. CaptureStarted shows the overlay and sets
-                            // pending_capture via StartCapture.
-                            self.pending_content = Some(content);
-                            let effects = self.sm.handle(UiEvent::CaptureStarted {
-                                source: state_machine::CaptureSource::Clipboard,
-                            });
-                            self.execute_effects(effects, ctx);
-                        }
-                        Err(e) => {
-                            error!("clipboard read failed: {e}");
-                            let effects = self
-                                .sm
-                                .handle(UiEvent::ClipboardError(friendly_clipboard_error(&e)));
-                            self.execute_effects(effects, ctx);
-                        }
-                    }
+                    self.pending_content = None;
+                    self.single_commit_pending = false;
+                    // Show the picking overlay immediately and read the clipboard
+                    // on a background thread (#38) — read_content() does
+                    // synchronous pasteboard IPC plus PNG encoding, which can
+                    // drop frames for large images. The content lands in
+                    // pending_content (preview) or flows straight to processing
+                    // if the commit already happened. CaptureStarted shows the
+                    // overlay and sets pending_capture via StartCapture.
+                    let effects = self.sm.handle(UiEvent::CaptureStarted {
+                        source: state_machine::CaptureSource::Clipboard,
+                    });
+                    self.execute_effects(effects, ctx);
+                    self.start_clipboard_read(ctx);
                 }
                 TapAction::DoubleTap => {
                     info!("double-tap triggered, capturing selection...");
                     self.preview_mode = None;
                     self.pending_content = None; // selection comes from copy-sim at commit
+                    self.single_commit_pending = false;
                     // Show the picking overlay (spinner) immediately (non-activating).
                     // The actual copy is deferred (StartCapture -> pending_capture)
                     // until the modifiers are released, then started in CycleCommit.
@@ -372,6 +379,12 @@ impl OverlayApp {
                                 .sm
                                 .handle(UiEvent::ContentReady { content, auto_copy: false });
                             self.execute_effects(effects, ctx);
+                        } else if matches!(self.sm.state(), OverlayState::Capturing) {
+                            // Single-tap, but the background clipboard read has
+                            // not landed yet (#38) — process it on arrival. The
+                            // Capturing guard keeps a read that already failed
+                            // (state moved to Error) from arming a dangling flag.
+                            self.single_commit_pending = true;
                         }
                     }
                     self.pending_content = None;
@@ -398,9 +411,26 @@ impl OverlayApp {
                 continue;
             }
             let event = match result {
-                Ok(content) => UiEvent::ContentReady { content, auto_copy: true },
+                // Double-tap selection capture: commit already happened (the
+                // copy only starts at commit), so process immediately.
+                Ok(content) if self.capture_kind == state_machine::CaptureSource::Selection => {
+                    UiEvent::ContentReady { content, auto_copy: true }
+                }
+                // Single-tap clipboard read (#38): if the commit already
+                // arrived, process now; otherwise park the content for the
+                // picking preview — CycleCommit takes it from pending_content.
+                Ok(content) => {
+                    if self.single_commit_pending {
+                        self.single_commit_pending = false;
+                        UiEvent::ContentReady { content, auto_copy: false }
+                    } else {
+                        self.pending_content = Some(content);
+                        continue;
+                    }
+                }
                 Err(e) => {
                     error!("clipboard capture failed: {e}");
+                    self.single_commit_pending = false;
                     UiEvent::ClipboardError(friendly_clipboard_error(&e))
                 }
             };
@@ -588,6 +618,7 @@ impl OverlayApp {
     fn start_capture(&mut self, ctx: &egui::Context) {
         self.capture_seq += 1;
         let seq = self.capture_seq;
+        self.capture_kind = state_machine::CaptureSource::Selection;
         // Abort any previous in-flight capture, then arm a fresh flag for this one
         // so rapid re-triggers don't run overlapping clear()/Cmd+C in parallel.
         self.capture_cancel.store(true, Ordering::SeqCst);
@@ -601,6 +632,28 @@ impl OverlayApp {
             // thread's, and sidesteps Send concerns). NativePlatform is a ZST.
             let result = match ClipboardManager::new() {
                 Ok(mut cm) => cm.copy_and_read(&NativePlatform, &cancel, target),
+                Err(e) => Err(e),
+            };
+            let _ = tx.send((seq, result));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Spawn a background thread to read the clipboard for a single-tap (#38).
+    /// `read_content()` does synchronous pasteboard IPC plus PNG encoding for
+    /// images, which can drop frames on the render thread. Tagged with
+    /// `capture_seq` like `start_capture` so stale results are discarded.
+    fn start_clipboard_read(&mut self, ctx: &egui::Context) {
+        self.capture_seq += 1;
+        let seq = self.capture_seq;
+        self.capture_kind = state_machine::CaptureSource::Clipboard;
+        // Supersede any in-flight selection capture from a prior trigger.
+        self.capture_cancel.store(true, Ordering::SeqCst);
+        let tx = self.capture_tx.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let result = match ClipboardManager::new() {
+                Ok(mut cm) => cm.read_content(),
                 Err(e) => Err(e),
             };
             let _ = tx.send((seq, result));

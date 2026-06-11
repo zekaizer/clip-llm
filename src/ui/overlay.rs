@@ -152,7 +152,7 @@ pub fn render(
                     ui.add_space(4.0);
                     ui.add(egui::Separator::default().spacing(4.0));
                     ui.add_space(4.0);
-                    render_capturing(ui, picking_text, elapsed, &mut action);
+                    render_capturing(ui, picking_text, source, elapsed, &mut action);
                     return;
                 }
 
@@ -324,20 +324,27 @@ fn render_elapsed_label(ui: &mut egui::Ui, elapsed: Option<std::time::Duration>)
 fn render_capturing(
     ui: &mut egui::Ui,
     picking_text: Option<&str>,
+    source: CaptureSource,
     elapsed: Option<std::time::Duration>,
     action: &mut OverlayAction,
 ) {
     if let Some(text) = picking_text {
-        // Single-tap picking: the clipboard content is already available, so show
-        // the data that will be processed in the chosen mode on release.
+        // Single-tap picking: the clipboard content has arrived, so show the
+        // data that will be processed in the chosen mode on release.
         render_scrollable_text(ui, "picking", text, MAX_RESULT_HEIGHT, false);
     } else {
-        // Double-tap: the selection is captured on modifier release (copy
-        // simulation needs the modifiers up), so until then show a spinner.
+        // Content not yet available — double-tap captures the selection on
+        // modifier release (copy simulation needs the modifiers up) and the
+        // single-tap clipboard read runs on a background thread (#38); until
+        // then show a spinner with a source-appropriate label.
         ui.horizontal(|ui| {
             ui.spinner();
+            let label = match source {
+                CaptureSource::Selection => "Copying selection...",
+                CaptureSource::Clipboard => "Reading clipboard...",
+            };
             ui.label(
-                egui::RichText::new("Copying selection...")
+                egui::RichText::new(label)
                     .color(egui::Color32::WHITE)
                     .size(15.0),
             );
