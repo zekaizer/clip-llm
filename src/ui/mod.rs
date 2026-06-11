@@ -302,7 +302,9 @@ impl OverlayApp {
                             // processing. CaptureStarted shows the overlay and sets
                             // pending_capture via StartCapture.
                             self.pending_content = Some(content);
-                            let effects = self.sm.handle(UiEvent::CaptureStarted);
+                            let effects = self.sm.handle(UiEvent::CaptureStarted {
+                                source: state_machine::CaptureSource::Clipboard,
+                            });
                             self.execute_effects(effects, ctx);
                         }
                         Err(e) => {
@@ -321,7 +323,9 @@ impl OverlayApp {
                     // Show the picking overlay (spinner) immediately (non-activating).
                     // The actual copy is deferred (StartCapture -> pending_capture)
                     // until the modifiers are released, then started in CycleCommit.
-                    let effects = self.sm.handle(UiEvent::CaptureStarted);
+                    let effects = self.sm.handle(UiEvent::CaptureStarted {
+                        source: state_machine::CaptureSource::Selection,
+                    });
                     self.execute_effects(effects, ctx);
                 }
                 TapAction::CycleAdvance => {
@@ -750,6 +754,7 @@ impl eframe::App for OverlayApp {
             },
             self.sm.pinned(),
             self.sm.auto_copy(),
+            self.sm.capture_source(),
             elapsed,
             ctx,
         );

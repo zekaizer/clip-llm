@@ -1,6 +1,6 @@
 use eframe::egui;
 
-use super::state_machine::OverlayState;
+use super::state_machine::{CaptureSource, OverlayState};
 use crate::{ProcessMode, RephraseLength, RephraseParams, RephraseStyle, ThinkingMode};
 
 const OVERLAY_WIDTH: f32 = 480.0;
@@ -80,6 +80,7 @@ pub fn render(
     thinking: ThinkingState,
     pinned: bool,
     auto_copy: bool,
+    source: CaptureSource,
     elapsed: Option<std::time::Duration>,
     ctx: &egui::Context,
 ) -> OverlayOutput {
@@ -136,10 +137,16 @@ pub fn render(
                 // release, so it shows a spinner until then. Content type is not
                 // yet known, so all modes are offered; image-only is reconciled on
                 // capture in on_content_ready.
+                // The badge tells the user where the content came from; in the
+                // Error state the message itself already says what failed, and
+                // the last source may be stale (e.g. a startup config notice).
+                let source_label =
+                    (!matches!(state, OverlayState::Error(_))).then(|| source.label());
+
                 if matches!(state, OverlayState::Capturing) {
                     render_tab_bar(
                         ui, mode, ProcessMode::ALL,
-                        thinking, pinned, preview_mode,
+                        thinking, pinned, preview_mode, source_label,
                         &mut action,
                     );
                     ui.add_space(4.0);
@@ -151,7 +158,7 @@ pub fn render(
 
                 render_tab_bar(
                     ui, mode, available_modes,
-                    thinking, pinned, preview_mode,
+                    thinking, pinned, preview_mode, source_label,
                     &mut action,
                 );
 
@@ -558,6 +565,7 @@ fn render_rephrase_params(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_tab_bar(
     ui: &mut egui::Ui,
     current: ProcessMode,
@@ -565,6 +573,7 @@ fn render_tab_bar(
     thinking: ThinkingState,
     pinned: bool,
     preview_mode: Option<ProcessMode>,
+    source_label: Option<&'static str>,
     action: &mut OverlayAction,
 ) {
     // Content is loaded whenever any mode is available; when empty the overlay
@@ -696,6 +705,19 @@ fn render_tab_bar(
                         *action = OverlayAction::ChangeThinkingMode(tm);
                     }
                 }
+            }
+
+            // Source badge (leftmost of the right cluster) — where the content
+            // came from: "Selection" (double-tap) vs "Clipboard" (single-tap).
+            // Makes a slow double-tap that resolved to a single-tap — sending
+            // stale clipboard content — visibly different (#50).
+            if let Some(label) = source_label {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(label)
+                        .size(11.0)
+                        .color(egui::Color32::from_gray(120)),
+                );
             }
         });
     });

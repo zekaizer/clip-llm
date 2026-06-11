@@ -40,6 +40,26 @@ impl OverlayState {
     }
 }
 
+/// Where the content being processed came from. Shown as a badge in the
+/// overlay so a mis-detected gesture (a slow double-tap resolving to a
+/// single-tap and sending stale clipboard content) is visibly different (#50).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureSource {
+    /// Double-tap: selection captured via simulated copy.
+    Selection,
+    /// Single-tap: existing clipboard content.
+    Clipboard,
+}
+
+impl CaptureSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Selection => "Selection",
+            Self::Clipboard => "Clipboard",
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // UiEvent / UiEffect
 // ---------------------------------------------------------------------------
@@ -47,9 +67,11 @@ impl OverlayState {
 /// Events fed into the state machine by the adapter layer.
 #[derive(Debug, Clone)]
 pub enum UiEvent {
-    /// Double-tap pressed: begin capturing the current selection on a background
-    /// thread. Shows the overlay (non-activating) with a spinner before any I/O.
-    CaptureStarted,
+    /// Trigger pressed: show the picking overlay. For a double-tap (`source:
+    /// Selection`) the selection is captured on a background thread; for a
+    /// single-tap (`source: Clipboard`) the clipboard was already read and is
+    /// committed on modifier release.
+    CaptureStarted { source: CaptureSource },
     /// Clipboard content ready for processing.
     /// `auto_copy`: when true, auto-copy the result to clipboard (double-tap behavior).
     ContentReady { content: ClipboardContent, auto_copy: bool },
@@ -161,6 +183,9 @@ pub struct StateMachine {
     /// When true, the overlay never auto-hides on focus loss (the user pinned it).
     /// Reset on every new trigger and on close.
     pinned: bool,
+    /// Where the current content came from (selection capture vs clipboard
+    /// read). Set on every trigger; shown as a badge in the overlay (#50).
+    source: CaptureSource,
 }
 
 impl StateMachine {
@@ -182,6 +207,7 @@ impl StateMachine {
             think_content: None,
             auto_copy: false,
             pinned: false,
+            source: CaptureSource::Clipboard,
         }
     }
 
@@ -236,6 +262,10 @@ impl StateMachine {
         self.auto_copy
     }
 
+    pub fn capture_source(&self) -> CaptureSource {
+        self.source
+    }
+
     pub fn current_request_id(&self) -> u64 {
         self.current_request_id
     }
@@ -267,7 +297,7 @@ impl StateMachine {
 
     pub fn handle(&mut self, event: UiEvent) -> Vec<UiEffect> {
         let effects = match event {
-            UiEvent::CaptureStarted => self.on_capture_started(),
+            UiEvent::CaptureStarted { source } => self.on_capture_started(source),
             UiEvent::ContentReady { content, auto_copy } => self.on_content_ready(content, auto_copy),
             UiEvent::WorkerResult { text, think_content, request_id } => {
                 self.on_worker_result(text, think_content, request_id)
@@ -315,8 +345,9 @@ impl StateMachine {
 
     // -- Private transition handlers --
 
-    fn on_capture_started(&mut self) -> Vec<UiEffect> {
+    fn on_capture_started(&mut self, source: CaptureSource) -> Vec<UiEffect> {
         let old_state = self.state.clone();
+        self.source = source;
 
         // A double-tap always starts a fresh capture. Drop any prior content and
         // cached results so a capture *failure* (→ Error) can never leave stale
@@ -363,6 +394,13 @@ impl StateMachine {
         // re-triggering remains a way to get a fresh generation.
         let content_changed = self.original_content.as_ref() != Some(&content);
         self.original_content = Some(content.clone());
+        // auto_copy encodes the trigger: double-tap (selection) vs single-tap
+        // (clipboard). Covers re-trigger paths that skip CaptureStarted.
+        self.source = if auto_copy {
+            CaptureSource::Selection
+        } else {
+            CaptureSource::Clipboard
+        };
         if content_changed {
             self.cache.clear();
             self.mode_thinking.clear();
@@ -908,7 +946,7 @@ mod tests {
     #[test]
     fn cancel_during_capturing_aborts_capture() {
         let mut sm = new_sm();
-        sm.handle(UiEvent::CaptureStarted);
+        sm.handle(UiEvent::CaptureStarted { source: CaptureSource::Selection });
         assert_eq!(*sm.state(), OverlayState::Capturing);
 
         let effects = sm.handle(UiEvent::UserCancel);
@@ -921,7 +959,7 @@ mod tests {
     #[test]
     fn close_during_capturing_aborts_capture() {
         let mut sm = new_sm();
-        sm.handle(UiEvent::CaptureStarted);
+        sm.handle(UiEvent::CaptureStarted { source: CaptureSource::Selection });
         assert_eq!(*sm.state(), OverlayState::Capturing);
 
         let effects = sm.handle(UiEvent::UserClose);
@@ -2066,7 +2104,7 @@ mod tests {
     #[test]
     fn capture_started_shows_spinner_non_activating() {
         let mut sm = new_sm();
-        let effects = sm.handle(UiEvent::CaptureStarted);
+        let effects = sm.handle(UiEvent::CaptureStarted { source: CaptureSource::Selection });
 
         assert_eq!(*sm.state(), OverlayState::Capturing);
         assert!(sm.auto_copy(), "capture is the double-tap (auto-copy) path");
@@ -2081,7 +2119,7 @@ mod tests {
     #[test]
     fn capture_to_processing_on_content_ready() {
         let mut sm = new_sm();
-        sm.handle(UiEvent::CaptureStarted);
+        sm.handle(UiEvent::CaptureStarted { source: CaptureSource::Selection });
 
         let effects = sm.handle(UiEvent::ContentReady {
             content: ClipboardContent::text_only("captured".into()),
@@ -2096,7 +2134,7 @@ mod tests {
     #[test]
     fn capture_to_error_on_clipboard_error() {
         let mut sm = new_sm();
-        sm.handle(UiEvent::CaptureStarted);
+        sm.handle(UiEvent::CaptureStarted { source: CaptureSource::Selection });
 
         let effects = sm.handle(UiEvent::ClipboardError("no text after copy".into()));
         assert_eq!(*sm.state(), OverlayState::Error("no text after copy".into()));
@@ -2108,7 +2146,7 @@ mod tests {
     #[test]
     fn cancel_during_capture_hides_without_sendcancel() {
         let mut sm = new_sm();
-        sm.handle(UiEvent::CaptureStarted);
+        sm.handle(UiEvent::CaptureStarted { source: CaptureSource::Selection });
 
         let effects = sm.handle(UiEvent::UserCancel);
         assert_eq!(*sm.state(), OverlayState::Hidden);
@@ -2120,7 +2158,7 @@ mod tests {
     #[test]
     fn close_during_capture_hides() {
         let mut sm = new_sm();
-        sm.handle(UiEvent::CaptureStarted);
+        sm.handle(UiEvent::CaptureStarted { source: CaptureSource::Selection });
 
         let effects = sm.handle(UiEvent::UserClose);
         assert_eq!(*sm.state(), OverlayState::Hidden);
@@ -2130,7 +2168,7 @@ mod tests {
     #[test]
     fn focus_lost_during_capture_ignored() {
         let mut sm = new_sm();
-        sm.handle(UiEvent::CaptureStarted);
+        sm.handle(UiEvent::CaptureStarted { source: CaptureSource::Selection });
         // The capture overlay is shown non-activating, so it never gains focus;
         // a spurious FocusLost must not dismiss it.
         let effects = sm.handle(UiEvent::FocusLost);
@@ -2149,7 +2187,7 @@ mod tests {
 
         // A fresh double-tap capture drops the prior content (so a capture failure
         // can't leave stale content for a later mode switch to re-process).
-        sm.handle(UiEvent::CaptureStarted);
+        sm.handle(UiEvent::CaptureStarted { source: CaptureSource::Selection });
         assert_eq!(*sm.state(), OverlayState::Capturing);
         assert_eq!(sm.original_text(), None);
     }
@@ -2157,7 +2195,7 @@ mod tests {
     #[test]
     fn switch_mode_during_capture_is_noop() {
         let mut sm = new_sm();
-        sm.handle(UiEvent::CaptureStarted);
+        sm.handle(UiEvent::CaptureStarted { source: CaptureSource::Selection });
         let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Rephrase));
         // No content yet — nothing to re-process; stays Capturing.
         assert!(effects.is_empty());
@@ -2240,7 +2278,30 @@ mod tests {
         assert!(!sm.pinned(), "close resets pin");
 
         // New double-tap trigger also starts unpinned.
-        sm.handle(UiEvent::CaptureStarted);
+        sm.handle(UiEvent::CaptureStarted { source: CaptureSource::Selection });
         assert!(!sm.pinned());
+    }
+
+    // -- capture source tests (#50) --
+
+    #[test]
+    fn capture_source_tracks_trigger() {
+        let mut sm = StateMachine::new(ProcessMode::Translate);
+        // Double-tap path: source recorded at capture start.
+        sm.handle(UiEvent::CaptureStarted { source: CaptureSource::Selection });
+        assert_eq!(sm.capture_source(), CaptureSource::Selection);
+        // A single-tap commit corrects the source via auto_copy = false
+        // (CaptureStarted optimistically assumes the double-tap path).
+        sm.handle(UiEvent::ContentReady {
+            content: ClipboardContent::text_only("hello".into()),
+            auto_copy: false,
+        });
+        assert_eq!(sm.capture_source(), CaptureSource::Clipboard);
+        // Double-tap content keeps Selection.
+        sm.handle(UiEvent::ContentReady {
+            content: ClipboardContent::text_only("other".into()),
+            auto_copy: true,
+        });
+        assert_eq!(sm.capture_source(), CaptureSource::Selection);
     }
 }
