@@ -594,15 +594,16 @@ impl StateMachine {
         if self.pinned {
             return vec![];
         }
-        // Not pinned: auto-hide. Processing additionally cancels the in-flight
-        // request, otherwise it runs to completion and its response is silently
-        // dropped (on_worker_result rejects results once we leave Processing).
-        // (Single-tap results start pinned via on_content_ready, so they are
-        // already handled by the guard above and never reach here.)
+        // Processing: keep the overlay and the request alive (#17). Switching
+        // to the paste target while waiting is natural, not a cancel — that
+        // stays explicit (Esc / ✕ / Cancel). The result then lands in the
+        // still-visible overlay; FocusLost is a transition event, so the
+        // overlay closes only once the user focuses it again and leaves
+        // (or via Esc / ✕ / ↩).
         if matches!(self.state, OverlayState::Processing) {
-            self.reset_to_hidden();
-            return vec![UiEffect::SendCancel, UiEffect::HideWindow];
+            return vec![];
         }
+        // Not pinned, not processing: auto-hide.
         self.reset_to_hidden();
         vec![UiEffect::HideWindow]
     }
@@ -1145,7 +1146,15 @@ mod tests {
     #[test]
     fn focus_lost_hides_when_focused() {
         let mut sm = new_sm();
+        // Processing no longer auto-hides (#17), so exercise the generic
+        // focus-loss path from the Result state.
         start_processing(&mut sm, "hello");
+        let rid = sm.current_request_id();
+        sm.handle(UiEvent::WorkerResult {
+            text: "done".into(),
+            think_content: None,
+            request_id: rid,
+        });
         sm.handle(UiEvent::FocusGained);
 
         let effects = sm.handle(UiEvent::FocusLost);
@@ -1178,16 +1187,40 @@ mod tests {
     }
 
     #[test]
-    fn focus_lost_during_processing_cancels_request() {
+    fn focus_lost_during_processing_keeps_overlay_and_request() {
+        // #17: switching to the paste target while waiting is natural, not a
+        // cancel — the overlay and the in-flight request must stay alive.
         let mut sm = new_sm();
         start_processing(&mut sm, "hello");
         sm.handle(UiEvent::FocusGained);
 
         let effects = sm.handle(UiEvent::FocusLost);
 
+        assert_eq!(*sm.state(), OverlayState::Processing);
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn result_after_detached_processing_hides_on_refocus_cycle() {
+        // #17 follow-through: the result lands in the still-visible overlay;
+        // a later focus-then-unfocus cycle dismisses it.
+        let mut sm = new_sm();
+        start_processing(&mut sm, "hello");
+        sm.handle(UiEvent::FocusGained);
+        sm.handle(UiEvent::FocusLost); // detach: user went to the paste target
+
+        let rid = sm.current_request_id();
+        sm.handle(UiEvent::WorkerResult {
+            text: "done".into(),
+            think_content: None,
+            request_id: rid,
+        });
+        assert!(matches!(sm.state(), OverlayState::Result(_)));
+
+        // User glances at the result, then leaves → overlay closes.
+        sm.handle(UiEvent::FocusGained);
+        let effects = sm.handle(UiEvent::FocusLost);
         assert_eq!(*sm.state(), OverlayState::Hidden);
-        // Must cancel the in-flight request, not just hide.
-        assert!(effects.contains(&UiEffect::SendCancel));
         assert!(effects.contains(&UiEffect::HideWindow));
     }
 
@@ -1821,8 +1854,15 @@ mod tests {
     #[test]
     fn clipboard_error_resets_has_been_focused() {
         let mut sm = new_sm();
-        // Simulate a previous session where focus was gained.
+        // Simulate a previous session where focus was gained (Result state —
+        // Processing no longer auto-hides on focus loss, #17).
         start_processing(&mut sm, "hello");
+        let rid = sm.current_request_id();
+        sm.handle(UiEvent::WorkerResult {
+            text: "done".into(),
+            think_content: None,
+            request_id: rid,
+        });
         sm.handle(UiEvent::FocusGained);
 
         // Focus lost → Hidden.
