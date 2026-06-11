@@ -209,6 +209,31 @@ pub fn render(
         action = OverlayAction::Close;
     }
 
+    // Keyboard actions in the Result state (#52). Enter triggers the primary
+    // action — paste-replace for double-tap, copy for single-tap — mirroring
+    // the floating action button. Cmd/Ctrl+C copies the full result, but only
+    // when no text is selected: egui's label selection handles its own copy,
+    // and overwriting it would clobber a deliberate partial-text copy.
+    if matches!(state, OverlayState::Result(_)) {
+        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+            action = if auto_copy {
+                OverlayAction::PasteReplace
+            } else {
+                OverlayAction::CopyToClipboard
+            };
+        }
+        let copy_pressed =
+            ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
+        if copy_pressed {
+            let has_selection = ctx
+                .plugin_opt::<egui::text_selection::LabelSelectionState>()
+                .is_some_and(|handle| handle.lock().has_selection());
+            if !has_selection {
+                action = OverlayAction::CopyToClipboard;
+            }
+        }
+    }
+
     // Viewport = content + shadow padding on all sides.
     let content_size = area_resp.response.rect.size();
     let desired = content_size + egui::vec2(SHADOW_PAD * 2.0, SHADOW_PAD * 2.0);
