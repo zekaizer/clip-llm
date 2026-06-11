@@ -23,6 +23,7 @@ type MsgSendUlong = unsafe extern "C" fn(*mut c_void, *mut c_void, c_ulong);
 type MsgSendPoint = unsafe extern "C" fn(*mut c_void, *mut c_void, CGPoint);
 type MsgSendPtr = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void);
 type MsgSendRetI64 = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i64;
+type MsgSendRetI32 = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
 type MsgSendRetBool = unsafe extern "C" fn(*mut c_void, *mut c_void) -> bool;
 
 /// Delay between key-down and key-up events (ms).
@@ -341,9 +342,13 @@ impl MacOsPlatform {
 }
 
 impl Platform for MacOsPlatform {
-    /// Simulate Cmd+C by posting CGEvent keyboard events to the HID system.
-    /// Requires Accessibility permission.
-    fn simulate_copy(&self) -> Result<(), PlatformError> {
+    /// Simulate Cmd+C by posting CGEvent keyboard events. With a `target` pid
+    /// the events go directly to that process (`CGEventPostToPid`), making the
+    /// copy independent of which app is frontmost — the overlay taking focus
+    /// (drag right after modifier release) or the user app-switching during
+    /// the release wait no longer breaks the capture. Without a target, falls
+    /// back to the HID tap (frontmost app). Requires Accessibility permission.
+    fn simulate_copy(&self, target: Option<i32>) -> Result<(), PlatformError> {
         let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
             .map_err(|()| PlatformError::CopyFailed("failed to create CGEventSource".into()))?;
 
@@ -355,12 +360,43 @@ impl Platform for MacOsPlatform {
             .map_err(|()| PlatformError::CopyFailed("failed to create key-up event".into()))?;
         key_up.set_flags(CGEventFlags::CGEventFlagCommand);
 
-        debug!("posting Cmd+C key events to HID");
-        key_down.post(CGEventTapLocation::HID);
-        thread::sleep(Duration::from_millis(KEY_EVENT_DELAY_MS));
-        key_up.post(CGEventTapLocation::HID);
+        match target {
+            Some(pid) => {
+                debug!("posting Cmd+C key events to pid {pid}");
+                key_down.post_to_pid(pid);
+                thread::sleep(Duration::from_millis(KEY_EVENT_DELAY_MS));
+                key_up.post_to_pid(pid);
+            }
+            None => {
+                debug!("posting Cmd+C key events to HID");
+                key_down.post(CGEventTapLocation::HID);
+                thread::sleep(Duration::from_millis(KEY_EVENT_DELAY_MS));
+                key_up.post(CGEventTapLocation::HID);
+            }
+        }
 
         Ok(())
+    }
+
+    /// Pid of the frontmost application via `NSWorkspace.frontmostApplication`.
+    fn frontmost_app_pid(&self) -> Option<i32> {
+        let msg_send_i32: MsgSendRetI32 =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe {
+            let cls = objc_getClass(c"NSWorkspace".as_ptr());
+            if cls.is_null() {
+                return None;
+            }
+            let workspace = objc_msgSend(cls, sel_registerName(c"sharedWorkspace".as_ptr()));
+            if workspace.is_null() {
+                return None;
+            }
+            let app = objc_msgSend(workspace, sel_registerName(c"frontmostApplication".as_ptr()));
+            if app.is_null() {
+                return None;
+            }
+            Some(msg_send_i32(app, sel_registerName(c"processIdentifier".as_ptr())))
+        }
     }
 
     /// Read `NSPasteboard.generalPasteboard.changeCount` — increments whenever

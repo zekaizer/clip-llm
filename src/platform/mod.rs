@@ -1,7 +1,19 @@
 /// Platform abstraction trait for OS-specific operations.
 pub trait Platform {
     /// Simulate Cmd+C (macOS) or Ctrl+C (Windows) to copy selected text.
-    fn simulate_copy(&self) -> Result<(), crate::PlatformError>;
+    ///
+    /// `target` is the frontmost-app pid recorded at capture-trigger time
+    /// (see [`Platform::frontmost_app_pid`]). When `Some`, macOS posts the
+    /// key events directly to that process, so the copy still reaches the
+    /// source app even if the overlay stole focus meanwhile (e.g. the user
+    /// grabbed it to drag right after releasing the modifiers). Windows
+    /// ignores it — `SendInput` cannot target a process.
+    fn simulate_copy(&self, target: Option<i32>) -> Result<(), crate::PlatformError>;
+
+    /// Process id of the frontmost application, recorded at capture-trigger
+    /// time and later passed to [`Platform::simulate_copy`]. Returns `None`
+    /// on platforms without per-process key-event posting (Windows).
+    fn frontmost_app_pid(&self) -> Option<i32>;
 
     /// Monotonic clipboard change counter (macOS `NSPasteboard.changeCount`,
     /// Windows `GetClipboardSequenceNumber`). Bumps whenever any app takes

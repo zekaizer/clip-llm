@@ -68,6 +68,11 @@ pub struct OverlayApp {
     /// copy is simulated at commit; for a single-tap the clipboard was already
     /// read into `pending_content` and is processed at commit.
     pending_capture: bool,
+    /// Pid of the frontmost app recorded at capture-trigger time, so the
+    /// deferred copy simulation targets the source app even if the overlay
+    /// takes focus before it runs (#55). `None` on platforms without
+    /// per-process key posting.
+    capture_target_pid: Option<i32>,
     /// Single-tap clipboard content read at trigger time, shown in the picking
     /// overlay and processed on commit. `None` for the double-tap (selection)
     /// path, whose content only exists after release.
@@ -113,6 +118,7 @@ impl OverlayApp {
             capture_cancel: Arc::new(AtomicBool::new(false)),
             preview_mode: None,
             pending_capture: false,
+            capture_target_pid: None,
             pending_content: None,
             diag: crate::diagnostics::DiagCollector::new(),
             diag_action_rx,
@@ -151,6 +157,7 @@ impl OverlayApp {
             capture_cancel: Arc::new(AtomicBool::new(false)),
             preview_mode: None,
             pending_capture: false,
+            capture_target_pid: None,
             pending_content: None,
         }
     }
@@ -216,6 +223,10 @@ impl OverlayApp {
                     // released (handled in the CycleCommit tap arm). Copying while
                     // Ctrl+Shift are still held would send Cmd+Ctrl+Shift+C.
                     self.pending_capture = true;
+                    // Record the source app NOW — the overlay may take focus
+                    // before the deferred copy runs (e.g. the user grabs it to
+                    // drag), and the copy must still target the source (#55).
+                    self.capture_target_pid = self.platform.frontmost_app_pid();
                 }
                 UiEffect::HideWindow => {
                     ctx.memory_mut(|m| m.reset_areas());
@@ -580,11 +591,12 @@ impl OverlayApp {
         self.capture_cancel = cancel.clone();
         let tx = self.capture_tx.clone();
         let ctx = ctx.clone();
+        let target = self.capture_target_pid;
         std::thread::spawn(move || {
             // Build a clipboard handle on this thread (avoids sharing the main
             // thread's, and sidesteps Send concerns). NativePlatform is a ZST.
             let result = match ClipboardManager::new() {
-                Ok(mut cm) => cm.copy_and_read(&NativePlatform, &cancel),
+                Ok(mut cm) => cm.copy_and_read(&NativePlatform, &cancel, target),
                 Err(e) => Err(e),
             };
             let _ = tx.send((seq, result));

@@ -57,7 +57,10 @@ impl WindowsPlatform {
 
 impl Platform for WindowsPlatform {
     /// Simulate Ctrl+C by sending keyboard input via SendInput.
-    fn simulate_copy(&self) -> Result<(), PlatformError> {
+    /// `target` is ignored: SendInput always goes to the foreground window —
+    /// Windows has no public per-process key injection (#56 keeps the overlay
+    /// from taking the foreground instead).
+    fn simulate_copy(&self, _target: Option<i32>) -> Result<(), PlatformError> {
         debug!("posting Ctrl+C key events via SendInput");
 
         let inputs = [
@@ -90,6 +93,11 @@ impl Platform for WindowsPlatform {
 
         thread::sleep(Duration::from_millis(KEY_EVENT_DELAY_MS));
         Ok(())
+    }
+
+    /// No per-process key injection on Windows; see `simulate_copy`.
+    fn frontmost_app_pid(&self) -> Option<i32> {
+        None
     }
 
     /// Read the global clipboard sequence number — increments whenever the

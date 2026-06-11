@@ -35,7 +35,7 @@ zstd = "0.13"
 winresource = "0.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-core-graphics = "0.25"
+core-graphics = { version = "0.25", features = ["elcapitan"] }
 core-foundation = "0.10"
 winit = { version = "0.30", default-features = false }
 

@@ -103,11 +103,14 @@ impl ClipboardManager {
     /// Simulate copy via platform, then poll the clipboard change counter
     /// until the copy lands. The clipboard is never cleared, so a failed
     /// capture leaves the user's existing content untouched (#48, #57).
+    /// `target` is the frontmost-app pid recorded at trigger time, keeping the
+    /// simulated copy aimed at the source app even if focus moved since (#55).
     /// Returns both text and images captured by the copy simulation.
     pub fn copy_and_read(
         &mut self,
         platform: &dyn Platform,
         cancel: &AtomicBool,
+        target: Option<i32>,
     ) -> Result<ClipboardContent, ClipboardError> {
         info!("simulating copy to capture selection");
         // Wait for user to release modifier keys (Ctrl+Shift) after double-tap,
@@ -121,7 +124,7 @@ impl ClipboardManager {
             return Err(ClipboardError::Cancelled);
         }
         let baseline = platform.clipboard_change_count();
-        platform.simulate_copy()?;
+        platform.simulate_copy(target)?;
 
         let start = Instant::now();
         let deadline = start + Duration::from_millis(CLIPBOARD_POLL_TIMEOUT_MS);
@@ -217,7 +220,7 @@ mod tests {
     }
 
     impl Platform for MockPlatform {
-        fn simulate_copy(&self) -> Result<(), PlatformError> {
+        fn simulate_copy(&self, _target: Option<i32>) -> Result<(), PlatformError> {
             self.copy_result
                 .as_ref()
                 .map_err(|e| PlatformError::CopyFailed(e.to_string()))?;
@@ -232,6 +235,10 @@ mod tests {
         // the real platform counter to observe those writes.
         fn clipboard_change_count(&self) -> u64 {
             crate::platform::NativePlatform.clipboard_change_count()
+        }
+
+        fn frontmost_app_pid(&self) -> Option<i32> {
+            None
         }
 
         fn check_accessibility(&self) -> Result<(), PlatformError> {
@@ -290,7 +297,7 @@ mod tests {
         };
 
         // The copy lands (counter bumps) but carries only whitespace.
-        let result = mgr.copy_and_read(&mock, &AtomicBool::new(false));
+        let result = mgr.copy_and_read(&mock, &AtomicBool::new(false), None);
         assert!(matches!(result, Err(ClipboardError::EmptyCopy)));
     }
 
@@ -306,7 +313,7 @@ mod tests {
         // Regression test for #48: a failed capture must not destroy the
         // user's existing clipboard content (no clear-before-copy).
         mgr.write_text("precious content").unwrap();
-        let result = mgr.copy_and_read(&mock, &AtomicBool::new(false));
+        let result = mgr.copy_and_read(&mock, &AtomicBool::new(false), None);
         assert!(matches!(result, Err(ClipboardError::NoTextAfterCopy)));
         assert_eq!(mgr.read_clipboard().unwrap(), "precious content");
     }
@@ -332,7 +339,7 @@ mod tests {
 
         // Pre-existing clipboard content should be replaced by copy simulation.
         mgr.write_text("old content").unwrap();
-        let content = mgr.copy_and_read(&mock, &AtomicBool::new(false)).unwrap();
+        let content = mgr.copy_and_read(&mock, &AtomicBool::new(false), None).unwrap();
         assert_eq!(content.text.as_deref(), Some("selected text"));
         // Text-only selection: no images captured.
         assert!(!content.has_images());
@@ -349,7 +356,7 @@ mod tests {
             copy_text: None,
         };
 
-        let result = mgr.copy_and_read(&mock, &AtomicBool::new(false));
+        let result = mgr.copy_and_read(&mock, &AtomicBool::new(false), None);
         assert!(matches!(result, Err(ClipboardError::NoTextAfterCopy)));
     }
 
@@ -364,7 +371,7 @@ mod tests {
             copy_text: None,
         };
 
-        let result = mgr.copy_and_read(&mock, &AtomicBool::new(false));
+        let result = mgr.copy_and_read(&mock, &AtomicBool::new(false), None);
         assert!(matches!(result, Err(ClipboardError::CopyFailed(_))));
     }
 
