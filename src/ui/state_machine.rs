@@ -89,6 +89,9 @@ pub enum UiEvent {
     UserPaste,
     /// User toggled the pin (keep-open) button.
     UserTogglePin,
+    /// User clicked the retry button: discard the cached result for the current
+    /// request and re-send it for a fresh generation.
+    UserRetry,
 }
 
 /// Side effects that the adapter must execute after a state transition.
@@ -303,6 +306,7 @@ impl StateMachine {
                 self.pinned = !self.pinned;
                 vec![]
             }
+            UiEvent::UserRetry => self.on_user_retry(),
         };
 
         self.check_invariants();
@@ -586,6 +590,18 @@ impl StateMachine {
         }
     }
 
+    /// User clicked retry: evict the cached result for the current request key
+    /// and re-send, so the request produces a fresh generation instead of
+    /// replaying the cache. From Error the eviction is a no-op (errors are
+    /// never cached) and this simply re-sends the failed request.
+    fn on_user_retry(&mut self) -> Vec<UiEffect> {
+        if !matches!(self.state, OverlayState::Result(_) | OverlayState::Error(_)) {
+            return vec![];
+        }
+        self.cache.remove(&self.cache_key());
+        self.reprocess_or_cache()
+    }
+
     fn on_clipboard_error(&mut self, msg: String) -> Vec<UiEffect> {
         // Must NOT emit WriteClipboard to avoid infinite recursion.
         self.state = OverlayState::Error(msg);
@@ -703,6 +719,9 @@ impl StateMachine {
                 if let Some((cached_text, cached_think)) = self.cache.get(&key).cloned() {
                     self.apply_cached_result(cached_text, cached_think)
                 } else if let Some(content) = self.original_content.clone() {
+                    // Clear any partial stream left over from a request that
+                    // errored mid-stream, so the new Processing view starts clean.
+                    self.streaming_text.clear();
                     self.think_started = false;
                     self.think_content = None;
                     self.next_request_id += 1;
@@ -1466,6 +1485,114 @@ mod tests {
 
         sm.handle(UiEvent::WorkerResult { text: "image summary".into(), think_content: None, request_id: rid });
         assert_eq!(*sm.state(), OverlayState::Result("image summary".into()));
+    }
+
+    // === Retry ===
+
+    #[test]
+    fn retry_from_result_evicts_cache_and_resends() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerResult {
+            text: "v1".into(),
+            think_content: None,
+            request_id: rid,
+        });
+
+        // Retry: the cached "v1" must be evicted, so a new request is sent
+        // (a cache hit would have replayed "v1" without SendProcess).
+        let effects = sm.handle(UiEvent::UserRetry);
+        assert_eq!(*sm.state(), OverlayState::Processing);
+        let new_rid = last_request_id(&effects);
+        assert!(new_rid > rid, "retry must use a fresh request id");
+
+        // The fresh generation replaces the old result and is re-cached.
+        sm.handle(UiEvent::WorkerResult {
+            text: "v2".into(),
+            think_content: None,
+            request_id: new_rid,
+        });
+        assert_eq!(*sm.state(), OverlayState::Result("v2".into()));
+    }
+
+    #[test]
+    fn retry_from_error_resends() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerError {
+            message: "fail".into(),
+            request_id: rid,
+        });
+
+        let effects = sm.handle(UiEvent::UserRetry);
+        assert_eq!(*sm.state(), OverlayState::Processing);
+        assert!(last_request_id(&effects) > rid);
+    }
+
+    #[test]
+    fn retry_clears_stale_streaming_text_after_mid_stream_error() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::StreamDelta { text: "partial".into(), request_id: rid });
+        sm.handle(UiEvent::WorkerError {
+            message: "stalled".into(),
+            request_id: rid,
+        });
+
+        sm.handle(UiEvent::UserRetry);
+        assert_eq!(*sm.state(), OverlayState::Processing);
+        assert_eq!(sm.streaming_text(), "", "stale partial stream must not survive a retry");
+    }
+
+    #[test]
+    fn retry_ignored_outside_result_and_error() {
+        let mut sm = new_sm();
+        // Hidden: nothing to retry.
+        assert!(sm.handle(UiEvent::UserRetry).is_empty());
+        assert_eq!(*sm.state(), OverlayState::Hidden);
+
+        // Processing: the in-flight request already covers it.
+        start_processing(&mut sm, "hello");
+        assert!(sm.handle(UiEvent::UserRetry).is_empty());
+        assert_eq!(*sm.state(), OverlayState::Processing);
+    }
+
+    #[test]
+    fn retry_only_evicts_current_key() {
+        let mut sm = new_sm();
+        // Translate result cached.
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerResult {
+            text: "translated".into(),
+            think_content: None,
+            request_id: rid,
+        });
+
+        // Summarize result cached.
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Summarize));
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerResult {
+            text: "summary".into(),
+            think_content: None,
+            request_id: rid,
+        });
+
+        // Retry Summarize, complete it, then switch back to Translate:
+        // the Translate cache entry must still be served without a request.
+        let effects = sm.handle(UiEvent::UserRetry);
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerResult {
+            text: "summary v2".into(),
+            think_content: None,
+            request_id: rid,
+        });
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Translate));
+        assert_eq!(*sm.state(), OverlayState::Result("translated".into()));
+        assert!(!effects.iter().any(|e| matches!(e, UiEffect::SendProcess { .. })));
     }
 
     // === Streaming text ===
