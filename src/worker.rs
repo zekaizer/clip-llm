@@ -55,17 +55,38 @@ fn friendly_reqwest_error(e: &reqwest::Error) -> String {
     if e.is_connect() || e.is_timeout() {
         "Cannot reach the server. Check that the LLM service is running.".to_string()
     } else if let Some(status) = e.status() {
-        if status.is_client_error() {
-            format!("Server rejected the request (HTTP {}).", status.as_u16())
-        } else if status.is_server_error() {
-            "Server error. Try again in a moment.".to_string()
-        } else {
-            "Network error.".to_string()
-        }
+        friendly_status_message(status)
     } else if e.is_request() {
         "Configuration error: invalid server URL.".to_string()
     } else {
         "Network error.".to_string()
+    }
+}
+
+/// Map an HTTP status to an actionable user-facing message. Common 4xx codes
+/// get specific guidance (what to check/do); the rest stay generic.
+fn friendly_status_message(status: reqwest::StatusCode) -> String {
+    use reqwest::StatusCode;
+    match status {
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+            "Authentication failed. Check the API key in config.toml.".to_string()
+        }
+        StatusCode::NOT_FOUND => {
+            "Endpoint not found. Check the server URL in config.toml.".to_string()
+        }
+        StatusCode::BAD_REQUEST | StatusCode::PAYLOAD_TOO_LARGE => {
+            "The server rejected the request — the text may be too long. \
+             Try a shorter selection."
+                .to_string()
+        }
+        StatusCode::TOO_MANY_REQUESTS => {
+            "Rate limited by the server. Try again in a moment.".to_string()
+        }
+        s if s.is_client_error() => {
+            format!("Server rejected the request (HTTP {}).", s.as_u16())
+        }
+        s if s.is_server_error() => "Server error. Try again in a moment.".to_string(),
+        _ => "Network error.".to_string(),
     }
 }
 
@@ -487,5 +508,47 @@ mod tests {
     fn make_complete_response_preserves_request_id() {
         let r = make_complete_response("ok", ProcessMode::Translate, 42, "test");
         assert_complete(&r, 42);
+    }
+
+    // -- friendly_status_message tests --
+
+    #[test]
+    fn status_message_auth_errors_mention_api_key() {
+        for code in [401u16, 403] {
+            let msg = friendly_status_message(reqwest::StatusCode::from_u16(code).unwrap());
+            assert!(msg.contains("API key"), "HTTP {code}: {msg}");
+        }
+    }
+
+    #[test]
+    fn status_message_not_found_mentions_server_url() {
+        let msg = friendly_status_message(reqwest::StatusCode::NOT_FOUND);
+        assert!(msg.contains("server URL"));
+    }
+
+    #[test]
+    fn status_message_payload_errors_suggest_shorter_selection() {
+        for code in [400u16, 413] {
+            let msg = friendly_status_message(reqwest::StatusCode::from_u16(code).unwrap());
+            assert!(msg.contains("shorter selection"), "HTTP {code}: {msg}");
+        }
+    }
+
+    #[test]
+    fn status_message_rate_limit() {
+        let msg = friendly_status_message(reqwest::StatusCode::TOO_MANY_REQUESTS);
+        assert!(msg.contains("Rate limited"));
+    }
+
+    #[test]
+    fn status_message_other_4xx_stays_generic_with_code() {
+        let msg = friendly_status_message(reqwest::StatusCode::from_u16(418).unwrap());
+        assert!(msg.contains("418"), "{msg}");
+    }
+
+    #[test]
+    fn status_message_5xx_stays_generic() {
+        let msg = friendly_status_message(reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(msg, "Server error. Try again in a moment.");
     }
 }
