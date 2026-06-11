@@ -249,25 +249,45 @@ pub fn show_no_activate() {
 }
 
 /// Show a simple About message box with the app name, version, and author.
+///
+/// `MessageBoxW` pumps its own modal message loop; starting one inside the
+/// winit event-loop handler hangs the app (nested modal loop, winit#1698),
+/// so the box runs on a dedicated thread. `MB_TOPMOST` keeps it above the
+/// always-on-top overlay window; `MB_SETFOREGROUND` brings it to front.
 pub fn show_about() {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONINFORMATION, MB_OK};
-    let body: Vec<u16> = format!(
-        "clip-llm v{}\n{}",
-        env!("CARGO_PKG_VERSION"),
-        env!("CARGO_PKG_AUTHORS")
-    )
-    .encode_utf16()
-    .chain(std::iter::once(0))
-    .collect();
-    let title: Vec<u16> = "About clip-llm".encode_utf16().chain(std::iter::once(0)).collect();
-    unsafe {
-        let _ = MessageBoxW(
-            std::ptr::null_mut(),
-            body.as_ptr(),
-            title.as_ptr(),
-            MB_OK | MB_ICONINFORMATION,
-        );
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        MessageBoxW, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MB_TOPMOST,
+    };
+
+    // The box no longer blocks the caller, so repeated menu clicks would
+    // stack dialogs without this guard.
+    static ABOUT_OPEN: AtomicBool = AtomicBool::new(false);
+    if ABOUT_OPEN.swap(true, Ordering::SeqCst) {
+        return;
     }
+
+    std::thread::spawn(|| {
+        let body: Vec<u16> = format!(
+            "clip-llm v{}\n{}",
+            env!("CARGO_PKG_VERSION"),
+            env!("CARGO_PKG_AUTHORS")
+        )
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+        let title: Vec<u16> =
+            "About clip-llm".encode_utf16().chain(std::iter::once(0)).collect();
+        unsafe {
+            let _ = MessageBoxW(
+                std::ptr::null_mut(),
+                body.as_ptr(),
+                title.as_ptr(),
+                MB_OK | MB_ICONINFORMATION | MB_TOPMOST | MB_SETFOREGROUND,
+            );
+        }
+        ABOUT_OPEN.store(false, Ordering::SeqCst);
+    });
 }
 
 /// Show the clip-llm window at `position` (logical points) WITHOUT activating it,
