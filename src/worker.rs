@@ -249,11 +249,19 @@ async fn run_streaming(
                 }
             }
             Ok(None) => {
-                trace!("SSE stream ended (no more chunks), full content ({} chars):\n{full_content}", full_content.len());
-                let r = make_complete_response(
-                    &full_content, mode, request_id, "stream ended",
+                // The Done arm returns, so reaching here means the connection
+                // closed before `data: [DONE]` arrived — the reply is truncated
+                // (proxy timeout, server restart, network reset). Surface an
+                // error instead of completing with partial content (#60).
+                error!(
+                    "worker: stream closed without [DONE] after {} chars — treating as truncated",
+                    full_content.len()
                 );
-                let _ = resp_tx.send(r);
+                let _ = resp_tx.send(WorkerResponse::Error {
+                    message: "The connection closed before the reply finished. Try again."
+                        .to_string(),
+                    request_id,
+                });
                 return;
             }
             Err(e) => {
