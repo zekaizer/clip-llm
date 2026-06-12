@@ -105,6 +105,13 @@ pub struct OverlayApp {
     /// still on the clipboard — the ↩ paste otherwise double-writes the
     /// result that auto-copy already placed (#16b).
     last_clipboard_write: Option<(String, u64)>,
+    /// Focus level seen on the previous frame. FocusGained/FocusLost are
+    /// transition events to the state machine, so they must fire only on
+    /// edges — re-firing FocusLost per unfocused frame hid the result the
+    /// instant a detached request completed (#61). `None` while Hidden so
+    /// the next show delivers a fresh edge.
+    #[cfg(not(feature = "diagnostics"))]
+    last_focused: Option<bool>,
     #[cfg(feature = "diagnostics")]
     diag: crate::diagnostics::DiagCollector,
     #[cfg(feature = "diagnostics")]
@@ -197,6 +204,7 @@ impl OverlayApp {
             pending_process: None,
             copy_confirmed_at: None,
             last_clipboard_write: None,
+            last_focused: None,
         }
     }
 }
@@ -573,9 +581,18 @@ impl OverlayApp {
     #[cfg(not(feature = "diagnostics"))]
     fn check_focus_lost(&mut self, ctx: &egui::Context) {
         if matches!(self.sm.state(), OverlayState::Hidden) {
+            // Forget the focus level so the next show delivers a fresh edge.
+            self.last_focused = None;
             return;
         }
+        // Fire only on focus *transitions*. The state machine counts
+        // focus → unfocus cycles; re-firing FocusLost on every unfocused
+        // frame hid the result the moment a detached request completed (#61).
         let focused = ctx.input(|i| i.viewport().focused);
+        if focused == self.last_focused {
+            return;
+        }
+        self.last_focused = focused;
         if focused == Some(true) {
             // Execute the effects symmetrically with FocusLost. The list is empty
             // today, but discarding it silently would hide any future FocusGained

@@ -168,6 +168,9 @@ pub struct StateMachine {
     user_repositioned: bool,
     /// True once the window has received focus after show_window.
     has_been_focused: bool,
+    /// Current focus level, mirrored from FocusGained/FocusLost edges. Lets
+    /// on_worker_result decide whether focus was held through completion.
+    is_focused: bool,
     /// Result cache: maps cache_key → (text, think_content).
     /// Valid only for the current original content.
     cache: HashMap<String, (String, Option<String>)>,
@@ -201,6 +204,7 @@ impl StateMachine {
             current_request_id: 0,
             user_repositioned: false,
             has_been_focused: false,
+            is_focused: false,
             cache: HashMap::new(),
             streaming_text: String::new(),
             think_started: false,
@@ -322,13 +326,17 @@ impl StateMachine {
                 vec![]
             }
             UiEvent::FocusGained => {
+                self.is_focused = true;
                 self.has_been_focused = true;
                 vec![]
             }
             UiEvent::StreamDelta { text, request_id } => {
                 self.on_stream_delta(text, request_id)
             }
-            UiEvent::FocusLost => self.on_focus_lost(),
+            UiEvent::FocusLost => {
+                self.is_focused = false;
+                self.on_focus_lost()
+            }
             UiEvent::ClipboardError(msg) => self.on_clipboard_error(msg),
             UiEvent::UserCopy => self.on_user_copy(),
             UiEvent::UserPaste => self.on_user_paste(),
@@ -478,6 +486,12 @@ impl StateMachine {
         self.think_content = think_content.clone();
         self.cache.insert(self.cache_key(), (text.clone(), think_content));
         self.state = OverlayState::Result(text.clone());
+        // Auto-hide counts only focus held at or after completion (#61): focus
+        // held through completion arms the next FocusLost to hide; a detached
+        // completion stays visible until a fresh focus → unfocus cycle. Unlike
+        // on_worker_error, which always demands a fresh cycle so the user can
+        // read the message — keep the two paths asymmetric.
+        self.has_been_focused = self.is_focused;
         let mut effects = Vec::new();
         if self.auto_copy {
             effects.push(UiEffect::WriteClipboard(text));
@@ -511,6 +525,7 @@ impl StateMachine {
         self.think_started = false;
         self.think_content = None;
         self.has_been_focused = false;
+        self.is_focused = false;
         self.auto_copy = false;
         self.user_repositioned = false;
         self.pinned = false;
@@ -1218,6 +1233,75 @@ mod tests {
         assert!(matches!(sm.state(), OverlayState::Result(_)));
 
         // User glances at the result, then leaves → overlay closes.
+        sm.handle(UiEvent::FocusGained);
+        let effects = sm.handle(UiEvent::FocusLost);
+        assert_eq!(*sm.state(), OverlayState::Hidden);
+        assert!(effects.contains(&UiEffect::HideWindow));
+    }
+
+    #[test]
+    fn result_after_detached_processing_survives_refired_focus_lost() {
+        // #61: a result landing while the user is in another app must stay
+        // visible — even if the adapter (wrongly) re-delivers FocusLost right
+        // after the Processing → Result transition without a new focus cycle.
+        let mut sm = new_sm();
+        start_processing(&mut sm, "hello");
+        sm.handle(UiEvent::FocusGained);
+        sm.handle(UiEvent::FocusLost); // detach: user went to the paste target
+
+        let rid = sm.current_request_id();
+        sm.handle(UiEvent::WorkerResult {
+            text: "done".into(),
+            think_content: None,
+            request_id: rid,
+        });
+
+        let effects = sm.handle(UiEvent::FocusLost);
+        assert!(matches!(sm.state(), OverlayState::Result(_)));
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn result_with_focus_held_through_completion_hides_on_focus_loss() {
+        // #61 spec: focus held at the moment of completion counts as focused-
+        // in-Result, so leaving afterwards hides without a fresh focus cycle.
+        let mut sm = new_sm();
+        start_processing(&mut sm, "hello");
+        sm.handle(UiEvent::FocusGained);
+
+        let rid = sm.current_request_id();
+        sm.handle(UiEvent::WorkerResult {
+            text: "done".into(),
+            think_content: None,
+            request_id: rid,
+        });
+        assert!(matches!(sm.state(), OverlayState::Result(_)));
+
+        let effects = sm.handle(UiEvent::FocusLost);
+        assert_eq!(*sm.state(), OverlayState::Hidden);
+        assert!(effects.contains(&UiEffect::HideWindow));
+    }
+
+    #[test]
+    fn error_with_focus_held_through_completion_needs_fresh_focus_cycle() {
+        // Deliberate asymmetry with Result (#61): an error always demands a
+        // fresh focus → unfocus cycle so the user can read the message, even
+        // when focus was held through the failure.
+        let mut sm = new_sm();
+        start_processing(&mut sm, "hello");
+        sm.handle(UiEvent::FocusGained);
+
+        let rid = sm.current_request_id();
+        sm.handle(UiEvent::WorkerError {
+            message: "boom".into(),
+            request_id: rid,
+        });
+
+        let effects = sm.handle(UiEvent::FocusLost);
+        assert!(matches!(sm.state(), OverlayState::Error(_)));
+        assert!(effects.is_empty());
+
+        // Fresh cycle dismisses it.
         sm.handle(UiEvent::FocusGained);
         let effects = sm.handle(UiEvent::FocusLost);
         assert_eq!(*sm.state(), OverlayState::Hidden);
