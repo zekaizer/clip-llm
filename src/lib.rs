@@ -246,6 +246,9 @@ pub enum ApiError {
     #[error("no usable content: image-only clipboard but model lacks vision support")]
     NoUsableContent,
 
+    #[error("response truncated: generation hit the max_tokens limit")]
+    Truncated,
+
     #[error("request cancelled")]
     Cancelled,
 }
