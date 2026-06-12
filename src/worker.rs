@@ -104,6 +104,10 @@ fn friendly_api_error(e: &ApiError) -> String {
         ApiError::NoUsableContent => {
             "Image cannot be processed — the connected model does not support vision.".to_string()
         }
+        ApiError::Truncated => {
+            "The reply was cut off by the token limit. Increase [generation] max_tokens or shorten the input."
+                .to_string()
+        }
         ApiError::Cancelled => "Request cancelled.".to_string(),
     }
 }
@@ -194,6 +198,7 @@ async fn run_streaming(
     let mut filter = ThinkBlockFilter::new();
     let mut full_content = String::new();
     let mut think_notified = false;
+    let mut finish_reason: Option<String> = None;
 
     loop {
         let chunk = tokio::select! {
@@ -237,8 +242,26 @@ async fn run_streaming(
                                 });
                             }
                         }
+                        SseEvent::Finish(reason) => {
+                            trace!("SSE finish_reason: {reason}");
+                            finish_reason = Some(reason);
+                        }
                         SseEvent::Done => {
                             trace!("SSE stream done, full content ({} chars):\n{full_content}", full_content.len());
+                            // "length" means generation hit max_tokens — the
+                            // reply is truncated even though the stream ended
+                            // normally with [DONE] (#60).
+                            if finish_reason.as_deref() == Some("length") {
+                                error!(
+                                    "worker: generation hit max_tokens after {} chars — treating as truncated",
+                                    full_content.len()
+                                );
+                                let _ = resp_tx.send(WorkerResponse::Error {
+                                    message: friendly_api_error(&ApiError::Truncated),
+                                    request_id,
+                                });
+                                return;
+                            }
                             let r = make_complete_response(
                                 &full_content, mode, request_id, "stream complete",
                             );
@@ -249,11 +272,19 @@ async fn run_streaming(
                 }
             }
             Ok(None) => {
-                trace!("SSE stream ended (no more chunks), full content ({} chars):\n{full_content}", full_content.len());
-                let r = make_complete_response(
-                    &full_content, mode, request_id, "stream ended",
+                // The Done arm returns, so reaching here means the connection
+                // closed before `data: [DONE]` arrived — the reply is truncated
+                // (proxy timeout, server restart, network reset). Surface an
+                // error instead of completing with partial content (#60).
+                error!(
+                    "worker: stream closed without [DONE] after {} chars — treating as truncated",
+                    full_content.len()
                 );
-                let _ = resp_tx.send(r);
+                let _ = resp_tx.send(WorkerResponse::Error {
+                    message: "The connection closed before the reply finished. Try again."
+                        .to_string(),
+                    request_id,
+                });
                 return;
             }
             Err(e) => {

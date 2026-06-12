@@ -85,6 +85,9 @@ pub(crate) struct ChatResponse {
 #[derive(Deserialize)]
 pub(crate) struct Choice {
     pub message: ResponseMessage,
+    /// `"stop"` on normal completion, `"length"` when generation hit
+    /// max_tokens — the reply is truncated and must not pass as success.
+    pub finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -102,6 +105,9 @@ struct StreamChunk {
 #[derive(Deserialize)]
 struct StreamChoice {
     delta: Delta,
+    /// Set on the final content chunk (before `[DONE]`); `"length"` means
+    /// generation was cut off by max_tokens.
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -113,6 +119,8 @@ struct Delta {
 #[derive(Debug, PartialEq)]
 pub(crate) enum SseEvent {
     Content(String),
+    /// The server reported why generation stopped (e.g. "stop", "length").
+    Finish(String),
     Done,
 }
 
@@ -181,10 +189,15 @@ impl SseParser {
 
             if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data)
                 && let Some(choice) = chunk.choices.first()
-                && let Some(content) = &choice.delta.content
-                && !content.is_empty()
             {
-                events.push(SseEvent::Content(content.clone()));
+                if let Some(content) = &choice.delta.content
+                    && !content.is_empty()
+                {
+                    events.push(SseEvent::Content(content.clone()));
+                }
+                if let Some(reason) = &choice.finish_reason {
+                    events.push(SseEvent::Finish(reason.clone()));
+                }
             }
         }
 
@@ -744,13 +757,15 @@ impl LlmClient {
         }
         let chat: ChatResponse = serde_json::from_str(&text).map_err(|_| ApiError::EmptyResponse)?;
 
-        let resp_content = chat
+        let choice = chat
             .choices
             .into_iter()
             .next()
-            .ok_or(ApiError::EmptyResponse)?
-            .message
-            .content;
+            .ok_or(ApiError::EmptyResponse)?;
+        if choice.finish_reason.as_deref() == Some("length") {
+            return Err(ApiError::Truncated);
+        }
+        let resp_content = choice.message.content;
 
         if resp_content.is_empty() {
             return Err(ApiError::EmptyResponse);
@@ -842,6 +857,13 @@ mod tests {
         assert_eq!(resp.choices[0].message.content, "hi");
     }
 
+    #[test]
+    fn parse_finish_reason_length() {
+        let json = r#"{"choices":[{"message":{"content":"cut off"},"finish_reason":"length"}]}"#;
+        let resp: ChatResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("length"));
+    }
+
     // --- SseParser tests ---
 
     #[test]
@@ -863,6 +885,31 @@ mod tests {
         let events = p.feed(b"data: [DONE]\n");
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], SseEvent::Done));
+    }
+
+    #[test]
+    fn sse_finish_reason_emitted() {
+        // Final OpenAI-compatible chunk: empty delta + finish_reason.
+        let mut p = SseParser::new();
+        let events = p.feed(
+            br#"data: {"choices":[{"delta":{},"finish_reason":"length"}]}"#.as_ref(),
+        );
+        assert!(events.is_empty()); // incomplete line
+        let events = p.feed(b"\n");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Finish(r) if r == "length"));
+    }
+
+    #[test]
+    fn sse_content_and_finish_reason_in_one_chunk() {
+        // Some servers attach finish_reason to the last content chunk.
+        let mut p = SseParser::new();
+        let events = p.feed(
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"end\"},\"finish_reason\":\"stop\"}]}\n",
+        );
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], SseEvent::Content(s) if s == "end"));
+        assert!(matches!(&events[1], SseEvent::Finish(r) if r == "stop"));
     }
 
     #[test]
