@@ -35,9 +35,13 @@ fn startup_loads_override_from_env_path() {
     // The candidate path follows the CLIP_LLM_CONFIG override.
     assert_eq!(config::candidate_path().as_deref(), Some(path.as_path()));
 
-    // Overridden mode reflects the file, with placeholders substituted.
+    // Overridden mode reflects the file (placeholders substituted) and carries
+    // the shared preamble prepended ahead of it.
     let translate = ProcessMode::Translate.system_prompt(RephraseParams::default(), false);
-    assert_eq!(translate, "OVERRIDE Korean->English");
+    assert!(
+        translate.ends_with("OVERRIDE Korean->English"),
+        "override not applied/substituted: {translate}"
+    );
 
     // Untouched modes keep the built-in defaults.
     let summarize = ProcessMode::Summarize.system_prompt(RephraseParams::default(), false);
