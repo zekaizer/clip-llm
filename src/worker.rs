@@ -45,8 +45,13 @@ pub enum WorkerResponse {
     ThinkStarted { request_id: u64 },
     Complete { result: String, think_content: Option<String>, request_id: u64 },
     Error { message: String, request_id: u64 },
-    /// One-shot: thinking control capability from probe (sent once at startup).
-    ThinkingProbeResult { supported: bool },
+    /// One-shot: vision + thinking-control capability from the startup probe
+    /// (sent once). Drives both the state machine's thinking flag and the tray
+    /// Status menu.
+    ProbeComplete {
+        vision_supported: bool,
+        thinking_method: crate::api::client::ThinkingControlMethod,
+    },
 }
 
 /// Map a reqwest transport error to a short, user-facing message that hides
@@ -432,11 +437,12 @@ pub fn spawn_worker(
                 let llm = llm.clone();
                 let resp_tx = resp_tx.clone();
                 async move {
-                    llm.probe_vision().await;
+                    let vision_supported = llm.probe_vision().await;
                     let thinking_method = llm.probe_thinking().await;
-                    let supported = thinking_method
-                        != crate::api::client::ThinkingControlMethod::Unsupported;
-                    let _ = resp_tx.send(WorkerResponse::ThinkingProbeResult { supported });
+                    let _ = resp_tx.send(WorkerResponse::ProbeComplete {
+                        vision_supported,
+                        thinking_method,
+                    });
                 }
             });
 
@@ -492,7 +498,7 @@ mod tests {
             WorkerResponse::ThinkStarted { .. } => "ThinkStarted",
             WorkerResponse::Complete { .. } => "Complete",
             WorkerResponse::Error { .. } => "Error",
-            WorkerResponse::ThinkingProbeResult { .. } => "ThinkingProbeResult",
+            WorkerResponse::ProbeComplete { .. } => "ProbeComplete",
         }
     }
 
