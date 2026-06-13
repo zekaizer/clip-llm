@@ -235,6 +235,19 @@ struct LlmClientInner {
 /// Minimal 1x1 transparent PNG for vision probe (67 bytes).
 const PROBE_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 
+/// Decide whether a vision-probe HTTP status yields a cacheable verdict.
+/// `Some(true)` = supported, `Some(false)` = unsupported and cache it — covers
+/// both a 400/422 image-payload rejection and a 429 rate limit (the latter to
+/// stop re-probing a rate-limited endpoint, #63). `None` = inconclusive
+/// (401/403/404/5xx): do not cache, so the next request re-probes.
+fn classify_vision_status(status: u16) -> Option<bool> {
+    match status {
+        200..=299 => Some(true),
+        400 | 422 | 429 => Some(false),
+        _ => None,
+    }
+}
+
 #[derive(Clone)]
 pub struct LlmClient(Arc<LlmClientInner>);
 
@@ -366,10 +379,12 @@ impl LlmClient {
     }
 
     /// Probe whether the model supports vision by sending a tiny image request.
-    /// The result is cached in `OnceCell` only on a definitive verdict — a 2xx
-    /// (supported) or a 400/422 rejection of the image payload (unsupported).
-    /// Transient or ambiguous responses (401/403/404/429/5xx) and network errors
-    /// skip caching so the next request re-probes.
+    /// The result is cached in `OnceCell` on a definitive verdict — a 2xx
+    /// (supported) or a 400/422 rejection of the image payload (unsupported) —
+    /// and also on 429, where the conservative `false` is cached to avoid a
+    /// re-probe storm against a rate-limited endpoint (#63). Other transient or
+    /// ambiguous responses (401/403/404/5xx) and network errors skip caching so
+    /// the next request re-probes.
     pub async fn probe_vision(&self) -> bool {
         let inner = &self.0;
         if let Some(&cached) = inner.supports_vision.get() {
@@ -407,23 +422,34 @@ impl LlmClient {
         match req.send().await {
             Ok(resp) => {
                 let status = resp.status().as_u16();
-                if (200..300).contains(&status) {
-                    info!("model vision support: true (HTTP {status})");
-                    let _ = inner.supports_vision.set(true);
-                    true
-                } else if status == 400 || status == 422 {
-                    // The server understood the multimodal request and rejected
-                    // the image payload — a definitive "no vision" verdict worth
-                    // caching for the process lifetime.
-                    info!("model vision support: false (HTTP {status})");
-                    let _ = inner.supports_vision.set(false);
-                    false
-                } else {
-                    // Transient or ambiguous (401/403/404/429/5xx): do NOT cache,
-                    // so the next request re-probes. Treat as unsupported only for
-                    // this request rather than permanently disabling vision.
-                    warn!("vision probe inconclusive (HTTP {status}); will retry");
-                    false
+                match classify_vision_status(status) {
+                    Some(true) => {
+                        info!("model vision support: true (HTTP {status})");
+                        let _ = inner.supports_vision.set(true);
+                        true
+                    }
+                    Some(false) => {
+                        // 400/422 = the server understood the multimodal request
+                        // and rejected the image (definitive "no vision"). 429 =
+                        // rate limited: capability is undeterminable now, and
+                        // re-probing every request would amplify the limit (#63).
+                        // Both cache the conservative `false` for the session so
+                        // the hot path stops re-probing; a restart re-probes.
+                        if status == 429 {
+                            warn!("vision probe rate limited (HTTP 429); assuming no vision for this session");
+                        } else {
+                            info!("model vision support: false (HTTP {status})");
+                        }
+                        let _ = inner.supports_vision.set(false);
+                        false
+                    }
+                    None => {
+                        // Other transient or ambiguous (401/403/404/5xx): do NOT
+                        // cache, so the next request re-probes. Treat as
+                        // unsupported only for this request.
+                        warn!("vision probe inconclusive (HTTP {status}); will retry");
+                        false
+                    }
                 }
             }
             Err(e) => {
@@ -435,9 +461,11 @@ impl LlmClient {
 
     /// Probe whether the model supports controllable thinking mode.
     /// Tries `chat_template_kwargs` first, then falls back to system prompt tag.
-    /// The result is cached in `OnceCell` only on a definitive verdict; transient
-    /// or ambiguous responses (401/403/404/429/5xx) and network errors skip
-    /// caching so the next request re-probes.
+    /// The result is cached in `OnceCell` on a definitive verdict, and also on
+    /// 429, where the conservative `Unsupported` is cached to avoid a re-probe
+    /// storm against a rate-limited endpoint (#63). Other transient or ambiguous
+    /// responses (401/403/404/5xx) and network errors skip caching so the next
+    /// request re-probes.
     pub async fn probe_thinking(&self) -> ThinkingControlMethod {
         let inner = &self.0;
         if let Some(&cached) = inner.thinking_control.get() {
@@ -493,9 +521,17 @@ impl LlmClient {
                 // system-prompt tag fallback to determine the real method.
                 self.probe_thinking_prompt_tag(inner).await
             }
+            Ok(resp) if resp.status().as_u16() == 429 => {
+                // Rate limited: re-probing per request amplifies the limit (#63).
+                // Cache the conservative default (no thinking control) for the
+                // session via the Some(...) the caller stores; a restart re-probes
+                // once quota recovers.
+                warn!("thinking kwargs probe rate limited (HTTP 429); assuming no thinking control for this session");
+                Some(ThinkingControlMethod::Unsupported)
+            }
             Ok(resp) => {
-                // Transient or ambiguous (401/403/404/429/5xx): don't cache, retry
-                // next time rather than permanently deciding the method.
+                // Other transient or ambiguous (401/403/404/5xx): don't cache,
+                // retry next time rather than permanently deciding the method.
                 warn!(
                     "thinking kwargs probe inconclusive (HTTP {}); will retry",
                     resp.status().as_u16()
@@ -564,8 +600,14 @@ impl LlmClient {
                 // thinking is definitively uncontrollable. Worth caching.
                 Some(ThinkingControlMethod::Unsupported)
             }
+            Ok(resp) if resp.status().as_u16() == 429 => {
+                // Rate limited: cache the conservative default for the session
+                // rather than re-probing on every request (#63).
+                warn!("thinking prompt-tag probe rate limited (HTTP 429); assuming no thinking control for this session");
+                Some(ThinkingControlMethod::Unsupported)
+            }
             Ok(resp) => {
-                // Transient or ambiguous (401/403/404/429/5xx): don't cache, retry.
+                // Other transient or ambiguous (401/403/404/5xx): don't cache, retry.
                 warn!(
                     "thinking prompt-tag probe inconclusive (HTTP {}); will retry",
                     resp.status().as_u16()
@@ -862,6 +904,24 @@ mod tests {
         let json = r#"{"choices":[{"message":{"content":"cut off"},"finish_reason":"length"}]}"#;
         let resp: ChatResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("length"));
+    }
+
+    #[test]
+    fn classify_vision_status_caches_429() {
+        // #63: 429 must be a cacheable `false` so the hot path stops re-probing
+        // a rate-limited endpoint instead of re-firing the probe burst.
+        assert_eq!(classify_vision_status(429), Some(false));
+        // Definitive verdicts cache as before.
+        assert_eq!(classify_vision_status(200), Some(true));
+        assert_eq!(classify_vision_status(204), Some(true));
+        assert_eq!(classify_vision_status(400), Some(false));
+        assert_eq!(classify_vision_status(422), Some(false));
+        // Genuinely transient / config errors stay uncached (re-probe).
+        assert_eq!(classify_vision_status(401), None);
+        assert_eq!(classify_vision_status(403), None);
+        assert_eq!(classify_vision_status(404), None);
+        assert_eq!(classify_vision_status(500), None);
+        assert_eq!(classify_vision_status(503), None);
     }
 
     // --- SseParser tests ---
