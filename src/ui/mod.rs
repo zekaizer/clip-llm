@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc as tokio_mpsc;
 
 use eframe::egui;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::clipboard::ClipboardManager;
 use crate::hotkey::{TapAction, TapEvent};
@@ -256,7 +256,13 @@ impl OverlayApp {
                     self.pending_process = None;
                     let text_len = content.text.as_ref().map_or(0, |t| t.len());
                     let img_count = content.images.len();
-                    info!("starting {} ({} chars, {} images)", mode.label(), text_len, img_count);
+                    info!(
+                        request_id,
+                        mode = mode.label(),
+                        text_len,
+                        img_count,
+                        "ui: dispatch request to worker"
+                    );
                     let _ = self.cmd_tx.send(WorkerCommand::Process(ProcessTask {
                         content,
                         mode,
@@ -266,6 +272,7 @@ impl OverlayApp {
                     }));
                 }
                 UiEffect::SendCancel => {
+                    debug!("ui: cancel in-flight request");
                     let _ = self.cmd_tx.send(WorkerCommand::Cancel);
                 }
                 UiEffect::WriteClipboard(text) => {

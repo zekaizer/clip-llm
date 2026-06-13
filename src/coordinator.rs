@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use eframe::egui;
 use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::hotkey::{HotkeyDetector, TapAction, TapEvent};
 use crate::platform::ModifierState;
@@ -56,6 +56,7 @@ pub fn run(
         if held {
             Phase::Cycling { is_double_tap }
         } else {
+            debug!(is_double_tap, "coordinator: cycle commit");
             let _ = tap_tx.send(TapEvent {
                 action: TapAction::CycleCommit { is_double_tap },
                 mouse_pos: None,
@@ -95,6 +96,7 @@ pub fn run(
                         phase = Phase::AwaitingTrigger;
                     }
                     TapAction::DoubleTap => {
+                        debug!(held, "coordinator: double-tap trigger");
                         pre_show();
                         let _ = tap_tx.send(TapEvent {
                             action: TapAction::DoubleTap,
@@ -107,6 +109,7 @@ pub fn run(
                 },
                 Phase::Cycling { .. } => {
                     // Each further C tap while held advances the mode preview.
+                    debug!("coordinator: cycle advance");
                     let _ = tap_tx.send(TapEvent {
                         action: TapAction::CycleAdvance,
                         mouse_pos: None,
@@ -117,6 +120,7 @@ pub fn run(
         }
 
         if matches!(phase, Phase::AwaitingTrigger) && detector.check_timeout() {
+            debug!(held, "coordinator: single-tap trigger");
             pre_show();
             let _ = tap_tx.send(TapEvent {
                 action: TapAction::SingleTap,

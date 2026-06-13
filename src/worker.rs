@@ -2,7 +2,7 @@ use std::sync::mpsc;
 use std::thread;
 
 use tokio::sync::mpsc as tokio_mpsc;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn, Instrument};
 
 use crate::api::client::{LlmClient, SseEvent, SseParser};
 use crate::api::response::{extract_first_think_content, strip_think_blocks, ThinkBlockFilter};
@@ -369,32 +369,38 @@ fn dispatch_process(
     let llm = llm.clone();
     let resp_tx = resp_tx.clone();
 
+    let text_len = task.content.text.as_ref().map_or(0, |t| t.len());
+    let img_count = task.content.images.len();
+
+    // One span per request: every log emitted while the request runs inherits
+    // these fields, so a request can be filtered/correlated end to end in the
+    // remote logs (and they show in the stderr span context too).
+    let span = tracing::info_span!(
+        "request",
+        request_id = task.request_id,
+        mode = task.mode.label(),
+        streaming = config.streaming,
+        text_len,
+        img_count,
+    );
+
     // Mock mode: simulate streaming with canned responses.
     #[cfg(feature = "diagnostics")]
     if config.use_mock {
         let mode = task.mode;
         let request_id = task.request_id;
         let mock_text = task.content.text.unwrap_or_default();
-        info!("worker: mock streaming {} ({} chars)", mode.label(), mock_text.len());
-        tokio::spawn(run_mock_streaming(mock_text, mode, request_id, resp_tx, c_rx));
+        info!(parent: &span, "worker: mock streaming {} ({} chars)", mode.label(), mock_text.len());
+        tokio::spawn(run_mock_streaming(mock_text, mode, request_id, resp_tx, c_rx).instrument(span));
         return;
     }
 
-    let text_len = task.content.text.as_ref().map_or(0, |t| t.len());
-    let img_count = task.content.images.len();
-
     if config.streaming {
-        info!(
-            "worker: starting stream {} ({} chars, {} images)",
-            task.mode.label(), text_len, img_count,
-        );
-        tokio::spawn(run_streaming(llm, task, resp_tx, c_rx));
+        info!(parent: &span, "worker: starting stream {} ({text_len} chars, {img_count} images)", task.mode.label());
+        tokio::spawn(run_streaming(llm, task, resp_tx, c_rx).instrument(span));
     } else {
-        info!(
-            "worker: starting {} ({} chars, {} images, no-stream)",
-            task.mode.label(), text_len, img_count,
-        );
-        tokio::spawn(run_non_streaming(llm, task, resp_tx, c_rx));
+        info!(parent: &span, "worker: starting {} ({text_len} chars, {img_count} images, no-stream)", task.mode.label());
+        tokio::spawn(run_non_streaming(llm, task, resp_tx, c_rx).instrument(span));
     }
 }
 
