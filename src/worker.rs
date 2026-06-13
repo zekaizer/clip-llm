@@ -408,11 +408,16 @@ fn dispatch_process(
 /// Returns the thread handle.
 ///
 /// Uses `tokio::sync::mpsc` for the command channel so that `.recv().await`
-/// does not block the single-threaded tokio runtime.
+/// does not block the single-threaded tokio runtime. `ctx` is used to wake the
+/// UI event loop after the one-shot startup probe completes — that response
+/// arrives while the overlay is idle (Hidden), so without an explicit repaint
+/// the tray Status menu wouldn't update until the next unrelated event. (Other
+/// responses arrive during Processing, when the UI already repaints each frame.)
 pub fn spawn_worker(
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<WorkerCommand>,
     resp_tx: mpsc::Sender<WorkerResponse>,
     llm: LlmClient,
+    ctx: eframe::egui::Context,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -442,6 +447,7 @@ pub fn spawn_worker(
             tokio::spawn({
                 let llm = llm.clone();
                 let resp_tx = resp_tx.clone();
+                let ctx = ctx.clone();
                 async move {
                     let vision_supported = llm.probe_vision().await;
                     let thinking_method = llm.probe_thinking().await;
@@ -449,6 +455,10 @@ pub fn spawn_worker(
                         vision_supported,
                         thinking_method,
                     });
+                    // Wake the (idle) UI loop so poll_responses processes this
+                    // immediately and the tray Status menu updates without
+                    // waiting for the next unrelated event.
+                    ctx.request_repaint();
                 }
             });
 

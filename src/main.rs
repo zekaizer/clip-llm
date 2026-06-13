@@ -153,7 +153,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (resp_tx, resp_rx) = mpsc::channel::<WorkerResponse>();
     let llm = LlmClient::new()?;
     let clipboard = ClipboardManager::new()?;
-    let _worker = spawn_worker(cmd_rx, resp_tx, llm);
 
     info!("starting eframe overlay");
 
@@ -205,6 +204,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 });
                 (action_rx, state_tx)
             };
+
+            // Worker thread: async LLM calls. Spawned here (not before
+            // run_native) so it gets the egui Context and can wake the UI loop
+            // when the one-shot startup probe completes.
+            let _worker = spawn_worker(cmd_rx, resp_tx, llm, cc.egui_ctx.clone());
 
             #[cfg(feature = "diagnostics")]
             let app = OverlayApp::new(
