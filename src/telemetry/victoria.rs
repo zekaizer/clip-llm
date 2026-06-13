@@ -17,8 +17,8 @@
 
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
 use tracing::field::{Field, Visit};
@@ -36,15 +36,22 @@ const CHANNEL_CAP: usize = 8192;
 /// shipper. A process-global counter so the layer and shipper share it without
 /// threading a reference through both.
 static DROPPED: AtomicU64 = AtomicU64::new(0);
+/// Records successfully shipped to VictoriaLogs (across all batches).
+static SHIPPED: AtomicU64 = AtomicU64::new(0);
+
+/// `(shipped, dropped)` record counts for the VictoriaLogs sink, for the tray
+/// Status menu. Both zero if the sink is disabled or has shipped nothing yet.
+pub fn counts() -> (u64, u64) {
+    (SHIPPED.load(Ordering::Relaxed), DROPPED.load(Ordering::Relaxed))
+}
 
 /// Resolved configuration for the VictoriaLogs sink.
 pub struct VictoriaConfig {
     /// Base URL, e.g. `http://192.168.1.15:9428` (trailing slash tolerated).
     pub url: String,
-    /// Flush once this many records are buffered.
+    /// Upper bound on records coalesced into one POST (caps body size); the
+    /// shipper never *waits* to fill it — it sends whatever is already queued.
     pub batch_max: usize,
-    /// Flush at least this often even if `batch_max` is not reached.
-    pub flush: Duration,
 }
 
 /// Per-span captured field set, stored in the span's extensions so an event can
@@ -216,23 +223,19 @@ fn spawn_shipper(cfg: VictoriaConfig, rx: Receiver<String>) {
             body.push_str(&first);
             body.push('\n');
 
-            // Drain further records into the batch until batch_max or the flush
-            // window elapses.
-            let deadline = Instant::now() + cfg.flush;
+            // Ship as soon as possible: coalesce only records ALREADY queued
+            // (non-blocking try_recv), adding no artificial delay. A lone log
+            // ships in one POST immediately; a burst that's already buffered
+            // rides along in the same POST. `batch_max` only caps body size.
             let mut count = 1;
             while count < cfg.batch_max {
-                let now = Instant::now();
-                if now >= deadline {
-                    break;
-                }
-                match rx.recv_timeout(deadline - now) {
+                match rx.try_recv() {
                     Ok(line) => {
                         body.push_str(&line);
                         body.push('\n');
                         count += 1;
                     }
-                    Err(RecvTimeoutError::Timeout) => break,
-                    Err(RecvTimeoutError::Disconnected) => break,
+                    Err(_) => break,
                 }
             }
 
@@ -245,7 +248,9 @@ fn spawn_shipper(cfg: VictoriaConfig, rx: Receiver<String>) {
                     .await
             });
             match result {
-                Ok(resp) if resp.status().is_success() => {}
+                Ok(resp) if resp.status().is_success() => {
+                    SHIPPED.fetch_add(count as u64, Ordering::Relaxed);
+                }
                 Ok(resp) => eprintln!("victoria-logs: ingest rejected (HTTP {})", resp.status().as_u16()),
                 Err(e) => eprintln!("victoria-logs: ingest failed: {e}"),
             }

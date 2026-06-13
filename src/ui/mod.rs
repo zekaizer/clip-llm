@@ -627,6 +627,14 @@ impl OverlayApp {
             let effects = self.sm.handle(event);
             self.execute_effects(effects, ctx);
         }
+
+        // Refresh the tray "Telemetry" row with the latest shipped/dropped
+        // counts (only when the remote sink is enabled). Runs on UI activity —
+        // the shipping itself is independent and immediate.
+        if crate::config::get().telemetry_url().is_some() {
+            let (shipped, dropped) = crate::telemetry::telemetry_counts();
+            crate::platform::update_tray_telemetry(shipped, dropped);
+        }
     }
 
     /// A background thread (worker or coordinator) dropped its channel sender,

@@ -92,6 +92,7 @@ struct TrayStatusRows {
     thinking: tray_icon::menu::MenuItem,
     requests: tray_icon::menu::MenuItem,
     last: tray_icon::menu::MenuItem,
+    telemetry: tray_icon::menu::MenuItem,
 }
 
 thread_local! {
@@ -108,6 +109,17 @@ pub fn update_tray_probe(vision_supported: bool, thinking_label: &str) {
             // "ctrl" = whether thinking can be toggled via the API, not whether
             // the model thinks (e.g. Gemma always emits <thought>, uncontrollable).
             rows.thinking.set_text(format!("Thinking ctrl: {thinking_label}"));
+        }
+    });
+}
+
+/// Update the telemetry sink row with live shipped/dropped record counts.
+/// Main thread only (see [`TrayStatusRows`]).
+pub fn update_tray_telemetry(shipped: u64, dropped: u64) {
+    TRAY_STATUS.with(|s| {
+        if let Some(rows) = s.borrow().as_ref() {
+            rows.telemetry
+                .set_text(format!("Telemetry: {shipped} shipped, {dropped} dropped"));
         }
     });
 }
@@ -171,6 +183,11 @@ pub fn init_tray(ctx: &eframe::egui::Context) {
     let thinking_row = MenuItem::new("Thinking ctrl: probing…", false, None);
     let requests_row = MenuItem::new("Requests: none yet", false, None);
     let last_row = MenuItem::new("Last: —", false, None);
+    let telemetry_status = match cfg.telemetry_url() {
+        Some(url) => format!("Telemetry → {url} ({})", cfg.telemetry_level().unwrap_or("info")),
+        None => "Telemetry: off".to_string(),
+    };
+    let telemetry_row = MenuItem::new(telemetry_status, false, None);
     let status_menu = Submenu::with_items(
         "Status",
         true,
@@ -185,6 +202,7 @@ pub fn init_tray(ctx: &eframe::egui::Context) {
             &PredefinedMenuItem::separator(),
             &requests_row,
             &last_row,
+            &telemetry_row,
         ],
     )
     .expect("failed to create status submenu");
@@ -195,6 +213,7 @@ pub fn init_tray(ctx: &eframe::egui::Context) {
             thinking: thinking_row.clone(),
             requests: requests_row.clone(),
             last: last_row.clone(),
+            telemetry: telemetry_row.clone(),
         });
     });
 

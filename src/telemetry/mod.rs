@@ -1,26 +1,28 @@
-//! Logging / tracing setup.
+//! Tracing setup: console logging plus the optional remote telemetry sink.
 //!
-//! stderr logging (the `fmt` layer) is always on. When `[logging].url` is set
-//! in the config, a second [`victoria::VictoriaLayer`] is added that ships
-//! structured events to a VictoriaLogs instance (opt-in; see the module docs).
+//! Console (stderr) logging via the `fmt` layer is always on. When
+//! `[telemetry].url` is set, a second [`victoria::VictoriaLayer`] is added that
+//! ships structured events to a VictoriaLogs instance (opt-in; see module docs).
 //!
 //! Each sink carries its own per-layer filter so they are independent: stderr
-//! keeps the usual `clip_llm=info` (or `RUST_LOG`) level, while the remote sink
-//! ships `clip_llm` events at `[logging].level` (default `info`). The remote
-//! filter is scoped to the `clip_llm` target so dependency logs (reqwest/hyper)
-//! are never shipped — which also prevents the shipper's own HTTP from
-//! recursing back into the sink.
+//! keeps the usual `clip_llm=info` (or `RUST_LOG`) level, while the telemetry
+//! sink ships `clip_llm` events at `[telemetry].level` (default `info`). The
+//! telemetry filter is scoped to the `clip_llm` target so dependency logs
+//! (reqwest/hyper) are never shipped — which also prevents the shipper's own
+//! HTTP from recursing back into the sink.
 
 mod victoria;
 
-use std::time::Duration;
+/// `(shipped, dropped)` record counts for the telemetry sink — surfaced in the
+/// tray Status menu. Both zero when the sink is disabled.
+pub use victoria::counts as telemetry_counts;
 
 use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{fmt, EnvFilter};
 
-/// Initialize the global tracing subscriber. Reads `[logging]` from the loaded
-/// config, so `crate::config::init()` must run first.
+/// Initialize the global tracing subscriber. Reads `[telemetry]` from the
+/// loaded config, so `crate::config::init()` must run first.
 pub fn init() {
     let cfg = crate::config::get();
 
@@ -28,12 +30,11 @@ pub fn init() {
         .unwrap_or_else(|_| EnvFilter::new("clip_llm=info"));
     let fmt_layer = fmt::layer().with_filter(stderr_filter);
 
-    let victoria = cfg.logging_url().map(|url| {
-        let level = parse_level(cfg.logging_level().unwrap_or("info"));
+    let telemetry = cfg.telemetry_url().map(|url| {
+        let level = parse_level(cfg.telemetry_level().unwrap_or("info"));
         let vcfg = victoria::VictoriaConfig {
             url: url.to_string(),
-            batch_max: cfg.logging_batch_max().unwrap_or(200).max(1),
-            flush: Duration::from_millis(cfg.logging_flush_ms().unwrap_or(2000).max(1)),
+            batch_max: cfg.telemetry_batch_max().unwrap_or(200).max(1),
         };
         // Scope to the crate's own target: excludes reqwest/hyper (and so the
         // shipper's own requests), preventing a ship → log → ship loop.
@@ -45,19 +46,19 @@ pub fn init() {
     // builder handles both the enabled and disabled cases.
     tracing_subscriber::registry()
         .with(fmt_layer)
-        .with(victoria)
+        .with(telemetry)
         .init();
 
-    if let Some(url) = cfg.logging_url() {
+    if let Some(url) = cfg.telemetry_url() {
         tracing::info!(
             target: "clip_llm::telemetry",
-            level = %cfg.logging_level().unwrap_or("info"),
-            "VictoriaLogs sink enabled: {url}"
+            level = %cfg.telemetry_level().unwrap_or("info"),
+            "telemetry sink enabled (VictoriaLogs): {url}"
         );
     }
 }
 
-/// Parse a `[logging].level` string into a `LevelFilter`; unknown → `info`.
+/// Parse a `[telemetry].level` string into a `LevelFilter`; unknown → `info`.
 fn parse_level(s: &str) -> LevelFilter {
     match s.to_ascii_lowercase().as_str() {
         "trace" => LevelFilter::TRACE,
