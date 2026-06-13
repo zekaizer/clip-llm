@@ -6,7 +6,6 @@ use eframe::egui;
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
 use tracing::{debug, error, info, warn};
-use tracing_subscriber::EnvFilter;
 
 use clip_llm::api::client::LlmClient;
 use clip_llm::clipboard::ClipboardManager;
@@ -16,12 +15,11 @@ use clip_llm::worker::{spawn_worker, WorkerCommand, WorkerResponse};
 use clip_llm::HotkeyError;
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("clip_llm=info")),
-        )
-        .init();
+    // Config must load before logging init: the `[logging]` section decides
+    // whether the VictoriaLogs sink is attached. `init()` is idempotent
+    // (OnceLock), so the later call inside `run()` is a no-op.
+    clip_llm::config::init();
+    clip_llm::telemetry::init();
     debug!("debug logging enabled");
     info!("clip-llm v{} by {}", env!("CARGO_PKG_VERSION"), env!("CARGO_PKG_AUTHORS"));
 

@@ -142,6 +142,7 @@ const DEFAULT_SUMMARIZE_IMAGE_PROMPT: &str =
 pub struct Config {
     api: ApiConfig,
     generation: GenerationConfig,
+    logging: LoggingConfig,
     hotkey: HotkeyConfig,
     ui: UiConfig,
     languages: LanguagesConfig,
@@ -184,6 +185,24 @@ struct GenerationConfig {
     /// Maximum wait in seconds for response headers on streaming requests
     /// before the attempt is treated as transient and retried.
     initial_response_timeout_secs: Option<u64>,
+}
+
+/// `[logging]` — opt-in remote log shipping to a VictoriaLogs instance. Logging
+/// to stderr is always on; this section only adds the remote sink. Absent or
+/// empty `url` keeps it disabled. No environment-variable equivalent.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct LoggingConfig {
+    /// VictoriaLogs base URL, e.g. `http://192.168.1.15:9428`. Presence (and a
+    /// non-empty value) enables remote shipping; absence keeps it off.
+    url: Option<String>,
+    /// Minimum level shipped to VictoriaLogs: `trace|debug|info|warn|error`.
+    /// Defaults to `info`. NOTE: `trace`/`debug` may include clipboard content.
+    level: Option<String>,
+    /// Flush the buffer once this many records accumulate (default 200).
+    batch_max: Option<usize>,
+    /// Flush the buffer at least this often, in milliseconds (default 2000).
+    flush_ms: Option<u64>,
 }
 
 /// `[hotkey]` — hotkey behavior. No environment-variable equivalent; each falls
@@ -294,6 +313,26 @@ impl Config {
     /// Configured custom HTTP headers (`[api.headers]`); empty if none.
     pub fn api_headers(&self) -> &BTreeMap<String, String> {
         &self.api.headers
+    }
+
+    /// VictoriaLogs base URL (`[logging].url`); `None`/empty disables shipping.
+    pub fn logging_url(&self) -> Option<&str> {
+        self.logging.url.as_deref().filter(|s| !s.is_empty())
+    }
+
+    /// Minimum level shipped to VictoriaLogs (`[logging].level`), if set.
+    pub fn logging_level(&self) -> Option<&str> {
+        self.logging.level.as_deref()
+    }
+
+    /// Records-per-flush threshold (`[logging].batch_max`), if set.
+    pub fn logging_batch_max(&self) -> Option<usize> {
+        self.logging.batch_max
+    }
+
+    /// Flush interval in milliseconds (`[logging].flush_ms`), if set.
+    pub fn logging_flush_ms(&self) -> Option<u64> {
+        self.logging.flush_ms
     }
 
     /// Configured sampling temperature, if any (`[generation].temperature`).
