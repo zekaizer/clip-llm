@@ -142,6 +142,7 @@ const DEFAULT_SUMMARIZE_IMAGE_PROMPT: &str =
 pub struct Config {
     api: ApiConfig,
     generation: GenerationConfig,
+    telemetry: TelemetryConfig,
     hotkey: HotkeyConfig,
     ui: UiConfig,
     languages: LanguagesConfig,
@@ -184,6 +185,25 @@ struct GenerationConfig {
     /// Maximum wait in seconds for response headers on streaming requests
     /// before the attempt is treated as transient and retried.
     initial_response_timeout_secs: Option<u64>,
+}
+
+/// `[telemetry]` — opt-in remote shipping of structured logs/traces to a
+/// VictoriaLogs instance. This is distinct from console (stderr) logging, which
+/// is always on and controlled by `RUST_LOG`. Absent or empty `url` keeps it
+/// disabled. No environment-variable equivalent.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct TelemetryConfig {
+    /// VictoriaLogs base URL, e.g. `http://192.168.1.15:9428`. Presence (and a
+    /// non-empty value) enables remote shipping; absence keeps it off.
+    url: Option<String>,
+    /// Minimum level shipped to VictoriaLogs: `trace|debug|info|warn|error`.
+    /// Defaults to `info`. NOTE: `trace`/`debug` may include clipboard content.
+    level: Option<String>,
+    /// Upper bound on records coalesced into one POST, capping body size
+    /// (default 200). The shipper sends as soon as records are available and
+    /// never waits to fill this.
+    batch_max: Option<usize>,
 }
 
 /// `[hotkey]` — hotkey behavior. No environment-variable equivalent; each falls
@@ -294,6 +314,21 @@ impl Config {
     /// Configured custom HTTP headers (`[api.headers]`); empty if none.
     pub fn api_headers(&self) -> &BTreeMap<String, String> {
         &self.api.headers
+    }
+
+    /// VictoriaLogs base URL (`[telemetry].url`); `None`/empty disables shipping.
+    pub fn telemetry_url(&self) -> Option<&str> {
+        self.telemetry.url.as_deref().filter(|s| !s.is_empty())
+    }
+
+    /// Minimum level shipped to VictoriaLogs (`[telemetry].level`), if set.
+    pub fn telemetry_level(&self) -> Option<&str> {
+        self.telemetry.level.as_deref()
+    }
+
+    /// Max records coalesced per POST (`[telemetry].batch_max`), if set.
+    pub fn telemetry_batch_max(&self) -> Option<usize> {
+        self.telemetry.batch_max
     }
 
     /// Configured sampling temperature, if any (`[generation].temperature`).

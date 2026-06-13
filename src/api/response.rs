@@ -2,11 +2,22 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-static THINK_CAPTURE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?s)<think>(.*?)</think>").unwrap());
+// Matches a reasoning block delimited by any of the known tag variants emitted
+// by different models inline in the content: `<think>` (DeepSeek R1, Qwen,
+// most), `<thought>` (Gemma), `<thinking>`, `<reasoning>`. The Rust regex crate
+// has no backreferences, so open/close tags aren't pinned to the same name; in
+// practice models emit matched tags and a stray mix would still strip cleanly.
+// `thinking` precedes `think` so the longer alternative is preferred. (Models
+// that put reasoning in a separate `reasoning_content` field instead leave
+// `content` clean, so they need no stripping here.)
+static THINK_CAPTURE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?s)<(?:thinking|think|thought|reasoning)>(.*?)</(?:thinking|think|thought|reasoning)>")
+        .unwrap()
+});
 
-/// Extract the content of the first `<think>...</think>` block (tags removed).
-/// Returns `None` if no complete think block exists.
+/// Extract the content of the first reasoning block (any of the
+/// [`OPEN_TAGS`] variants), tags removed. Returns `None` if no complete block
+/// exists.
 pub fn extract_first_think_content(text: &str) -> Option<String> {
     THINK_CAPTURE_RE
         .captures(text)
@@ -15,9 +26,9 @@ pub fn extract_first_think_content(text: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Strip `<think>...</think>` blocks from LLM response.
-/// Only trims leading newlines (from think-block removal) and trailing whitespace,
-/// preserving leading indentation on the first content line.
+/// Strip reasoning blocks (any of the [`OPEN_TAGS`] variants) from an LLM
+/// response. Only trims leading newlines (from block removal) and trailing
+/// whitespace, preserving leading indentation on the first content line.
 pub fn strip_think_blocks(text: &str) -> String {
     THINK_CAPTURE_RE
         .replace_all(text, "")
@@ -26,12 +37,22 @@ pub fn strip_think_blocks(text: &str) -> String {
         .to_string()
 }
 
-const OPEN_TAG: &str = "<think>";
-const CLOSE_TAG: &str = "</think>";
+/// Reasoning-block open tags recognized inline in model output. `<think>`
+/// (most reasoning models), `<thought>` (Gemma), plus `<thinking>` /
+/// `<reasoning>` seen on some models. `<think>` is not a prefix of `<thinking>`
+/// once the closing `>` is present, so full-tag `starts_with` matching stays
+/// unambiguous.
+const OPEN_TAGS: [&str; 4] = ["<think>", "<thought>", "<thinking>", "<reasoning>"];
+/// Matching close tags for [`OPEN_TAGS`].
+const CLOSE_TAGS: [&str; 4] = ["</think>", "</thought>", "</thinking>", "</reasoning>"];
+/// Longest close tag (`</reasoning>` = 12 bytes); the streaming tail must retain
+/// `len - 1` bytes so a close tag split across chunks is still detected.
+const MAX_CLOSE_TAG_LEN: usize = 12;
 
-/// Incremental filter that strips the first `<think>...</think>` block from a
-/// token stream. Feed tokens one at a time via [`feed`]; only visible text is
-/// returned. After the closing tag, all subsequent tokens pass through unchanged.
+/// Incremental filter that strips the first reasoning block (any [`OPEN_TAGS`]
+/// variant) from a token stream. Feed tokens one at a time via [`feed`]; only
+/// visible text is returned. After the closing tag, all subsequent tokens pass
+/// through unchanged.
 pub struct ThinkBlockFilter {
     state: ThinkState,
     pending: String,
@@ -93,17 +114,17 @@ impl ThinkBlockFilter {
     fn feed_before(&mut self, token: &str) -> String {
         self.pending.push_str(token);
 
-        if self.pending.starts_with(OPEN_TAG) {
+        if let Some(open) = OPEN_TAGS.iter().find(|t| self.pending.starts_with(**t)) {
             // Full open tag matched (possibly with trailing chars).
-            let remainder = self.pending[OPEN_TAG.len()..].to_string();
+            let remainder = self.pending[open.len()..].to_string();
             self.pending.clear();
             self.state = ThinkState::InsideThink;
             self.feed_inside(&remainder)
-        } else if OPEN_TAG.starts_with(self.pending.as_str()) {
-            // Pending is a proper prefix of "<think>" — keep buffering.
+        } else if OPEN_TAGS.iter().any(|t| t.starts_with(self.pending.as_str())) {
+            // Pending is a proper prefix of some open tag — keep buffering.
             String::new()
         } else {
-            // Not a think tag — flush everything accumulated.
+            // Not a reasoning tag — flush everything accumulated.
             let flushed = std::mem::take(&mut self.pending);
             self.state = ThinkState::PassThrough;
             flushed
@@ -113,19 +134,24 @@ impl ThinkBlockFilter {
     fn feed_inside(&mut self, token: &str) -> String {
         self.pending.push_str(token);
 
-        if let Some(pos) = self.pending.find(CLOSE_TAG) {
+        // Earliest close tag of any variant.
+        let close = CLOSE_TAGS
+            .iter()
+            .filter_map(|t| self.pending.find(*t).map(|pos| (pos, t.len())))
+            .min_by_key(|(pos, _)| *pos);
+        if let Some((pos, close_len)) = close {
             // Save the think content before the close tag.
             self.think_content.push_str(&self.pending[..pos]);
-            let after = &self.pending[pos + CLOSE_TAG.len()..];
+            let after = &self.pending[pos + close_len..];
             let trimmed = after.trim_start_matches(['\n', '\r']).to_string();
             self.trim_leading_newlines = trimmed.is_empty();
             self.pending.clear();
             self.state = ThinkState::PassThrough;
             trimmed
         } else {
-            // Retain last (CLOSE_TAG.len() - 1) bytes so a split close tag
-            // spanning two chunks is still detected on the next feed.
-            let keep = CLOSE_TAG.len() - 1;
+            // Retain last (MAX_CLOSE_TAG_LEN - 1) bytes so a split close tag of
+            // any variant spanning two chunks is still detected on the next feed.
+            let keep = MAX_CLOSE_TAG_LEN - 1;
             if self.pending.len() > keep {
                 let mut start = self.pending.len() - keep;
                 while !self.pending.is_char_boundary(start) {
@@ -187,6 +213,25 @@ mod tests {
     }
 
     #[test]
+    fn strips_thought_variant() {
+        // Gemma emits <thought>...</thought>.
+        let input = "<thought>reasoning</thought>answer";
+        assert_eq!(strip_think_blocks(input), "answer");
+    }
+
+    #[test]
+    fn strips_thinking_and_reasoning_variants() {
+        assert_eq!(strip_think_blocks("<thinking>r</thinking>a"), "a");
+        assert_eq!(strip_think_blocks("<reasoning>r</reasoning>a"), "a");
+    }
+
+    #[test]
+    fn extract_first_think_content_handles_variants() {
+        assert_eq!(extract_first_think_content("<thought>why</thought>x").as_deref(), Some("why"));
+        assert_eq!(extract_first_think_content("<reasoning>why</reasoning>x").as_deref(), Some("why"));
+    }
+
+    #[test]
     fn preserves_text_without_tags() {
         let input = "no tags here, just <angle> brackets";
         assert_eq!(strip_think_blocks(input), "no tags here, just <angle> brackets");
@@ -220,6 +265,36 @@ mod tests {
         assert_eq!(f.feed("reasoning"), "");
         assert_eq!(f.feed("</think>"), "");
         assert_eq!(f.feed("answer"), "answer");
+    }
+
+    #[test]
+    fn filter_thought_variant_suppressed() {
+        // Gemma <thought> streamed in pieces, including a split open tag.
+        let mut f = ThinkBlockFilter::new();
+        assert_eq!(f.feed("<thou"), "");
+        assert_eq!(f.feed("ght>"), "");
+        assert_eq!(f.feed("reasoning"), "");
+        assert_eq!(f.feed("</thought>"), "");
+        assert_eq!(f.feed("answer"), "answer");
+    }
+
+    #[test]
+    fn filter_thinking_variant_not_confused_with_think() {
+        // `<think>` is a prefix of `<thinking>` only up to the `>`; the full
+        // tag must be recognized as `<thinking>`, not `<think>` + "ing>".
+        let mut f = ThinkBlockFilter::new();
+        assert_eq!(f.feed("<thinking>"), "");
+        assert_eq!(f.feed("deep thought"), "");
+        assert_eq!(f.feed("</thinking>"), "");
+        assert_eq!(f.feed("answer"), "answer");
+    }
+
+    #[test]
+    fn filter_reasoning_variant_close_tag_split() {
+        let mut f = ThinkBlockFilter::new();
+        assert_eq!(f.feed("<reasoning>r"), "");
+        assert_eq!(f.feed("</reason"), "");
+        assert_eq!(f.feed("ing>done"), "done");
     }
 
     #[test]

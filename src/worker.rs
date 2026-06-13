@@ -2,7 +2,7 @@ use std::sync::mpsc;
 use std::thread;
 
 use tokio::sync::mpsc as tokio_mpsc;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn, Instrument};
 
 use crate::api::client::{LlmClient, SseEvent, SseParser};
 use crate::api::response::{extract_first_think_content, strip_think_blocks, ThinkBlockFilter};
@@ -45,8 +45,13 @@ pub enum WorkerResponse {
     ThinkStarted { request_id: u64 },
     Complete { result: String, think_content: Option<String>, request_id: u64 },
     Error { message: String, request_id: u64 },
-    /// One-shot: thinking control capability from probe (sent once at startup).
-    ThinkingProbeResult { supported: bool },
+    /// One-shot: vision + thinking-control capability from the startup probe
+    /// (sent once). Drives both the state machine's thinking flag and the tray
+    /// Status menu.
+    ProbeComplete {
+        vision_supported: bool,
+        thinking_method: crate::api::client::ThinkingControlMethod,
+    },
 }
 
 /// Map a reqwest transport error to a short, user-facing message that hides
@@ -364,32 +369,38 @@ fn dispatch_process(
     let llm = llm.clone();
     let resp_tx = resp_tx.clone();
 
+    let text_len = task.content.text.as_ref().map_or(0, |t| t.len());
+    let img_count = task.content.images.len();
+
+    // One span per request: every log emitted while the request runs inherits
+    // these fields, so a request can be filtered/correlated end to end in the
+    // remote logs (and they show in the stderr span context too).
+    let span = tracing::info_span!(
+        "request",
+        request_id = task.request_id,
+        mode = task.mode.label(),
+        streaming = config.streaming,
+        text_len,
+        img_count,
+    );
+
     // Mock mode: simulate streaming with canned responses.
     #[cfg(feature = "diagnostics")]
     if config.use_mock {
         let mode = task.mode;
         let request_id = task.request_id;
         let mock_text = task.content.text.unwrap_or_default();
-        info!("worker: mock streaming {} ({} chars)", mode.label(), mock_text.len());
-        tokio::spawn(run_mock_streaming(mock_text, mode, request_id, resp_tx, c_rx));
+        info!(parent: &span, "worker: mock streaming {} ({} chars)", mode.label(), mock_text.len());
+        tokio::spawn(run_mock_streaming(mock_text, mode, request_id, resp_tx, c_rx).instrument(span));
         return;
     }
 
-    let text_len = task.content.text.as_ref().map_or(0, |t| t.len());
-    let img_count = task.content.images.len();
-
     if config.streaming {
-        info!(
-            "worker: starting stream {} ({} chars, {} images)",
-            task.mode.label(), text_len, img_count,
-        );
-        tokio::spawn(run_streaming(llm, task, resp_tx, c_rx));
+        info!(parent: &span, "worker: starting stream {} ({text_len} chars, {img_count} images)", task.mode.label());
+        tokio::spawn(run_streaming(llm, task, resp_tx, c_rx).instrument(span));
     } else {
-        info!(
-            "worker: starting {} ({} chars, {} images, no-stream)",
-            task.mode.label(), text_len, img_count,
-        );
-        tokio::spawn(run_non_streaming(llm, task, resp_tx, c_rx));
+        info!(parent: &span, "worker: starting {} ({text_len} chars, {img_count} images, no-stream)", task.mode.label());
+        tokio::spawn(run_non_streaming(llm, task, resp_tx, c_rx).instrument(span));
     }
 }
 
@@ -397,11 +408,16 @@ fn dispatch_process(
 /// Returns the thread handle.
 ///
 /// Uses `tokio::sync::mpsc` for the command channel so that `.recv().await`
-/// does not block the single-threaded tokio runtime.
+/// does not block the single-threaded tokio runtime. `ctx` is used to wake the
+/// UI event loop after the one-shot startup probe completes — that response
+/// arrives while the overlay is idle (Hidden), so without an explicit repaint
+/// the tray Status menu wouldn't update until the next unrelated event. (Other
+/// responses arrive during Processing, when the UI already repaints each frame.)
 pub fn spawn_worker(
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<WorkerCommand>,
     resp_tx: mpsc::Sender<WorkerResponse>,
     llm: LlmClient,
+    ctx: eframe::egui::Context,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -431,12 +447,18 @@ pub fn spawn_worker(
             tokio::spawn({
                 let llm = llm.clone();
                 let resp_tx = resp_tx.clone();
+                let ctx = ctx.clone();
                 async move {
-                    llm.probe_vision().await;
+                    let vision_supported = llm.probe_vision().await;
                     let thinking_method = llm.probe_thinking().await;
-                    let supported = thinking_method
-                        != crate::api::client::ThinkingControlMethod::Unsupported;
-                    let _ = resp_tx.send(WorkerResponse::ThinkingProbeResult { supported });
+                    let _ = resp_tx.send(WorkerResponse::ProbeComplete {
+                        vision_supported,
+                        thinking_method,
+                    });
+                    // Wake the (idle) UI loop so poll_responses processes this
+                    // immediately and the tray Status menu updates without
+                    // waiting for the next unrelated event.
+                    ctx.request_repaint();
                 }
             });
 
@@ -492,7 +514,7 @@ mod tests {
             WorkerResponse::ThinkStarted { .. } => "ThinkStarted",
             WorkerResponse::Complete { .. } => "Complete",
             WorkerResponse::Error { .. } => "Error",
-            WorkerResponse::ThinkingProbeResult { .. } => "ThinkingProbeResult",
+            WorkerResponse::ProbeComplete { .. } => "ProbeComplete",
         }
     }
 

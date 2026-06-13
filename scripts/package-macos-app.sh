@@ -39,6 +39,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>LSUIElement</key><true/>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <key>NSLocalNetworkUsageDescription</key><string>clip-llm ships diagnostic logs to a VictoriaLogs server on your local network when [logging].url is configured.</string>
 </dict>
 </plist>
 PLIST

@@ -385,6 +385,7 @@ impl LlmClient {
     /// re-probe storm against a rate-limited endpoint (#63). Other transient or
     /// ambiguous responses (401/403/404/5xx) and network errors skip caching so
     /// the next request re-probes.
+    #[tracing::instrument(skip(self))]
     pub async fn probe_vision(&self) -> bool {
         let inner = &self.0;
         if let Some(&cached) = inner.supports_vision.get() {
@@ -466,6 +467,7 @@ impl LlmClient {
     /// storm against a rate-limited endpoint (#63). Other transient or ambiguous
     /// responses (401/403/404/5xx) and network errors skip caching so the next
     /// request re-probes.
+    #[tracing::instrument(skip(self))]
     pub async fn probe_thinking(&self) -> ThinkingControlMethod {
         let inner = &self.0;
         if let Some(&cached) = inner.thinking_control.get() {
@@ -676,6 +678,10 @@ impl LlmClient {
     /// Build and send a chat completion request. Probes vision and thinking support,
     /// constructs the request body, applies auth, and returns the raw response.
     /// `stream=true` uses the no-timeout streaming client; `false` uses the regular client.
+    #[tracing::instrument(
+        skip_all,
+        fields(endpoint = %self.0.endpoint, model = %self.0.model, stream)
+    )]
     async fn build_and_send(
         &self,
         content: &ClipboardContent,

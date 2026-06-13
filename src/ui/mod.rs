@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc as tokio_mpsc;
 
 use eframe::egui;
-use tracing::{error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::clipboard::ClipboardManager;
 use crate::hotkey::{TapAction, TapEvent};
@@ -32,6 +32,18 @@ const PARAM_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(300
 
 /// How long the copy button shows the ✓ confirmation after a copy (#16).
 const COPY_CONFIRM: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Shorten a worker error message into a compact one-line label for the tray
+/// "Last" status row (first sentence/line, capped).
+fn tray_last_label(message: &str) -> String {
+    let head = message.split(['\n', '.']).next().unwrap_or(message).trim();
+    let head = if head.is_empty() { message } else { head };
+    if head.chars().count() > 48 {
+        format!("{}…", head.chars().take(47).collect::<String>())
+    } else {
+        head.to_string()
+    }
+}
 
 pub struct OverlayApp {
     sm: StateMachine,
@@ -105,6 +117,11 @@ pub struct OverlayApp {
     /// still on the clipboard — the ↩ paste otherwise double-writes the
     /// result that auto-copy already placed (#16b).
     last_clipboard_write: Option<(String, u64)>,
+    /// Completed-request tally for the tray Status menu: successes and errors
+    /// seen so far this session. Drives the "Requests" / "Last" rows and the
+    /// derived error rate.
+    req_ok: u32,
+    req_err: u32,
     /// Focus level seen on the previous frame. FocusGained/FocusLost are
     /// transition events to the state machine, so they must fire only on
     /// edges — re-firing FocusLost per unfocused frame hid the result the
@@ -160,6 +177,8 @@ impl OverlayApp {
             pending_process: None,
             copy_confirmed_at: None,
             last_clipboard_write: None,
+            req_ok: 0,
+            req_err: 0,
             diag: crate::diagnostics::DiagCollector::new(),
             diag_action_rx,
             diag_state_tx,
@@ -204,6 +223,8 @@ impl OverlayApp {
             pending_process: None,
             copy_confirmed_at: None,
             last_clipboard_write: None,
+            req_ok: 0,
+            req_err: 0,
             last_focused: None,
         }
     }
@@ -235,7 +256,13 @@ impl OverlayApp {
                     self.pending_process = None;
                     let text_len = content.text.as_ref().map_or(0, |t| t.len());
                     let img_count = content.images.len();
-                    info!("starting {} ({} chars, {} images)", mode.label(), text_len, img_count);
+                    info!(
+                        request_id,
+                        mode = mode.label(),
+                        text_len,
+                        img_count,
+                        "ui: dispatch request to worker"
+                    );
                     let _ = self.cmd_tx.send(WorkerCommand::Process(ProcessTask {
                         content,
                         mode,
@@ -245,6 +272,7 @@ impl OverlayApp {
                     }));
                 }
                 UiEffect::SendCancel => {
+                    debug!("ui: cancel in-flight request");
                     let _ = self.cmd_tx.send(WorkerCommand::Cancel);
                 }
                 UiEffect::WriteClipboard(text) => {
@@ -528,6 +556,31 @@ impl OverlayApp {
 
     // -- Worker response polling --
 
+    /// Record a completed request's outcome: bump the success/error tally,
+    /// log it, and refresh the tray Status rows. `last` is a short label for
+    /// the "Last" row (e.g. "ok" or a trimmed error message).
+    fn record_request_outcome(&mut self, ok: bool, last: &str) {
+        if ok {
+            self.req_ok += 1;
+        } else {
+            self.req_err += 1;
+        }
+        let total = self.req_ok + self.req_err;
+        let rate = if total == 0 { 0 } else { self.req_err * 100 / total };
+        if ok {
+            info!(
+                "request ok ({}✓/{}✗, {rate}% err)",
+                self.req_ok, self.req_err
+            );
+        } else {
+            warn!(
+                "request error: {last} ({}✓/{}✗, {rate}% err)",
+                self.req_ok, self.req_err
+            );
+        }
+        crate::platform::update_tray_requests(self.req_ok, self.req_err, last);
+    }
+
     fn poll_responses(&mut self, ctx: &egui::Context) {
         loop {
             let response = match self.resp_rx.try_recv() {
@@ -540,6 +593,7 @@ impl OverlayApp {
             };
             let event = match response {
                 WorkerResponse::Complete { result, think_content, request_id } => {
+                    self.record_request_outcome(true, "ok");
                     UiEvent::WorkerResult {
                         text: result,
                         think_content,
@@ -547,6 +601,7 @@ impl OverlayApp {
                     }
                 }
                 WorkerResponse::Error { message, request_id } => {
+                    self.record_request_outcome(false, &tray_last_label(&message));
                     UiEvent::WorkerError {
                         message,
                         request_id,
@@ -558,12 +613,27 @@ impl OverlayApp {
                 WorkerResponse::ThinkStarted { request_id } => {
                     UiEvent::ThinkStarted { request_id }
                 }
-                WorkerResponse::ThinkingProbeResult { supported } => {
-                    UiEvent::ThinkingProbeResult(supported)
+                WorkerResponse::ProbeComplete { vision_supported, thinking_method } => {
+                    use crate::api::client::ThinkingControlMethod as Tcm;
+                    let thinking_label = match thinking_method {
+                        Tcm::ChatTemplateKwargs => "kwargs",
+                        Tcm::SystemPromptTag => "prompt tag",
+                        Tcm::Unsupported => "unsupported",
+                    };
+                    crate::platform::update_tray_probe(vision_supported, thinking_label);
+                    UiEvent::ThinkingProbeResult(thinking_method != Tcm::Unsupported)
                 }
             };
             let effects = self.sm.handle(event);
             self.execute_effects(effects, ctx);
+        }
+
+        // Refresh the tray "Telemetry" row with the latest shipped/dropped
+        // counts (only when the remote sink is enabled). Runs on UI activity —
+        // the shipping itself is independent and immediate.
+        if crate::config::get().telemetry_url().is_some() {
+            let (shipped, dropped) = crate::telemetry::telemetry_counts();
+            crate::platform::update_tray_telemetry(shipped, dropped);
         }
     }
 

@@ -35,6 +35,16 @@ max_tokens           = 16384   # max tokens generated per response
 request_timeout_secs = 30      # per-request timeout (also the streaming connect timeout)
 initial_response_timeout_secs = 10  # streaming only: max wait for response headers before retry
 
+# Optional telemetry: ship structured logs/traces to a VictoriaLogs instance.
+# Distinct from console (stderr) logging, which is always on (RUST_LOG). This
+# only ADDS a remote sink. Off unless `url` is set. The whole section can be
+# omitted. No environment-variable equivalent.
+[telemetry]
+# url       = "http://192.168.1.15:9428"  # VictoriaLogs base URL — presence enables shipping
+# level     = "info"   # min level shipped: trace|debug|info|warn|error.
+                       # WARNING: trace/debug may include clipboard text.
+# batch_max = 200      # max records coalesced per POST (caps body size; ships immediately)
+
 # Hotkey behavior. No environment-variable equivalent.
 [hotkey]
 double_tap_timeout_ms = 350     # single/double-tap detection window (lower = snappier)

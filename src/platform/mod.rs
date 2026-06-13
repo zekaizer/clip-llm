@@ -75,11 +75,68 @@ pub use modifier_watcher::{spawn_modifier_watcher, ModifierState};
 // `tray-icon` is cross-platform, so the implementation is shared here; only the
 // Windows-specific window nudge in the menu handler is `cfg`-gated.
 
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static TRAY_QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "macos")]
 static TRAY_ABOUT_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Handles to the dynamic rows of the tray "Status" submenu, updated after the
+/// startup probe lands and on every request outcome. `tray-icon` menu items are
+/// `Rc`-based (not `Send`), so they live in a thread-local and may only be
+/// touched from the main thread — which is where `init_tray` and the
+/// `update_tray_*` callers (inside `OverlayApp::update`) both run.
+struct TrayStatusRows {
+    vision: tray_icon::menu::MenuItem,
+    thinking: tray_icon::menu::MenuItem,
+    requests: tray_icon::menu::MenuItem,
+    last: tray_icon::menu::MenuItem,
+    telemetry: tray_icon::menu::MenuItem,
+}
+
+thread_local! {
+    static TRAY_STATUS: RefCell<Option<TrayStatusRows>> = const { RefCell::new(None) };
+}
+
+/// Update the probe rows of the Status submenu once the startup probe lands.
+/// Main thread only (see [`TrayStatusRows`]). No-op if the tray failed to build.
+pub fn update_tray_probe(vision_supported: bool, thinking_label: &str) {
+    TRAY_STATUS.with(|s| {
+        if let Some(rows) = s.borrow().as_ref() {
+            let vision = if vision_supported { "supported" } else { "not supported" };
+            rows.vision.set_text(format!("Vision: {vision}"));
+            // "ctrl" = whether thinking can be toggled via the API, not whether
+            // the model thinks (e.g. Gemma always emits <thought>, uncontrollable).
+            rows.thinking.set_text(format!("Thinking ctrl: {thinking_label}"));
+        }
+    });
+}
+
+/// Update the telemetry sink row with live shipped/dropped record counts.
+/// Main thread only (see [`TrayStatusRows`]).
+pub fn update_tray_telemetry(shipped: u64, dropped: u64) {
+    TRAY_STATUS.with(|s| {
+        if let Some(rows) = s.borrow().as_ref() {
+            rows.telemetry
+                .set_text(format!("Telemetry: {shipped} shipped, {dropped} dropped"));
+        }
+    });
+}
+
+/// Update the request-stats rows of the Status submenu after a request finishes.
+/// `last` is a short label for the most recent outcome. Main thread only.
+pub fn update_tray_requests(ok: u32, err: u32, last: &str) {
+    TRAY_STATUS.with(|s| {
+        if let Some(rows) = s.borrow().as_ref() {
+            let total = ok + err;
+            let rate = if total == 0 { 0 } else { err * 100 / total };
+            rows.requests
+                .set_text(format!("Requests: {total} (✓{ok} ✗{err}, {rate}% err)"));
+            rows.last.set_text(format!("Last: {last}"));
+        }
+    });
+}
 
 /// Decode the embedded tray icon PNG into an RGBA `tray_icon::Icon`.
 fn load_tray_icon() -> tray_icon::Icon {
@@ -96,7 +153,7 @@ fn load_tray_icon() -> tray_icon::Icon {
 /// On macOS this is the only way to quit the app (Accessory policy = no Dock icon).
 /// The `TrayIcon` is intentionally leaked (process-lifetime resource).
 pub fn init_tray(ctx: &eframe::egui::Context) {
-    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
     use tray_icon::TrayIconBuilder;
 
     let about_item = MenuItem::new("About clip-llm", true, None);
@@ -105,9 +162,65 @@ pub fn init_tray(ctx: &eframe::egui::Context) {
     let config_id = config_item.id().clone();
     let quit_item = MenuItem::new("Quit", true, None);
     let quit_id = quit_item.id().clone();
+
+    // Status submenu — read-only rows. Connection/config rows are known now;
+    // the probe and request-stats rows start as placeholders and are filled in
+    // from the main thread via update_tray_probe / update_tray_requests.
+    let cfg = crate::config::get();
+    let endpoint = cfg.api_endpoint().unwrap_or("(default)");
+    let model = cfg.api_model().unwrap_or("(default)");
+    let streaming = if cfg.api_streaming().unwrap_or(true) { "on" } else { "off" };
+    let config_status = match crate::config::load_outcome() {
+        crate::config::LoadOutcome::Loaded(p) => format!("Config: loaded ({})", p.display()),
+        crate::config::LoadOutcome::NoFile => "Config: none (defaults)".to_string(),
+        crate::config::LoadOutcome::Failed { reason, .. } => format!("Config: error — {reason}"),
+    };
+    let endpoint_row = MenuItem::new(format!("Endpoint: {endpoint}"), false, None);
+    let model_row = MenuItem::new(format!("Model: {model}"), false, None);
+    let streaming_row = MenuItem::new(format!("Streaming: {streaming}"), false, None);
+    let config_row = MenuItem::new(config_status, false, None);
+    let vision_row = MenuItem::new("Vision: probing…", false, None);
+    let thinking_row = MenuItem::new("Thinking ctrl: probing…", false, None);
+    let requests_row = MenuItem::new("Requests: none yet", false, None);
+    let last_row = MenuItem::new("Last: —", false, None);
+    let telemetry_status = match cfg.telemetry_url() {
+        Some(url) => format!("Telemetry → {url} ({})", cfg.telemetry_level().unwrap_or("info")),
+        None => "Telemetry: off".to_string(),
+    };
+    let telemetry_row = MenuItem::new(telemetry_status, false, None);
+    let status_menu = Submenu::with_items(
+        "Status",
+        true,
+        &[
+            &endpoint_row,
+            &model_row,
+            &streaming_row,
+            &config_row,
+            &PredefinedMenuItem::separator(),
+            &vision_row,
+            &thinking_row,
+            &PredefinedMenuItem::separator(),
+            &requests_row,
+            &last_row,
+            &telemetry_row,
+        ],
+    )
+    .expect("failed to create status submenu");
+    // Keep handles to the dynamic rows for later main-thread updates.
+    TRAY_STATUS.with(|s| {
+        *s.borrow_mut() = Some(TrayStatusRows {
+            vision: vision_row.clone(),
+            thinking: thinking_row.clone(),
+            requests: requests_row.clone(),
+            last: last_row.clone(),
+            telemetry: telemetry_row.clone(),
+        });
+    });
+
     let menu = Menu::with_items(&[
         &about_item,
         &config_item,
+        &status_menu,
         &PredefinedMenuItem::separator(),
         &quit_item,
     ])
