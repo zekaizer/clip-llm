@@ -105,7 +105,9 @@ pub fn update_tray_probe(vision_supported: bool, thinking_label: &str) {
         if let Some(rows) = s.borrow().as_ref() {
             let vision = if vision_supported { "supported" } else { "not supported" };
             rows.vision.set_text(format!("Vision: {vision}"));
-            rows.thinking.set_text(format!("Thinking: {thinking_label}"));
+            // "ctrl" = whether thinking can be toggled via the API, not whether
+            // the model thinks (e.g. Gemma always emits <thought>, uncontrollable).
+            rows.thinking.set_text(format!("Thinking ctrl: {thinking_label}"));
         }
     });
 }
@@ -166,7 +168,7 @@ pub fn init_tray(ctx: &eframe::egui::Context) {
     let streaming_row = MenuItem::new(format!("Streaming: {streaming}"), false, None);
     let config_row = MenuItem::new(config_status, false, None);
     let vision_row = MenuItem::new("Vision: probing…", false, None);
-    let thinking_row = MenuItem::new("Thinking: probing…", false, None);
+    let thinking_row = MenuItem::new("Thinking ctrl: probing…", false, None);
     let requests_row = MenuItem::new("Requests: none yet", false, None);
     let last_row = MenuItem::new("Last: —", false, None);
     let status_menu = Submenu::with_items(
