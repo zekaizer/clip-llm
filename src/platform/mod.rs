@@ -130,7 +130,7 @@ pub fn update_tray_requests(ok: u32, err: u32, last: &str) {
     TRAY_STATUS.with(|s| {
         if let Some(rows) = s.borrow().as_ref() {
             let total = ok + err;
-            let rate = if total == 0 { 0 } else { err * 100 / total };
+            let rate = (err * 100).checked_div(total).unwrap_or(0);
             rows.requests
                 .set_text(format!("Requests: {total} (✓{ok} ✗{err}, {rate}% err)"));
             rows.last.set_text(format!("Last: {last}"));

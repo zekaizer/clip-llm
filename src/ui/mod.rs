@@ -566,7 +566,7 @@ impl OverlayApp {
             self.req_err += 1;
         }
         let total = self.req_ok + self.req_err;
-        let rate = if total == 0 { 0 } else { self.req_err * 100 / total };
+        let rate = (self.req_err * 100).checked_div(total).unwrap_or(0);
         if ok {
             info!(
                 "request ok ({}✓/{}✗, {rate}% err)",
