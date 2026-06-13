@@ -33,6 +33,8 @@ pub struct StreamingState<'a> {
     pub think_started: bool,
     pub think_content: Option<&'a str>,
     pub think_expanded: bool,
+    /// `Some(reason)` when the shown Result is partial (stream cut short).
+    pub incomplete: Option<&'a str>,
 }
 
 /// Thinking mode state for UI rendering.
@@ -187,6 +189,7 @@ pub fn render(
                             streaming.think_expanded,
                             auto_copy,
                             copy_confirmed,
+                            streaming.incomplete,
                             &mut action,
                         );
                     }
@@ -459,8 +462,19 @@ fn render_result(
     think_expanded: bool,
     auto_copy: bool,
     copy_confirmed: bool,
+    incomplete: Option<&str>,
     action: &mut OverlayAction,
 ) {
+    // Truncation / interruption banner at the very top: the partial reply is
+    // shown below, so tell the user it is incomplete and why (#65).
+    if let Some(reason) = incomplete {
+        ui.label(
+            egui::RichText::new(format!("\u{26a0} Incomplete — {reason}"))
+                .color(egui::Color32::from_rgb(255, 180, 60))
+                .size(13.0),
+        );
+        ui.add_space(4.0);
+    }
     if let Some(content) = think_content {
         render_think_toggle(ui, think_expanded, content, action);
         ui.add_space(4.0);

@@ -43,7 +43,16 @@ pub enum WorkerResponse {
     StreamDelta { text: String, request_id: u64 },
     /// Emitted once when the first `<think>` block begins (streaming only).
     ThinkStarted { request_id: u64 },
-    Complete { result: String, think_content: Option<String>, request_id: u64 },
+    /// A finished response. `incomplete` is `Some(reason)` when the stream was
+    /// cut short (token limit, stall, dropped connection, transport error) but
+    /// partial content was received — the partial is shown with the reason as a
+    /// banner instead of being discarded. `None` for a clean completion.
+    Complete {
+        result: String,
+        think_content: Option<String>,
+        request_id: u64,
+        incomplete: Option<String>,
+    },
     Error { message: String, request_id: u64 },
     /// One-shot: vision + thinking-control capability from the startup probe
     /// (sent once). Drives both the state machine's thinking flag and the tray
@@ -124,21 +133,32 @@ fn make_complete_response(
     mode: ProcessMode,
     request_id: u64,
     label: &str,
+    incomplete: Option<String>,
 ) -> WorkerResponse {
     let think_content = extract_first_think_content(raw);
     let text = strip_think_blocks(raw);
     if text.is_empty() {
-        WorkerResponse::Error {
-            message: "The model returned no visible output. Try switching mode or disabling thinking."
-                .into(),
-            request_id,
-        }
+        // Nothing usable arrived. If the stream was cut short, report that
+        // reason; otherwise the model genuinely produced no visible output.
+        let message = incomplete.unwrap_or_else(|| {
+            "The model returned no visible output. Try switching mode or disabling thinking."
+                .to_string()
+        });
+        WorkerResponse::Error { message, request_id }
     } else {
-        info!("worker: {} {label} ({} chars)", mode.label(), text.len());
+        match &incomplete {
+            Some(reason) => warn!(
+                "worker: {} {label} INCOMPLETE ({} chars): {reason}",
+                mode.label(),
+                text.len()
+            ),
+            None => info!("worker: {} {label} ({} chars)", mode.label(), text.len()),
+        }
         WorkerResponse::Complete {
             result: text,
             think_content,
             request_id,
+            incomplete,
         }
     }
 }
@@ -159,7 +179,7 @@ async fn run_non_streaming(
         }
     };
     let r = match result {
-        Ok(raw) => make_complete_response(&raw, mode, request_id, "complete"),
+        Ok(raw) => make_complete_response(&raw, mode, request_id, "complete", None),
         Err(e) => {
             error!("worker: LLM error: {e}");
             WorkerResponse::Error {
@@ -214,10 +234,12 @@ async fn run_streaming(
                         "worker: stream idle for {}s — treating as stalled",
                         STREAM_IDLE_TIMEOUT.as_secs()
                     );
-                    let _ = resp_tx.send(WorkerResponse::Error {
-                        message: "The server stopped responding mid-reply. Try again.".to_string(),
-                        request_id,
-                    });
+                    // Keep whatever arrived before the stall (#65).
+                    let r = make_complete_response(
+                        &full_content, mode, request_id, "stream stalled",
+                        Some("The server stopped responding mid-reply. Try again.".to_string()),
+                    );
+                    let _ = resp_tx.send(r);
                     return;
                 }
             },
@@ -256,19 +278,13 @@ async fn run_streaming(
                             // "length" means generation hit max_tokens — the
                             // reply is truncated even though the stream ended
                             // normally with [DONE] (#60).
-                            if finish_reason.as_deref() == Some("length") {
-                                error!(
-                                    "worker: generation hit max_tokens after {} chars — treating as truncated",
-                                    full_content.len()
-                                );
-                                let _ = resp_tx.send(WorkerResponse::Error {
-                                    message: friendly_api_error(&ApiError::Truncated),
-                                    request_id,
-                                });
-                                return;
-                            }
+                            // "length" → cut off at max_tokens. Show the partial
+                            // reply with a truncation banner instead of dropping
+                            // it (#65).
+                            let incomplete = (finish_reason.as_deref() == Some("length"))
+                                .then(|| friendly_api_error(&ApiError::Truncated));
                             let r = make_complete_response(
-                                &full_content, mode, request_id, "stream complete",
+                                &full_content, mode, request_id, "stream complete", incomplete,
                             );
                             let _ = resp_tx.send(r);
                             return;
@@ -279,25 +295,26 @@ async fn run_streaming(
             Ok(None) => {
                 // The Done arm returns, so reaching here means the connection
                 // closed before `data: [DONE]` arrived — the reply is truncated
-                // (proxy timeout, server restart, network reset). Surface an
-                // error instead of completing with partial content (#60).
-                error!(
+                // (proxy timeout, server restart, network reset, #60). Show the
+                // partial with a banner instead of dropping it (#65).
+                warn!(
                     "worker: stream closed without [DONE] after {} chars — treating as truncated",
                     full_content.len()
                 );
-                let _ = resp_tx.send(WorkerResponse::Error {
-                    message: "The connection closed before the reply finished. Try again."
-                        .to_string(),
-                    request_id,
-                });
+                let r = make_complete_response(
+                    &full_content, mode, request_id, "stream closed early",
+                    Some("The connection closed before the reply finished. Try again.".to_string()),
+                );
+                let _ = resp_tx.send(r);
                 return;
             }
             Err(e) => {
                 error!("worker: stream chunk error: {e}");
-                let _ = resp_tx.send(WorkerResponse::Error {
-                    message: friendly_reqwest_error(&e),
-                    request_id,
-                });
+                let r = make_complete_response(
+                    &full_content, mode, request_id, "stream error",
+                    Some(friendly_reqwest_error(&e)),
+                );
+                let _ = resp_tx.send(r);
                 return;
             }
         }
@@ -336,6 +353,7 @@ async fn run_mock_streaming(
                 result: mock,
                 think_content: None,
                 request_id,
+                incomplete: None,
             });
         }
         Err(msg) => {
@@ -520,7 +538,7 @@ mod tests {
 
     #[test]
     fn make_complete_response_plain_text() {
-        let r = make_complete_response("hello world", ProcessMode::Translate, 1, "complete");
+        let r = make_complete_response("hello world", ProcessMode::Translate, 1, "complete", None);
         let text = assert_complete(&r, 1);
         assert_eq!(text, "hello world");
     }
@@ -528,7 +546,7 @@ mod tests {
     #[test]
     fn make_complete_response_strips_think_blocks() {
         let raw = "<think>internal</think>visible output";
-        let r = make_complete_response(raw, ProcessMode::Rephrase, 2, "stream complete");
+        let r = make_complete_response(raw, ProcessMode::Rephrase, 2, "stream complete", None);
         let text = assert_complete(&r, 2);
         assert_eq!(text, "visible output");
     }
@@ -536,14 +554,14 @@ mod tests {
     #[test]
     fn make_complete_response_empty_after_strip() {
         let raw = "<think>only thinking</think>";
-        let r = make_complete_response(raw, ProcessMode::Summarize, 3, "complete");
+        let r = make_complete_response(raw, ProcessMode::Summarize, 3, "complete", None);
         let msg = assert_error(&r, 3);
         assert!(msg.contains("no visible output"));
     }
 
     #[test]
     fn make_complete_response_empty_input() {
-        let r = make_complete_response("", ProcessMode::Translate, 4, "complete");
+        let r = make_complete_response("", ProcessMode::Translate, 4, "complete", None);
         let msg = assert_error(&r, 4);
         assert!(msg.contains("no visible output"));
     }
@@ -551,7 +569,7 @@ mod tests {
     #[test]
     fn make_complete_response_whitespace_only_after_strip() {
         let raw = "<think>x</think>   \n  ";
-        let r = make_complete_response(raw, ProcessMode::Translate, 5, "complete");
+        let r = make_complete_response(raw, ProcessMode::Translate, 5, "complete", None);
         // strip_think_blocks trims whitespace; empty after trim → error.
         let msg = assert_error(&r, 5);
         assert!(msg.contains("no visible output"));
@@ -559,8 +577,35 @@ mod tests {
 
     #[test]
     fn make_complete_response_preserves_request_id() {
-        let r = make_complete_response("ok", ProcessMode::Translate, 42, "test");
+        let r = make_complete_response("ok", ProcessMode::Translate, 42, "test", None);
         assert_complete(&r, 42);
+    }
+
+    #[test]
+    fn make_complete_response_partial_shows_with_reason() {
+        // #65: a cut-off reply with content is shown (not dropped), carrying
+        // the reason as the `incomplete` banner.
+        let r = make_complete_response(
+            "partial text", ProcessMode::Translate, 7, "stream", Some("cut off".to_string()),
+        );
+        match r {
+            WorkerResponse::Complete { result, incomplete, request_id, .. } => {
+                assert_eq!(request_id, 7);
+                assert_eq!(result, "partial text");
+                assert_eq!(incomplete.as_deref(), Some("cut off"));
+            }
+            other => panic!("expected Complete, got {:?}", variant_name(&other)),
+        }
+    }
+
+    #[test]
+    fn make_complete_response_empty_partial_is_error_with_reason() {
+        // Cut off before any visible content → error using the cut-off reason.
+        let r = make_complete_response(
+            "<think>x</think>", ProcessMode::Translate, 8, "stream", Some("cut off".to_string()),
+        );
+        let msg = assert_error(&r, 8);
+        assert_eq!(msg, "cut off");
     }
 
     // -- friendly_status_message tests --

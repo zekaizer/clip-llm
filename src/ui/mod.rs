@@ -592,12 +592,13 @@ impl OverlayApp {
                 }
             };
             let event = match response {
-                WorkerResponse::Complete { result, think_content, request_id } => {
-                    self.record_request_outcome(true, "ok");
+                WorkerResponse::Complete { result, think_content, request_id, incomplete } => {
+                    self.record_request_outcome(true, if incomplete.is_some() { "partial" } else { "ok" });
                     UiEvent::WorkerResult {
                         text: result,
                         think_content,
                         request_id,
+                        incomplete,
                     }
                 }
                 WorkerResponse::Error { message, request_id } => {
@@ -1004,6 +1005,7 @@ impl eframe::App for OverlayApp {
                 think_started: self.sm.think_started(),
                 think_content: self.sm.think_content(),
                 think_expanded: self.think_expanded,
+                incomplete: self.sm.result_incomplete(),
             },
             self.sm.available_modes(),
             self.preview_mode,

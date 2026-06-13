@@ -76,7 +76,14 @@ pub enum UiEvent {
     /// `auto_copy`: when true, auto-copy the result to clipboard (double-tap behavior).
     ContentReady { content: ClipboardContent, auto_copy: bool },
     /// Worker completed successfully.
-    WorkerResult { text: String, think_content: Option<String>, request_id: u64 },
+    WorkerResult {
+        text: String,
+        think_content: Option<String>,
+        request_id: u64,
+        /// `Some(reason)` when the reply was cut short but partial content was
+        /// received; shown as a banner above the result. `None` = clean result.
+        incomplete: Option<String>,
+    },
     /// Worker detected a think block beginning (streaming only).
     ThinkStarted { request_id: u64 },
     /// Worker reported an error.
@@ -180,6 +187,9 @@ pub struct StateMachine {
     think_started: bool,
     /// Think block content for the current mode (set on WorkerResult).
     think_content: Option<String>,
+    /// `Some(reason)` when the current Result is partial (stream cut short);
+    /// the overlay shows it as a banner. Cleared on each new request / hide.
+    result_incomplete: Option<String>,
     /// Whether the current session should auto-copy results to clipboard.
     /// Set by ContentReady (true for double-tap, false for single-tap).
     auto_copy: bool,
@@ -209,6 +219,7 @@ impl StateMachine {
             streaming_text: String::new(),
             think_started: false,
             think_content: None,
+            result_incomplete: None,
             auto_copy: false,
             pinned: false,
             source: CaptureSource::Clipboard,
@@ -258,6 +269,11 @@ impl StateMachine {
         self.think_content.as_deref()
     }
 
+    /// Reason the current Result is partial (stream cut short), if any.
+    pub fn result_incomplete(&self) -> Option<&str> {
+        self.result_incomplete.as_deref()
+    }
+
     pub fn user_repositioned(&self) -> bool {
         self.user_repositioned
     }
@@ -303,8 +319,8 @@ impl StateMachine {
         let effects = match event {
             UiEvent::CaptureStarted { source } => self.on_capture_started(source),
             UiEvent::ContentReady { content, auto_copy } => self.on_content_ready(content, auto_copy),
-            UiEvent::WorkerResult { text, think_content, request_id } => {
-                self.on_worker_result(text, think_content, request_id)
+            UiEvent::WorkerResult { text, think_content, request_id, incomplete } => {
+                self.on_worker_result(text, think_content, request_id, incomplete)
             }
             UiEvent::ThinkStarted { request_id } => self.on_think_started(request_id),
             UiEvent::WorkerError {
@@ -474,7 +490,13 @@ impl StateMachine {
         vec![]
     }
 
-    fn on_worker_result(&mut self, text: String, think_content: Option<String>, request_id: u64) -> Vec<UiEffect> {
+    fn on_worker_result(
+        &mut self,
+        text: String,
+        think_content: Option<String>,
+        request_id: u64,
+        incomplete: Option<String>,
+    ) -> Vec<UiEffect> {
         if request_id != self.current_request_id {
             return vec![];
         }
@@ -484,6 +506,7 @@ impl StateMachine {
         self.streaming_text.clear();
         self.think_started = false;
         self.think_content = think_content.clone();
+        self.result_incomplete = incomplete;
         self.cache.insert(self.cache_key(), (text.clone(), think_content));
         self.state = OverlayState::Result(text.clone());
         // Auto-hide counts only focus held at or after entering this visible
@@ -526,6 +549,7 @@ impl StateMachine {
         self.streaming_text.clear();
         self.think_started = false;
         self.think_content = None;
+        self.result_incomplete = None;
         self.has_been_focused = false;
         self.is_focused = false;
         self.auto_copy = false;
@@ -593,6 +617,8 @@ impl StateMachine {
     /// returns [WriteClipboard, ResetAreas].
     fn apply_cached_result(&mut self, text: String, think_content: Option<String>) -> Vec<UiEffect> {
         self.think_content = think_content;
+        // Cached results carry no truncation state; clear any stale banner.
+        self.result_incomplete = None;
         self.state = OverlayState::Result(text.clone());
         let mut effects = Vec::new();
         if self.auto_copy {
@@ -877,8 +903,7 @@ mod tests {
         let effects = sm.handle(UiEvent::WorkerResult {
             text: "translated".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
 
         assert_eq!(*sm.state(), OverlayState::Result("translated".into()));
         assert!(effects.contains(&UiEffect::WriteClipboard("translated".into())));
@@ -912,8 +937,7 @@ mod tests {
         sm.handle(UiEvent::WorkerResult {
             text: "ok".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
 
         let effects = sm.handle(UiEvent::UserClose);
 
@@ -1016,8 +1040,7 @@ mod tests {
         sm.handle(UiEvent::WorkerResult {
             text: "ok".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
 
         let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Rephrase));
 
@@ -1066,8 +1089,7 @@ mod tests {
         let effects = sm.handle(UiEvent::WorkerResult {
             text: "stale".into(),
             think_content: None,
-            request_id: rid1,
-        });
+            request_id: rid1, incomplete: None });
 
         assert!(effects.is_empty());
         assert_eq!(*sm.state(), OverlayState::Processing);
@@ -1076,8 +1098,7 @@ mod tests {
         let effects = sm.handle(UiEvent::WorkerResult {
             text: "current".into(),
             think_content: None,
-            request_id: rid2,
-        });
+            request_id: rid2, incomplete: None });
 
         assert_eq!(*sm.state(), OverlayState::Result("current".into()));
         assert!(!effects.is_empty());
@@ -1133,8 +1154,7 @@ mod tests {
         sm.handle(UiEvent::WorkerResult {
             text: "ok".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
 
         sm.handle(UiEvent::UserClose);
 
@@ -1173,8 +1193,7 @@ mod tests {
         sm.handle(UiEvent::WorkerResult {
             text: "done".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
         sm.handle(UiEvent::FocusGained);
 
         let effects = sm.handle(UiEvent::FocusLost);
@@ -1233,8 +1252,7 @@ mod tests {
         sm.handle(UiEvent::WorkerResult {
             text: "done".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
         assert!(matches!(sm.state(), OverlayState::Result(_)));
 
         // User glances at the result, then leaves → overlay closes.
@@ -1258,8 +1276,7 @@ mod tests {
         sm.handle(UiEvent::WorkerResult {
             text: "done".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
 
         let effects = sm.handle(UiEvent::FocusLost);
         assert!(matches!(sm.state(), OverlayState::Result(_)));
@@ -1278,8 +1295,7 @@ mod tests {
         sm.handle(UiEvent::WorkerResult {
             text: "done".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
         assert!(matches!(sm.state(), OverlayState::Result(_)));
 
         let effects = sm.handle(UiEvent::FocusLost);
@@ -1318,7 +1334,7 @@ mod tests {
             auto_copy: false,
         });
         let rid = last_request_id(&effects);
-        sm.handle(UiEvent::WorkerResult { text: "translated".into(), think_content: None, request_id: rid });
+        sm.handle(UiEvent::WorkerResult { text: "translated".into(), think_content: None, request_id: rid, incomplete: None });
         sm.handle(UiEvent::FocusGained);
         assert!(!sm.pinned());
 
@@ -1336,7 +1352,7 @@ mod tests {
             auto_copy: true,
         });
         let rid = last_request_id(&effects);
-        sm.handle(UiEvent::WorkerResult { text: "translated".into(), think_content: None, request_id: rid });
+        sm.handle(UiEvent::WorkerResult { text: "translated".into(), think_content: None, request_id: rid, incomplete: None });
         sm.handle(UiEvent::FocusGained);
 
         let effects = sm.handle(UiEvent::FocusLost);
@@ -1354,8 +1370,7 @@ mod tests {
         sm.handle(UiEvent::WorkerResult {
             text: "ok".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
 
         // Now in Result state — cancel should do nothing.
         let effects = sm.handle(UiEvent::UserCancel);
@@ -1391,8 +1406,7 @@ mod tests {
         sm.handle(UiEvent::WorkerResult {
             text: "result".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
         assert!(sm.original_text().is_some());
 
         // Result -> Processing (mode switch)
@@ -1404,8 +1418,7 @@ mod tests {
         sm.handle(UiEvent::WorkerResult {
             text: "corrected".into(),
             think_content: None,
-            request_id: rid2,
-        });
+            request_id: rid2, incomplete: None });
 
         // Result -> Hidden
         sm.handle(UiEvent::UserClose);
@@ -1437,8 +1450,7 @@ mod tests {
         sm.handle(UiEvent::WorkerResult {
             text: "translated".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
         assert_eq!(*sm.state(), OverlayState::Result("translated".into()));
 
         let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Summarize));
@@ -1462,16 +1474,14 @@ mod tests {
         sm.handle(UiEvent::WorkerResult {
             text: "translated".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
         // Switch to Correct → Result
         let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Rephrase));
         let rid = last_request_id(&effects);
         sm.handle(UiEvent::WorkerResult {
             text: "corrected".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
         assert_eq!(*sm.state(), OverlayState::Result("corrected".into()));
 
         // Switch back to Translate: cache hit
@@ -1492,8 +1502,7 @@ mod tests {
         sm.handle(UiEvent::WorkerResult {
             text: "translated".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
         // Switch to Correct → Processing (in-flight)
         sm.handle(UiEvent::UserSwitchMode(ProcessMode::Rephrase));
         assert_eq!(*sm.state(), OverlayState::Processing);
@@ -1515,8 +1524,7 @@ mod tests {
         sm.handle(UiEvent::WorkerResult {
             text: "ok".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
         // Switch to Correct → Error
         let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Rephrase));
         let rid = last_request_id(&effects);
@@ -1541,8 +1549,7 @@ mod tests {
         sm.handle(UiEvent::WorkerResult {
             text: "translated".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
         // Cache now has Translate → "translated"
 
         // New content arrives → cache cleared, re-processes
@@ -1557,11 +1564,11 @@ mod tests {
         // Translate → cache "translated".
         let effects = start_processing(&mut sm, "hello");
         let rid = last_request_id(&effects);
-        sm.handle(UiEvent::WorkerResult { text: "translated".into(), think_content: None, request_id: rid });
+        sm.handle(UiEvent::WorkerResult { text: "translated".into(), think_content: None, request_id: rid, incomplete: None });
         // Rephrase → cache "rephrased".
         let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Rephrase));
         let rid = last_request_id(&effects);
-        sm.handle(UiEvent::WorkerResult { text: "rephrased".into(), think_content: None, request_id: rid });
+        sm.handle(UiEvent::WorkerResult { text: "rephrased".into(), think_content: None, request_id: rid, incomplete: None });
         // Back to Translate (cache hit).
         sm.handle(UiEvent::UserSwitchMode(ProcessMode::Translate));
         assert_eq!(*sm.state(), OverlayState::Result("translated".into()));
@@ -1574,7 +1581,7 @@ mod tests {
         });
         assert_eq!(*sm.state(), OverlayState::Processing);
         let rid = last_request_id(&effects);
-        sm.handle(UiEvent::WorkerResult { text: "translated2".into(), think_content: None, request_id: rid });
+        sm.handle(UiEvent::WorkerResult { text: "translated2".into(), think_content: None, request_id: rid, incomplete: None });
 
         // Switching to Rephrase is served from the preserved cache — no SendProcess.
         let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Rephrase));
@@ -1603,8 +1610,7 @@ mod tests {
         sm.handle(UiEvent::WorkerResult {
             text: "translated".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
 
         // Close overlay → cache cleared
         sm.handle(UiEvent::UserClose);
@@ -1626,7 +1632,7 @@ mod tests {
         // Text Summarize → Result, cached under the text key.
         let e = start_processing(&mut sm, "hello");
         let rid = last_request_id(&e);
-        sm.handle(UiEvent::WorkerResult { text: "text summary".into(), think_content: None, request_id: rid });
+        sm.handle(UiEvent::WorkerResult { text: "text summary".into(), think_content: None, request_id: rid, incomplete: None });
         let text_key = sm.cache_key();
 
         // New image-only content (stays Summarize) → distinct key.
@@ -1638,7 +1644,7 @@ mod tests {
         let image_key = sm.cache_key();
         assert_ne!(text_key, image_key, "image-only and text Summarize must key differently");
 
-        sm.handle(UiEvent::WorkerResult { text: "image summary".into(), think_content: None, request_id: rid });
+        sm.handle(UiEvent::WorkerResult { text: "image summary".into(), think_content: None, request_id: rid, incomplete: None });
         assert_eq!(*sm.state(), OverlayState::Result("image summary".into()));
     }
 
@@ -1652,8 +1658,7 @@ mod tests {
         sm.handle(UiEvent::WorkerResult {
             text: "v1".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
 
         // Retry: the cached "v1" must be evicted, so a new request is sent
         // (a cache hit would have replayed "v1" without SendProcess).
@@ -1666,8 +1671,7 @@ mod tests {
         sm.handle(UiEvent::WorkerResult {
             text: "v2".into(),
             think_content: None,
-            request_id: new_rid,
-        });
+            request_id: new_rid, incomplete: None });
         assert_eq!(*sm.state(), OverlayState::Result("v2".into()));
     }
 
@@ -1724,8 +1728,7 @@ mod tests {
         sm.handle(UiEvent::WorkerResult {
             text: "translated".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
 
         // Summarize result cached.
         let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Summarize));
@@ -1733,8 +1736,7 @@ mod tests {
         sm.handle(UiEvent::WorkerResult {
             text: "summary".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
 
         // Retry Summarize, complete it, then switch back to Translate:
         // the Translate cache entry must still be served without a request.
@@ -1743,8 +1745,7 @@ mod tests {
         sm.handle(UiEvent::WorkerResult {
             text: "summary v2".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
         let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Translate));
         assert_eq!(*sm.state(), OverlayState::Result("translated".into()));
         assert!(!effects.iter().any(|e| matches!(e, UiEffect::SendProcess { .. })));
@@ -1783,7 +1784,7 @@ mod tests {
         let rid = last_request_id(&effects);
 
         // Transition to Result.
-        sm.handle(UiEvent::WorkerResult { text: "done".into(), think_content: None, request_id: rid });
+        sm.handle(UiEvent::WorkerResult { text: "done".into(), think_content: None, request_id: rid, incomplete: None });
 
         // Delta arrives after Result — ignored.
         sm.handle(UiEvent::StreamDelta { text: "late".into(), request_id: rid });
@@ -1800,7 +1801,7 @@ mod tests {
         sm.handle(UiEvent::StreamDelta { text: "partial".into(), request_id: rid });
         assert_eq!(sm.streaming_text(), "partial");
 
-        sm.handle(UiEvent::WorkerResult { text: "done".into(), think_content: None, request_id: rid });
+        sm.handle(UiEvent::WorkerResult { text: "done".into(), think_content: None, request_id: rid, incomplete: None });
         assert_eq!(sm.streaming_text(), "");
     }
 
@@ -1950,8 +1951,7 @@ mod tests {
         sm.handle(UiEvent::WorkerResult {
             text: "done".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
         sm.handle(UiEvent::FocusGained);
         sm.handle(UiEvent::FocusLost);
         assert_eq!(*sm.state(), OverlayState::Hidden);
@@ -2056,8 +2056,7 @@ mod tests {
         sm.handle(UiEvent::WorkerResult {
             text: "ok".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
 
         let effects = sm.handle(UiEvent::UserChangeThinkingMode(ThinkingMode::Think));
         assert_eq!(*sm.state(), OverlayState::Processing);
@@ -2142,8 +2141,7 @@ mod tests {
         let effects = sm.handle(UiEvent::WorkerResult {
             text: "result".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
         assert_eq!(*sm.state(), OverlayState::Result("result".into()));
         assert!(!effects.iter().any(|e| matches!(e, UiEffect::WriteClipboard(_))));
     }
@@ -2160,8 +2158,7 @@ mod tests {
         sm.handle(UiEvent::WorkerResult {
             text: "translated".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
 
         // Switch mode → reprocess.
         let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Rephrase));
@@ -2169,8 +2166,7 @@ mod tests {
         sm.handle(UiEvent::WorkerResult {
             text: "rephrased".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
 
         // Switch back to Translate — cache hit.
         let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Translate));
@@ -2189,8 +2185,7 @@ mod tests {
         sm.handle(UiEvent::WorkerResult {
             text: "result".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
 
         let effects = sm.handle(UiEvent::UserCopy);
         assert!(effects.contains(&UiEffect::WriteClipboard("result".into())));
@@ -2220,8 +2215,7 @@ mod tests {
         sm.handle(UiEvent::WorkerResult {
             text: "result".into(),
             think_content: None,
-            request_id: rid,
-        });
+            request_id: rid, incomplete: None });
 
         let effects = sm.handle(UiEvent::UserPaste);
         assert!(effects.contains(&UiEffect::WriteClipboard("result".into())));
@@ -2326,7 +2320,7 @@ mod tests {
         // Build up a Result with cached content.
         let effects = start_processing(&mut sm, "hello");
         let rid = last_request_id(&effects);
-        sm.handle(UiEvent::WorkerResult { text: "translated".into(), think_content: None, request_id: rid });
+        sm.handle(UiEvent::WorkerResult { text: "translated".into(), think_content: None, request_id: rid, incomplete: None });
         assert!(sm.original_text().is_some());
 
         // A fresh double-tap capture drops the prior content (so a capture failure
@@ -2382,7 +2376,7 @@ mod tests {
         let mut sm = new_sm();
         let effects = start_processing(&mut sm, "hello"); // double-tap → unpinned
         let rid = last_request_id(&effects);
-        sm.handle(UiEvent::WorkerResult { text: "out".into(), think_content: None, request_id: rid });
+        sm.handle(UiEvent::WorkerResult { text: "out".into(), think_content: None, request_id: rid, incomplete: None });
         sm.handle(UiEvent::FocusGained);
         sm.handle(UiEvent::UserTogglePin); // pin it
         assert!(sm.pinned());
@@ -2400,7 +2394,7 @@ mod tests {
             auto_copy: false,
         });
         let rid = last_request_id(&effects);
-        sm.handle(UiEvent::WorkerResult { text: "out".into(), think_content: None, request_id: rid });
+        sm.handle(UiEvent::WorkerResult { text: "out".into(), think_content: None, request_id: rid, incomplete: None });
         sm.handle(UiEvent::FocusGained);
         assert!(!sm.pinned(), "single-tap result starts unpinned by default");
 
