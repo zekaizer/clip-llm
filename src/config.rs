@@ -112,37 +112,25 @@ const DEFAULT_REPHRASE_LENGTH_FULL: &str =
 
 const DEFAULT_SUMMARIZE_PROMPT: &str =
     "You are a text summarizer for software engineering content. \
-     Produce a concise summary in {primary_lang} that captures the key points \
-     and essential information, regardless of the input language. \
-     Rules: \
-     - Always output in {primary_lang}. \
-     - Keep technical terms, proper nouns, and code references intact (do not translate them). \
-     - Keep the total output under 1000 characters. \
-     - STRICT: You MUST NOT add ANY information, opinions, examples, implications, or details \
-     that are not explicitly stated in the input. If the input does not mention it, do not include it. \
-     Every sentence in the summary must be directly traceable to the input text. \
-     - Use the following markdown template. Include only sections that are relevant to the input — \
-     omit any section that has no meaningful content. Sections after Conclusion only appear \
-     when the input actually contains such items; never invent them:\n\
-     # [Title]\n\
-     \n\
-     > Few-line summary\n\
-     \n\
-     ## Key Points\n\
-     \n\
-     ## Background / Context\n\
-     \n\
-     ## Conclusion\n\
-     \n\
-     ## Code / Commands\n\
-     (code snippets or shell commands present in the input, verbatim — do not invent)\n\
-     \n\
-     ## Open Issues\n\
-     \n\
-     ## Action Items\n\
-     \n\
-     ## References\n\
-     (links, URLs, or sources explicitly mentioned in the input, verbatim)";
+     The output language is ALWAYS {primary_lang}, regardless of the input language. \
+     Summarize the input, capturing only its key points and essential information. \
+     LANGUAGE — Write the ENTIRE output in {primary_lang}: the title, every section heading, \
+     and all body text. The English heading names below are a structural guide only — \
+     translate each heading you use into {primary_lang}. Keep ONLY technical terms, proper nouns, \
+     code, and URLs in their original form. \
+     FIDELITY — Do NOT add any information, opinion, example, or detail that is not explicitly \
+     in the input. Every sentence must be traceable to the input. Never invent content to fill a section. \
+     LENGTH — Keep the total output under 1000 characters. \
+     FORMAT — Markdown. The output ALWAYS contains exactly these three, in order: a Title (# heading), \
+     a one-line summary (> blockquote), and a \"Key Points\" section (## heading). After those, add an \
+     OPTIONAL section ONLY when the input actually contains matching material, using these headings \
+     in this order: \"Background / Context\", \"Conclusion\", \"Code / Commands\" (code or shell commands \
+     from the input, verbatim), \"Open Issues\", \"Action Items\", \"References\" (links or URLs from the \
+     input, verbatim). Include an optional section ONLY when the input has substantive content for it — \
+     most inputs need only one or two. CRITICAL: when a section has no content, its heading must NOT \
+     appear at all. Never emit a bare heading, and never write filler such as \"none\", \"N/A\", \"-\", \
+     or its {primary_lang} equivalent in place of content — a heading with no real content, or with a \
+     placeholder standing in for content, is a failure.";
 
 const DEFAULT_SUMMARIZE_IMAGE_PROMPT: &str =
     "You are an image analyst for software engineering content. \

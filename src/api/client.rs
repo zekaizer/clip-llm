@@ -730,10 +730,10 @@ impl LlmClient {
             chat_template_kwargs: template_kwargs,
         };
 
-        if tracing::enabled!(tracing::Level::TRACE)
+        if tracing::enabled!(tracing::Level::DEBUG)
             && let Ok(json) = serde_json::to_string_pretty(&body)
         {
-            trace!("LLM request body:\n{json}");
+            debug!("LLM request body:\n{json}");
         }
         let client = if stream { &inner.streaming_client } else { &inner.client };
         let mut req = inner.apply_auth(client.post(&inner.endpoint).json(&body));
@@ -793,14 +793,14 @@ impl LlmClient {
             .build_and_send(content, mode, rephrase_params, thinking_mode, false)
             .await?;
         let text = resp.text().await?;
-        if tracing::enabled!(tracing::Level::TRACE) {
+        if tracing::enabled!(tracing::Level::DEBUG) {
             if let Ok(pretty) = serde_json::from_str::<serde_json::Value>(&text) {
-                trace!(
+                debug!(
                     "LLM response:\n{}",
                     serde_json::to_string_pretty(&pretty).unwrap_or_default()
                 );
             } else {
-                trace!("LLM response (raw):\n{text}");
+                debug!("LLM response (raw):\n{text}");
             }
         }
         let chat: ChatResponse = serde_json::from_str(&text).map_err(|_| ApiError::EmptyResponse)?;
