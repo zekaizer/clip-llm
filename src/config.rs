@@ -200,8 +200,16 @@ struct ApiConfig {
 struct GenerationConfig {
     /// Sampling temperature.
     temperature: Option<f64>,
-    /// Maximum tokens to generate per response.
+    /// Maximum tokens to generate per response. When `token_budget` is set this
+    /// is treated as an upper ceiling and the effective value is reduced per
+    /// request to fit the budget.
     max_tokens: Option<u32>,
+    /// Total per-request token budget (prompt + completion), e.g. a provider's
+    /// tokens-per-minute cap. When set, `max_tokens` is computed dynamically as
+    /// `budget - estimated_prompt_tokens - margin`, clamped to `max_tokens`, so
+    /// short inputs get a large output budget and long inputs shrink it instead
+    /// of hitting a "request too large" rejection.
+    token_budget: Option<u32>,
     /// Per-request timeout in seconds (also the streaming connect timeout).
     request_timeout_secs: Option<u64>,
     /// Maximum wait in seconds for response headers on streaming requests
@@ -369,6 +377,13 @@ impl Config {
     /// Configured max output tokens, if any (`[generation].max_tokens`).
     pub fn generation_max_tokens(&self) -> Option<u32> {
         self.generation.max_tokens
+    }
+
+    /// Configured total token budget (prompt + completion), if any
+    /// (`[generation].token_budget`). When set, the client computes per-request
+    /// `max_tokens` dynamically to fit this budget.
+    pub fn generation_token_budget(&self) -> Option<u32> {
+        self.generation.token_budget
     }
 
     /// Configured per-request timeout in seconds, if any

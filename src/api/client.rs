@@ -23,6 +23,43 @@ const INITIAL_RESPONSE_TIMEOUT_SECS: u64 = 10;
 /// Transient-failure retries per request (total attempts = MAX_RETRIES + 1).
 const MAX_RETRIES: u32 = 1;
 const RETRY_DELAY: Duration = Duration::from_millis(500);
+/// Dynamic-budget mode: floor for the computed output budget (never request
+/// fewer than this many completion tokens, even for a near-full prompt).
+const MIN_OUTPUT_TOKENS: u32 = 512;
+/// Dynamic-budget mode: tokens held back from the budget for tokenization
+/// variance and per-message/JSON framing the estimate does not count.
+const BUDGET_MARGIN: u32 = 256;
+
+/// Conservative token estimate used only for `token_budget` clamping. It
+/// deliberately OVER-estimates so the computed `max_tokens` never pushes
+/// `prompt + max_tokens` past the budget (which would be rejected): Hangul
+/// counts as ~1 token/char (qwen/most BPEs are denser, so this is safe) and
+/// other non-whitespace as ~1 token per 3 chars. Whitespace is ignored.
+fn estimate_prompt_tokens(text: &str) -> u32 {
+    let mut hangul: u32 = 0;
+    let mut other: u32 = 0;
+    for c in text.chars() {
+        if ('\u{AC00}'..='\u{D7A3}').contains(&c) || ('\u{1100}'..='\u{11FF}').contains(&c) {
+            hangul += 1;
+        } else if !c.is_whitespace() {
+            other += 1;
+        }
+    }
+    hangul + other / 3
+}
+
+/// Compute the effective `max_tokens` for a request. Without a budget this is
+/// just the configured ceiling; with one, it is `budget - prompt_est - margin`
+/// clamped into `[min(MIN_OUTPUT_TOKENS, ceiling), ceiling]`.
+fn effective_max_tokens(ceiling: u32, budget: Option<u32>, prompt_est: u32) -> u32 {
+    match budget {
+        None => ceiling,
+        Some(budget) => {
+            let avail = budget.saturating_sub(prompt_est).saturating_sub(BUDGET_MARGIN);
+            avail.clamp(MIN_OUTPUT_TOKENS.min(ceiling), ceiling)
+        }
+    }
+}
 
 // -- Request types (OpenAI chat completions schema) --
 
@@ -227,6 +264,7 @@ struct LlmClientInner {
     custom_headers: Vec<(String, String)>,
     temperature: f64,
     max_tokens: u32,
+    token_budget: Option<u32>,
     initial_response_timeout: Duration,
     supports_vision: OnceCell<bool>,
     thinking_control: OnceCell<ThinkingControlMethod>,
@@ -337,6 +375,7 @@ impl LlmClient {
         // Generation parameters: config file > built-in default (no env var).
         let temperature = config.generation_temperature().unwrap_or(TEMPERATURE);
         let max_tokens = config.generation_max_tokens().unwrap_or(MAX_TOKENS);
+        let token_budget = config.generation_token_budget();
         let timeout = Duration::from_secs(
             config
                 .generation_request_timeout_secs()
@@ -372,6 +411,7 @@ impl LlmClient {
             custom_headers,
             temperature,
             max_tokens,
+            token_budget,
             initial_response_timeout,
             supports_vision: OnceCell::new(),
             thinking_control: OnceCell::new(),
@@ -712,6 +752,21 @@ impl LlmClient {
             base_prompt
         };
 
+        // With a token_budget, shrink max_tokens to keep (prompt + completion)
+        // under it. Image inputs aren't text-estimable, so they keep the ceiling.
+        let budget = if use_images { None } else { inner.token_budget };
+        let prompt_est = budget.map_or(0, |_| {
+            estimate_prompt_tokens(&sys_prompt)
+                + estimate_prompt_tokens(content.text.as_deref().unwrap_or(""))
+        });
+        let max_tokens = effective_max_tokens(inner.max_tokens, budget, prompt_est);
+        if budget.is_some() {
+            debug!(
+                "dynamic max_tokens={max_tokens} (budget={budget:?}, prompt_est={prompt_est}, ceiling={})",
+                inner.max_tokens
+            );
+        }
+
         let body = ChatRequest {
             model: &inner.model,
             messages: vec![
@@ -725,7 +780,7 @@ impl LlmClient {
                 },
             ],
             temperature: inner.temperature,
-            max_tokens: inner.max_tokens,
+            max_tokens,
             stream: if stream { Some(true) } else { None },
             chat_template_kwargs: template_kwargs,
         };
@@ -859,6 +914,34 @@ mod tests {
         assert_eq!(resolve_setting(Some(String::new()), Some("cfg"), "def"), "cfg");
         // an empty config string is treated as unset and falls through to default.
         assert_eq!(resolve_setting(Some(String::new()), Some(""), "def"), "def");
+    }
+
+    #[test]
+    fn estimate_prompt_tokens_overestimates() {
+        // Whitespace is free; Hangul counts ~1/char, other non-space ~1/3 chars.
+        assert_eq!(estimate_prompt_tokens(""), 0);
+        assert_eq!(estimate_prompt_tokens("   \n\t "), 0);
+        // 6 latin letters -> 6/3 = 2.
+        assert_eq!(estimate_prompt_tokens("abcdef"), 2);
+        // 3 Hangul syllables -> 3.
+        assert_eq!(estimate_prompt_tokens("가나다"), 3);
+        // Mixed: 3 Hangul + "abc" (3/3=1) = 4; the space is ignored.
+        assert_eq!(estimate_prompt_tokens("가나다 abc"), 4);
+    }
+
+    #[test]
+    fn effective_max_tokens_clamps_to_budget() {
+        // No budget -> ceiling unchanged.
+        assert_eq!(effective_max_tokens(8000, None, 5000), 8000);
+        // Budget with small prompt -> budget - prompt - margin, under the ceiling.
+        // 6000 - 300 - 256 = 5444.
+        assert_eq!(effective_max_tokens(40960, Some(6000), 300), 5444);
+        // Ceiling caps the result when the budget would allow more.
+        assert_eq!(effective_max_tokens(4000, Some(6000), 300), 4000);
+        // A near-full prompt floors at MIN_OUTPUT_TOKENS rather than going to 0.
+        assert_eq!(effective_max_tokens(40960, Some(6000), 5900), MIN_OUTPUT_TOKENS);
+        // Floor is itself capped by a tiny ceiling.
+        assert_eq!(effective_max_tokens(128, Some(6000), 5900), 128);
     }
 
     #[test]

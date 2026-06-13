@@ -31,7 +31,12 @@ streaming = true                          # set false to disable SSE (like CLIP_
 # back to the built-in default shown below when omitted.
 [generation]
 temperature          = 0.1     # sampling temperature (0.0–2.0)
-max_tokens           = 16384   # max tokens generated per response
+max_tokens           = 16384   # max output tokens per response (a ceiling when token_budget is set)
+# token_budget       = 6000    # optional: total (prompt + completion) cap, e.g. a provider's
+                               # tokens-per-minute limit. When set, max_tokens is computed per
+                               # request as budget - estimated_prompt_tokens - margin (clamped to
+                               # max_tokens), so short inputs get a large reply budget and long
+                               # inputs shrink it instead of being rejected as "request too large".
 request_timeout_secs = 30      # per-request timeout (also the streaming connect timeout)
 initial_response_timeout_secs = 10  # streaming only: max wait for response headers before retry
 
