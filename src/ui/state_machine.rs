@@ -486,11 +486,11 @@ impl StateMachine {
         self.think_content = think_content.clone();
         self.cache.insert(self.cache_key(), (text.clone(), think_content));
         self.state = OverlayState::Result(text.clone());
-        // Auto-hide counts only focus held at or after completion (#61): focus
-        // held through completion arms the next FocusLost to hide; a detached
-        // completion stays visible until a fresh focus → unfocus cycle. Unlike
-        // on_worker_error, which always demands a fresh cycle so the user can
-        // read the message — keep the two paths asymmetric.
+        // Auto-hide counts only focus held at or after entering this visible
+        // state (#61, #62): focus held through the transition arms the next
+        // FocusLost to hide; a detached transition stays visible until a fresh
+        // focus → unfocus cycle. on_worker_error / on_clipboard_error apply the
+        // same rule — Result and Error are unified.
         self.has_been_focused = self.is_focused;
         let mut effects = Vec::new();
         if self.auto_copy {
@@ -509,10 +509,12 @@ impl StateMachine {
         }
         self.think_started = false;
         self.state = OverlayState::Error(message);
-        // Reset focus tracking so the newly shown error window doesn't
-        // immediately auto-hide from a stale has_been_focused flag carried
-        // over from the Processing phase (mirrors on_clipboard_error).
-        self.has_been_focused = false;
+        // Same auto-hide rule as on_worker_result (#62): if focus was held
+        // through the failure the user has seen the error, so the next
+        // FocusLost dismisses it; a detached error stays until the user
+        // focuses it and leaves. Resetting to false here instead would strand
+        // a focused error open (no fresh FocusGained edge ever re-arms it).
+        self.has_been_focused = self.is_focused;
         vec![UiEffect::ResetAreas]
     }
 
@@ -659,9 +661,12 @@ impl StateMachine {
     fn on_clipboard_error(&mut self, msg: String) -> Vec<UiEffect> {
         // Must NOT emit WriteClipboard to avoid infinite recursion.
         self.state = OverlayState::Error(msg);
-        // Reset focus tracking so the newly shown error window doesn't
-        // immediately auto-hide from a stale has_been_focused flag.
-        self.has_been_focused = false;
+        // Unified auto-hide rule (#62): track focus at entry. The ShowWindow
+        // below activates the overlay (capture used ShowWindowNoActivate, so
+        // is_focused is false here), and the resulting FocusGained re-arms
+        // has_been_focused — so the user sees the error, then a FocusLost
+        // dismisses it.
+        self.has_been_focused = self.is_focused;
         vec![UiEffect::ResetAreas, UiEffect::ShowWindow]
     }
 
@@ -1283,10 +1288,10 @@ mod tests {
     }
 
     #[test]
-    fn error_with_focus_held_through_completion_needs_fresh_focus_cycle() {
-        // Deliberate asymmetry with Result (#61): an error always demands a
-        // fresh focus → unfocus cycle so the user can read the message, even
-        // when focus was held through the failure.
+    fn error_with_focus_held_through_failure_hides_on_focus_loss() {
+        // #62: Error is unified with Result — focus held through the failure
+        // means the user has seen the error, so the next FocusLost dismisses
+        // it (no fresh focus cycle required).
         let mut sm = new_sm();
         start_processing(&mut sm, "hello");
         sm.handle(UiEvent::FocusGained);
@@ -1296,13 +1301,8 @@ mod tests {
             message: "boom".into(),
             request_id: rid,
         });
-
-        let effects = sm.handle(UiEvent::FocusLost);
         assert!(matches!(sm.state(), OverlayState::Error(_)));
-        assert!(effects.is_empty());
 
-        // Fresh cycle dismisses it.
-        sm.handle(UiEvent::FocusGained);
         let effects = sm.handle(UiEvent::FocusLost);
         assert_eq!(*sm.state(), OverlayState::Hidden);
         assert!(effects.contains(&UiEffect::HideWindow));
@@ -1936,10 +1936,15 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_error_resets_has_been_focused() {
+    fn clipboard_error_detached_requires_fresh_focus_cycle() {
+        // #62: a clipboard error entered without focus (capture uses
+        // ShowWindowNoActivate, so is_focused is false at entry) is detached —
+        // a bare FocusLost is ignored until the user focuses it and leaves.
+        // (In the real app the ShowWindow effect activates the window, firing
+        // FocusGained, which re-arms has_been_focused; the pure state machine
+        // doesn't simulate that, so it tests the detached entry directly.)
         let mut sm = new_sm();
-        // Simulate a previous session where focus was gained (Result state —
-        // Processing no longer auto-hides on focus loss, #17).
+        // Simulate a previous session where focus was gained, then lost → Hidden.
         start_processing(&mut sm, "hello");
         let rid = sm.current_request_id();
         sm.handle(UiEvent::WorkerResult {
@@ -1948,38 +1953,53 @@ mod tests {
             request_id: rid,
         });
         sm.handle(UiEvent::FocusGained);
-
-        // Focus lost → Hidden.
         sm.handle(UiEvent::FocusLost);
         assert_eq!(*sm.state(), OverlayState::Hidden);
 
-        // Clipboard error shows error overlay.
+        // Clipboard error shows the error overlay, detached (no focus yet).
         sm.handle(UiEvent::ClipboardError("read failed".into()));
         assert_eq!(*sm.state(), OverlayState::Error("read failed".into()));
 
-        // FocusLost should be ignored because has_been_focused was reset.
+        // Bare FocusLost is ignored — the user has not focused the error yet.
         let effects = sm.handle(UiEvent::FocusLost);
         assert!(effects.is_empty());
         assert_eq!(*sm.state(), OverlayState::Error("read failed".into()));
+
+        // A fresh focus → unfocus cycle dismisses it.
+        sm.handle(UiEvent::FocusGained);
+        let effects = sm.handle(UiEvent::FocusLost);
+        assert_eq!(*sm.state(), OverlayState::Hidden);
+        assert!(effects.contains(&UiEffect::HideWindow));
     }
 
     #[test]
-    fn worker_error_resets_has_been_focused() {
+    fn worker_error_detached_requires_fresh_focus_cycle() {
+        // #62: an error that lands while the user is in another app (detached,
+        // is_focused == false) stays visible until the user focuses it and
+        // leaves — mirrors the detached-Result behavior. Contrast with
+        // error_with_focus_held_through_failure_hides_on_focus_loss.
         let mut sm = new_sm();
         let effects = start_processing(&mut sm, "hello");
         let rid = last_request_id(&effects);
-        // Focus was gained during the Processing phase.
+        // Focus was gained during Processing, then lost (user went elsewhere,
+        // request stays alive per #17).
         sm.handle(UiEvent::FocusGained);
+        sm.handle(UiEvent::FocusLost);
 
-        // Worker error transitions to Error.
+        // Error lands while detached.
         sm.handle(UiEvent::WorkerError { message: "boom".into(), request_id: rid });
         assert_eq!(*sm.state(), OverlayState::Error("boom".into()));
 
-        // FocusLost must be ignored because has_been_focused was reset, so the
-        // user can read the error before it auto-hides.
+        // Re-fired FocusLost is ignored — user has not seen the error yet.
         let effects = sm.handle(UiEvent::FocusLost);
         assert!(effects.is_empty());
         assert_eq!(*sm.state(), OverlayState::Error("boom".into()));
+
+        // Fresh focus → unfocus dismisses it.
+        sm.handle(UiEvent::FocusGained);
+        let effects = sm.handle(UiEvent::FocusLost);
+        assert_eq!(*sm.state(), OverlayState::Hidden);
+        assert!(effects.contains(&UiEffect::HideWindow));
     }
 
     // === Thinking mode tests ===
