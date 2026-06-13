@@ -206,7 +206,7 @@ impl ProcessMode {
         let config = crate::config::get();
         let primary = config.primary_lang();
         let secondary = config.secondary_lang();
-        match self {
+        let mode_prompt = match self {
             Self::Translate => {
                 crate::config::substitute(config.translate_prompt(), primary, secondary)
             }
@@ -217,6 +217,15 @@ impl ProcessMode {
             Self::Summarize => {
                 crate::config::substitute(config.summarize_prompt(), primary, secondary)
             }
+        };
+        // Prepend the shared preamble (`[prompt].preamble`) that applies to every
+        // mode, if configured. Empty/absent leaves the mode prompt unchanged.
+        match config.prompt_preamble() {
+            Some(preamble) => format!(
+                "{}\n\n{mode_prompt}",
+                crate::config::substitute(preamble, primary, secondary)
+            ),
+            None => mode_prompt,
         }
     }
 }
