@@ -274,7 +274,7 @@ async fn run_streaming(
                             finish_reason = Some(reason);
                         }
                         SseEvent::Done => {
-                            trace!("SSE stream done, full content ({} chars):\n{full_content}", full_content.len());
+                            debug!("SSE stream done, full content ({} chars):\n{full_content}", full_content.len());
                             // "length" means generation hit max_tokens — the
                             // reply is truncated even though the stream ended
                             // normally with [DONE] (#60).
