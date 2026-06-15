@@ -150,12 +150,19 @@ struct StreamChoice {
 #[derive(Deserialize)]
 struct Delta {
     content: Option<String>,
+    /// Reasoning/thinking tokens delivered in a separate field by servers that
+    /// run a reasoning parser (e.g. vLLM `--reasoning-parser` for Qwen3), rather
+    /// than inline `<think>` tags inside `content`.
+    reasoning_content: Option<String>,
 }
 
 /// Parsed SSE event from a streaming response.
 #[derive(Debug, PartialEq)]
 pub(crate) enum SseEvent {
     Content(String),
+    /// A reasoning/thinking token from a server-side reasoning parser
+    /// (separate `reasoning_content` field). Precedes the answer's `Content`.
+    Reasoning(String),
     /// The server reported why generation stopped (e.g. "stop", "length").
     Finish(String),
     Done,
@@ -227,6 +234,13 @@ impl SseParser {
             if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data)
                 && let Some(choice) = chunk.choices.first()
             {
+                // Reasoning tokens arrive before the answer; emit first so they
+                // wrap correctly as a leading think block downstream.
+                if let Some(reasoning) = &choice.delta.reasoning_content
+                    && !reasoning.is_empty()
+                {
+                    events.push(SseEvent::Reasoning(reasoning.clone()));
+                }
                 if let Some(content) = &choice.delta.content
                     && !content.is_empty()
                 {
@@ -1026,6 +1040,24 @@ mod tests {
         let events = p.feed(b"\n");
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], SseEvent::Content(s) if s == "hello"));
+    }
+
+    #[test]
+    fn sse_reasoning_event() {
+        // Qwen3/vLLM reasoning parser: thinking arrives in `reasoning_content`.
+        let mut p = SseParser::new();
+        let events =
+            p.feed(b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"}}]}\n");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Reasoning(s) if s == "thinking"));
+    }
+
+    #[test]
+    fn sse_reasoning_empty_not_emitted() {
+        let mut p = SseParser::new();
+        let events =
+            p.feed(b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"\"}}]}\n");
+        assert!(events.is_empty());
     }
 
     #[test]
