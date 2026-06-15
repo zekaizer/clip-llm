@@ -149,8 +149,11 @@ struct StreamChoice {
 struct Delta {
     content: Option<String>,
     /// Reasoning/thinking tokens delivered in a separate field by servers that
-    /// run a reasoning parser (e.g. vLLM `--reasoning-parser` for Qwen3), rather
-    /// than inline `<think>` tags inside `content`.
+    /// run a reasoning parser, rather than inline `<think>` tags inside
+    /// `content`. The field name varies by provider: vLLM, DeepSeek, and
+    /// llama.cpp use `reasoning_content`; Ollama and OpenRouter use `reasoning`
+    /// (an exact alias). Accept both.
+    #[serde(alias = "reasoning")]
     reasoning_content: Option<String>,
 }
 
@@ -1102,6 +1105,17 @@ mod tests {
             p.feed(b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"}}]}\n");
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], SseEvent::Reasoning(s) if s == "thinking"));
+    }
+
+    #[test]
+    fn sse_reasoning_alias_field_parsed() {
+        // Ollama and OpenRouter deliver reasoning under `reasoning`, an exact
+        // alias of vLLM/DeepSeek's `reasoning_content`.
+        let mut p = SseParser::new();
+        let events =
+            p.feed(b"data: {\"choices\":[{\"delta\":{\"reasoning\":\"hmm\"}}]}\n");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Reasoning(s) if s == "hmm"));
     }
 
     #[test]
