@@ -341,22 +341,62 @@ async fn run_streaming(
                 }
             }
             Ok(None) => {
-                // The Done arm returns, so reaching here means the connection
-                // closed before `data: [DONE]` arrived — the reply is truncated
-                // (proxy timeout, server restart, network reset, #60). Show the
-                // partial with a banner instead of dropping it (#65).
+                // Body ended. First flush any final line the server sent without
+                // a trailing newline (a [DONE] or finish chunk feed() couldn't
+                // parse). A flushed [DONE] finalizes exactly like the inline arm.
+                for event in parser.flush() {
+                    if handle_stream_event(
+                        event, &mut full_content, &mut reasoning_open, &mut filter,
+                        &mut think_notified, &mut finish_reason, &resp_tx, request_id,
+                    ) {
+                        if reasoning_open {
+                            full_content.push_str("</think>");
+                        }
+                        let incomplete = (finish_reason.as_deref() == Some("length"))
+                            .then(|| friendly_api_error(&ApiError::Truncated));
+                        let r = make_complete_response(
+                            &full_content, mode, request_id, "stream complete (flushed)", incomplete,
+                        );
+                        let _ = resp_tx.send(r);
+                        return;
+                    }
+                }
                 if reasoning_open {
                     full_content.push_str("</think>");
                 }
-                warn!(
-                    "worker: stream closed without [DONE] after {} chars — treating as truncated",
-                    full_content.len()
-                );
-                let r = make_complete_response(
-                    &full_content, mode, request_id, "stream closed early",
-                    Some("The connection closed before the reply finished. Try again.".to_string()),
-                );
-                let _ = resp_tx.send(r);
+                // No [DONE], but the server may have already reported why it
+                // stopped. finish_reason="stop" => a clean completion whose
+                // [DONE] line never arrived (proxy dropped it / server closed
+                // early); treat it as success. Only a missing or non-stop reason
+                // is a genuinely truncated connection (proxy/server cut mid-reply,
+                // #60) — show the partial with a banner instead of dropping it (#65).
+                match finish_reason.as_deref() {
+                    Some("stop") => {
+                        debug!(
+                            "stream EOF with finish_reason=stop but no [DONE] ({} chars) — treating as complete",
+                            full_content.len()
+                        );
+                        let r = make_complete_response(
+                            &full_content, mode, request_id, "stream complete (no DONE)", None,
+                        );
+                        let _ = resp_tx.send(r);
+                    }
+                    other => {
+                        warn!(
+                            "worker: stream closed without [DONE] after {} chars (finish_reason={other:?}) — treating as truncated",
+                            full_content.len()
+                        );
+                        let incomplete = if other == Some("length") {
+                            friendly_api_error(&ApiError::Truncated)
+                        } else {
+                            "The connection closed before the reply finished. Try again.".to_string()
+                        };
+                        let r = make_complete_response(
+                            &full_content, mode, request_id, "stream closed early", Some(incomplete),
+                        );
+                        let _ = resp_tx.send(r);
+                    }
+                }
                 return;
             }
             Err(e) => {

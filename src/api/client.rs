@@ -254,6 +254,19 @@ impl SseParser {
 
         events
     }
+
+    /// Process a final line left in the buffer without a trailing newline.
+    /// Call once at end-of-stream: a server may send a last `data: [DONE]` or
+    /// finish chunk and then close the connection without the terminating
+    /// `\n`, leaving that line unparsed by [`feed`] (which is newline-driven).
+    pub fn flush(&mut self) -> Vec<SseEvent> {
+        if self.buffer.is_empty() {
+            return Vec::new();
+        }
+        // Append the missing newline so the line-based logic in `feed` runs.
+        self.buffer.push('\n');
+        self.feed(&[])
+    }
 }
 
 // -- Client --
@@ -1209,6 +1222,37 @@ mod tests {
         let events = p.feed(suffix);
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], SseEvent::Content(s) if s == "가"));
+    }
+
+    // flush() recovers a final line the server sent without a trailing newline.
+    #[test]
+    fn sse_flush_recovers_trailing_done_without_newline() {
+        let mut p = SseParser::new();
+        assert!(p.feed(b"data: [DONE]").is_empty()); // no newline yet
+        let events = p.flush();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Done));
+    }
+
+    #[test]
+    fn sse_flush_recovers_trailing_finish_without_newline() {
+        let mut p = SseParser::new();
+        assert!(
+            p.feed(br#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#.as_ref())
+                .is_empty()
+        );
+        let events = p.flush();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Finish(r) if r == "stop"));
+    }
+
+    #[test]
+    fn sse_flush_empty_buffer_is_noop() {
+        let mut p = SseParser::new();
+        assert!(p.flush().is_empty());
+        // After a clean newline-terminated feed, nothing is left to flush.
+        let _ = p.feed(b"data: [DONE]\n");
+        assert!(p.flush().is_empty());
     }
 
     // --- MessageContent serialization tests ---
