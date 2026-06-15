@@ -247,6 +247,12 @@ pub enum ApiError {
     #[error("http request failed: {0}")]
     Http(#[from] reqwest::Error),
 
+    #[error(
+        "required setting not configured: {0} \
+         (set it in config.toml under [api], or the matching CLIP_LLM_* environment variable)"
+    )]
+    MissingConfig(&'static str),
+
     #[error("no response headers within {0}s")]
     InitialResponseTimeout(u64),
 

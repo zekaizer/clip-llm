@@ -10,9 +10,7 @@ use tracing::{debug, info, trace, warn};
 use crate::{ApiError, ClipboardContent, ProcessMode, RephraseParams, ThinkingMode};
 
 // Defaults — overridable via environment variables.
-const DEFAULT_API_ENDPOINT: &str = "http://localhost:8000/v1";
 const CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
-const DEFAULT_MODEL_NAME: &str = "MiniMaxAI/MiniMax-M2.5";
 const TEMPERATURE: f64 = 0.1;
 const MAX_TOKENS: u32 = 16384;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
@@ -329,14 +327,19 @@ impl LlmClientInner {
     }
 }
 
-/// Resolves a string setting by precedence: env var > config file > built-in
-/// default. An empty string from either source is treated as unset so it falls
-/// through rather than winning with a blank value.
-fn resolve_setting(env_value: Option<String>, config_value: Option<&str>, default: &str) -> String {
+/// Resolves a REQUIRED setting by precedence: env var > config file. An empty
+/// string from either source is treated as unset. Returns `MissingConfig(name)`
+/// when neither provides a value, so the caller fails fast at startup instead of
+/// falling back to a guessed default.
+fn require_setting(
+    env_value: Option<String>,
+    config_value: Option<&str>,
+    name: &'static str,
+) -> Result<String, ApiError> {
     env_value
         .filter(|s| !s.is_empty())
         .or_else(|| config_value.filter(|s| !s.is_empty()).map(str::to_owned))
-        .unwrap_or_else(|| default.to_owned())
+        .ok_or(ApiError::MissingConfig(name))
 }
 
 /// Whether a request failure is transient and worth a retry: connect errors,
@@ -372,22 +375,27 @@ impl LlmClient {
         // Precedence for every setting: env var > config file > built-in default.
         let config = crate::config::get();
 
-        let base = resolve_setting(
+        // endpoint, model, and api_key are REQUIRED with no built-in default:
+        // each is deployment-specific (an internal vLLM server, its model name,
+        // and its access token), so a guessed fallback would silently mislead.
+        // When any is unset, fail fast so the app logs a clear error at startup
+        // and exits instead of talking to the wrong server.
+        let base = require_setting(
             env::var("CLIP_LLM_API_ENDPOINT").ok(),
             config.api_endpoint(),
-            DEFAULT_API_ENDPOINT,
-        );
+            "api.endpoint",
+        )?;
         let endpoint = format!("{}{}", base.trim_end_matches('/'), CHAT_COMPLETIONS_PATH);
-        let model = resolve_setting(
+        let model = require_setting(
             env::var("CLIP_LLM_MODEL").ok(),
             config.api_model(),
-            DEFAULT_MODEL_NAME,
-        );
-        // Empty string = unset, so it never produces a blank Bearer token.
-        let api_key = env::var("CLIP_LLM_API_KEY")
-            .ok()
-            .filter(|k| !k.is_empty())
-            .or_else(|| config.api_key().filter(|k| !k.is_empty()).map(str::to_owned));
+            "api.model",
+        )?;
+        let api_key = Some(require_setting(
+            env::var("CLIP_LLM_API_KEY").ok(),
+            config.api_key(),
+            "api.api_key",
+        )?);
         // Empty env var = unset, so it does not silently suppress configured headers.
         let custom_headers: Vec<(String, String)> =
             match env::var("CLIP_LLM_CUSTOM_HEADERS").ok().filter(|s| !s.is_empty()) {
@@ -945,20 +953,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_setting_precedence() {
-        // env var wins over config and default.
+    fn require_setting_precedence_and_missing() {
+        // env var wins over config.
         assert_eq!(
-            resolve_setting(Some("env".to_string()), Some("cfg"), "def"),
+            require_setting(Some("env".to_string()), Some("cfg"), "x").unwrap(),
             "env"
         );
         // config wins when env is absent.
-        assert_eq!(resolve_setting(None, Some("cfg"), "def"), "cfg");
-        // default when neither is set.
-        assert_eq!(resolve_setting(None, None, "def"), "def");
+        assert_eq!(require_setting(None, Some("cfg"), "x").unwrap(), "cfg");
         // an empty env string is treated as unset and falls through to config.
-        assert_eq!(resolve_setting(Some(String::new()), Some("cfg"), "def"), "cfg");
-        // an empty config string is treated as unset and falls through to default.
-        assert_eq!(resolve_setting(Some(String::new()), Some(""), "def"), "def");
+        assert_eq!(
+            require_setting(Some(String::new()), Some("cfg"), "x").unwrap(),
+            "cfg"
+        );
+        // neither set (or both empty) -> MissingConfig carrying the field name.
+        assert!(matches!(
+            require_setting(None, None, "api.endpoint"),
+            Err(ApiError::MissingConfig("api.endpoint"))
+        ));
+        assert!(matches!(
+            require_setting(Some(String::new()), Some(""), "api.model"),
+            Err(ApiError::MissingConfig("api.model"))
+        ));
     }
 
     #[test]

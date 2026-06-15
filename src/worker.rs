@@ -108,6 +108,11 @@ fn friendly_status_message(status: reqwest::StatusCode) -> String {
 fn friendly_api_error(e: &ApiError) -> String {
     match e {
         ApiError::Http(inner) => friendly_reqwest_error(inner),
+        // Reaches the user only if a client is built lazily post-startup;
+        // normally a missing required setting fails fast at startup instead.
+        ApiError::MissingConfig(name) => {
+            format!("Required setting not configured: {name}. Set it in config.toml.")
+        }
         ApiError::InitialResponseTimeout(_) => {
             "The server is slow to respond. Try again in a moment.".to_string()
         }
