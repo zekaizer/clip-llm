@@ -428,7 +428,25 @@ impl LlmClient {
 
         let client = Client::builder().timeout(timeout).build()?;
         // Streaming client: connect timeout only, no total body timeout.
-        let streaming_client = Client::builder().connect_timeout(timeout).build()?;
+        //
+        // pool_max_idle_per_host(0): never reuse a pooled keep-alive connection
+        // for streaming. This daemon fires one request per hotkey press, so a
+        // pooled connection sits idle between uses and the server/proxy often
+        // closes it by its own keep-alive timeout. Reusing such a half-closed
+        // connection makes the first request after an idle gap die mid-stream
+        // (then a retry on a fresh connection succeeds) — a frequent Windows
+        // symptom. A fresh TCP+TLS handshake per request is negligible here.
+        let mut streaming_builder = Client::builder()
+            .connect_timeout(timeout)
+            .pool_max_idle_per_host(0);
+        // Diagnostic escape hatch: force HTTP/1.1 for the streaming connection.
+        // Some HTTP/2 proxies mishandle SSE and end the stream after the first
+        // frame; CLIP_LLM_STREAM_HTTP1=1 isolates that case.
+        if env::var("CLIP_LLM_STREAM_HTTP1").is_ok() {
+            info!("streaming client forced to HTTP/1.1 (CLIP_LLM_STREAM_HTTP1)");
+            streaming_builder = streaming_builder.http1_only();
+        }
+        let streaming_client = streaming_builder.build()?;
         Ok(Self(Arc::new(LlmClientInner {
             client,
             streaming_client,

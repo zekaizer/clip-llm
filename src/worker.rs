@@ -280,12 +280,28 @@ async fn run_streaming(
         }
     };
 
+    // Diagnostic: the negotiated HTTP version and framing pin down a proxy that
+    // mishandles SSE (HTTP/2 early END_STREAM, response buffering, missing
+    // chunked transfer) versus the server itself.
+    debug!(
+        "stream response opened: version={:?}, status={}, content_type={:?}, transfer_encoding={:?}, connection={:?}",
+        resp.version(),
+        resp.status().as_u16(),
+        resp.headers().get(reqwest::header::CONTENT_TYPE),
+        resp.headers().get(reqwest::header::TRANSFER_ENCODING),
+        resp.headers().get(reqwest::header::CONNECTION),
+    );
+
     let mut parser = SseParser::new();
     let mut filter = ThinkBlockFilter::new();
     let mut full_content = String::new();
     let mut reasoning_open = false;
     let mut think_notified = false;
     let mut finish_reason: Option<String> = None;
+    // Diagnostic counters: how much arrived before any early close, so the logs
+    // distinguish "died after the first frame" from a genuine mid-reply cut.
+    let mut chunk_count: u32 = 0;
+    let mut byte_count: usize = 0;
 
     loop {
         let chunk = tokio::select! {
@@ -293,7 +309,7 @@ async fn run_streaming(
                 Ok(chunk) => chunk,
                 Err(_elapsed) => {
                     warn!(
-                        "worker: stream idle for {}s — treating as stalled",
+                        "worker: stream idle for {}s after {chunk_count} chunks/{byte_count} bytes — treating as stalled",
                         STREAM_IDLE_TIMEOUT.as_secs()
                     );
                     // Keep whatever arrived before the stall (#65).
@@ -316,7 +332,9 @@ async fn run_streaming(
 
         match chunk {
             Ok(Some(bytes)) => {
-                trace!("SSE raw chunk ({} bytes):\n{}", bytes.len(), String::from_utf8_lossy(&bytes));
+                chunk_count += 1;
+                byte_count += bytes.len();
+                trace!("SSE raw chunk #{chunk_count} ({} bytes):\n{}", bytes.len(), String::from_utf8_lossy(&bytes));
                 for event in parser.feed(&bytes) {
                     let done = handle_stream_event(
                         event, &mut full_content, &mut reasoning_open, &mut filter,
@@ -383,7 +401,7 @@ async fn run_streaming(
                     }
                     other => {
                         warn!(
-                            "worker: stream closed without [DONE] after {} chars (finish_reason={other:?}) — treating as truncated",
+                            "worker: stream closed without [DONE] after {chunk_count} chunks/{byte_count} bytes, {} chars (finish_reason={other:?}) — treating as truncated",
                             full_content.len()
                         );
                         let incomplete = if other == Some("length") {
@@ -403,7 +421,7 @@ async fn run_streaming(
                 if reasoning_open {
                     full_content.push_str("</think>");
                 }
-                error!("worker: stream chunk error: {e}");
+                error!("worker: stream chunk error after {chunk_count} chunks/{byte_count} bytes: {e}");
                 let r = make_complete_response(
                     &full_content, mode, request_id, "stream error",
                     Some(friendly_reqwest_error(&e)),
