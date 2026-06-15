@@ -163,6 +163,67 @@ fn make_complete_response(
     }
 }
 
+/// Process one parsed SSE event into streaming state, emitting `ThinkStarted`
+/// and `StreamDelta` responses as needed. Returns `true` when a terminal
+/// `[DONE]` marker was seen (the caller then finalizes the response).
+///
+/// Reasoning tokens (servers running a reasoning parser — e.g. vLLM for Qwen3 —
+/// deliver them in a separate `reasoning_content` field, ahead of the answer)
+/// are wrapped back into a leading `<think>…</think>` block inside
+/// `full_content`. This keeps the existing think-block extraction, stripping,
+/// and partial-recovery paths working with a single uniform representation.
+#[allow(clippy::too_many_arguments)]
+fn handle_stream_event(
+    event: SseEvent,
+    full_content: &mut String,
+    reasoning_open: &mut bool,
+    filter: &mut ThinkBlockFilter,
+    think_notified: &mut bool,
+    finish_reason: &mut Option<String>,
+    resp_tx: &mpsc::Sender<WorkerResponse>,
+    request_id: u64,
+) -> bool {
+    match event {
+        SseEvent::Reasoning(token) => {
+            if !*reasoning_open {
+                full_content.push_str("<think>");
+                *reasoning_open = true;
+            }
+            full_content.push_str(&token);
+            if !*think_notified {
+                *think_notified = true;
+                let _ = resp_tx.send(WorkerResponse::ThinkStarted { request_id });
+            }
+        }
+        SseEvent::Content(token) => {
+            // First answer token after reasoning closes the think block.
+            if *reasoning_open {
+                full_content.push_str("</think>");
+                *reasoning_open = false;
+            }
+            full_content.push_str(&token);
+            let visible = filter.feed(&token);
+            // Inline `<think>` path (no reasoning parser): notify on first
+            // think content the filter detects.
+            if filter.has_think_content() && !*think_notified {
+                *think_notified = true;
+                let _ = resp_tx.send(WorkerResponse::ThinkStarted { request_id });
+            }
+            if !visible.is_empty() {
+                let _ = resp_tx.send(WorkerResponse::StreamDelta {
+                    text: visible,
+                    request_id,
+                });
+            }
+        }
+        SseEvent::Finish(reason) => {
+            *finish_reason = Some(reason);
+        }
+        SseEvent::Done => return true,
+    }
+    false
+}
+
 /// Non-streaming LLM request: single request/response with cancellation support.
 async fn run_non_streaming(
     llm: LlmClient,
@@ -219,11 +280,28 @@ async fn run_streaming(
         }
     };
 
+    // Diagnostic: the negotiated HTTP version and framing pin down a proxy that
+    // mishandles SSE (HTTP/2 early END_STREAM, response buffering, missing
+    // chunked transfer) versus the server itself.
+    debug!(
+        "stream response opened: version={:?}, status={}, content_type={:?}, transfer_encoding={:?}, connection={:?}",
+        resp.version(),
+        resp.status().as_u16(),
+        resp.headers().get(reqwest::header::CONTENT_TYPE),
+        resp.headers().get(reqwest::header::TRANSFER_ENCODING),
+        resp.headers().get(reqwest::header::CONNECTION),
+    );
+
     let mut parser = SseParser::new();
     let mut filter = ThinkBlockFilter::new();
     let mut full_content = String::new();
+    let mut reasoning_open = false;
     let mut think_notified = false;
     let mut finish_reason: Option<String> = None;
+    // Diagnostic counters: how much arrived before any early close, so the logs
+    // distinguish "died after the first frame" from a genuine mid-reply cut.
+    let mut chunk_count: u32 = 0;
+    let mut byte_count: usize = 0;
 
     loop {
         let chunk = tokio::select! {
@@ -231,10 +309,13 @@ async fn run_streaming(
                 Ok(chunk) => chunk,
                 Err(_elapsed) => {
                     warn!(
-                        "worker: stream idle for {}s — treating as stalled",
+                        "worker: stream idle for {}s after {chunk_count} chunks/{byte_count} bytes — treating as stalled",
                         STREAM_IDLE_TIMEOUT.as_secs()
                     );
                     // Keep whatever arrived before the stall (#65).
+                    if reasoning_open {
+                        full_content.push_str("</think>");
+                    }
                     let r = make_complete_response(
                         &full_content, mode, request_id, "stream stalled",
                         Some("The server stopped responding mid-reply. Try again.".to_string()),
@@ -251,65 +332,96 @@ async fn run_streaming(
 
         match chunk {
             Ok(Some(bytes)) => {
-                trace!("SSE raw chunk ({} bytes):\n{}", bytes.len(), String::from_utf8_lossy(&bytes));
+                chunk_count += 1;
+                byte_count += bytes.len();
+                trace!("SSE raw chunk #{chunk_count} ({} bytes):\n{}", bytes.len(), String::from_utf8_lossy(&bytes));
                 for event in parser.feed(&bytes) {
-                    match event {
-                        SseEvent::Content(token) => {
-                            trace!("SSE token: {token:?}");
-                            full_content.push_str(&token);
-                            let visible = filter.feed(&token);
-                            if filter.has_think_content() && !think_notified {
-                                think_notified = true;
-                                let _ = resp_tx.send(WorkerResponse::ThinkStarted { request_id });
-                            }
-                            if !visible.is_empty() {
-                                let _ = resp_tx.send(WorkerResponse::StreamDelta {
-                                    text: visible,
-                                    request_id,
-                                });
-                            }
+                    let done = handle_stream_event(
+                        event, &mut full_content, &mut reasoning_open, &mut filter,
+                        &mut think_notified, &mut finish_reason, &resp_tx, request_id,
+                    );
+                    if done {
+                        // [DONE] received. "length" means generation hit
+                        // max_tokens — show the partial with a truncation banner
+                        // instead of dropping it (#60, #65).
+                        if reasoning_open {
+                            full_content.push_str("</think>");
                         }
-                        SseEvent::Finish(reason) => {
-                            trace!("SSE finish_reason: {reason}");
-                            finish_reason = Some(reason);
-                        }
-                        SseEvent::Done => {
-                            debug!("SSE stream done, full content ({} chars):\n{full_content}", full_content.len());
-                            // "length" means generation hit max_tokens — the
-                            // reply is truncated even though the stream ended
-                            // normally with [DONE] (#60).
-                            // "length" → cut off at max_tokens. Show the partial
-                            // reply with a truncation banner instead of dropping
-                            // it (#65).
-                            let incomplete = (finish_reason.as_deref() == Some("length"))
-                                .then(|| friendly_api_error(&ApiError::Truncated));
-                            let r = make_complete_response(
-                                &full_content, mode, request_id, "stream complete", incomplete,
-                            );
-                            let _ = resp_tx.send(r);
-                            return;
-                        }
+                        debug!("SSE stream done, full content ({} chars):\n{full_content}", full_content.len());
+                        let incomplete = (finish_reason.as_deref() == Some("length"))
+                            .then(|| friendly_api_error(&ApiError::Truncated));
+                        let r = make_complete_response(
+                            &full_content, mode, request_id, "stream complete", incomplete,
+                        );
+                        let _ = resp_tx.send(r);
+                        return;
                     }
                 }
             }
             Ok(None) => {
-                // The Done arm returns, so reaching here means the connection
-                // closed before `data: [DONE]` arrived — the reply is truncated
-                // (proxy timeout, server restart, network reset, #60). Show the
-                // partial with a banner instead of dropping it (#65).
-                warn!(
-                    "worker: stream closed without [DONE] after {} chars — treating as truncated",
-                    full_content.len()
-                );
-                let r = make_complete_response(
-                    &full_content, mode, request_id, "stream closed early",
-                    Some("The connection closed before the reply finished. Try again.".to_string()),
-                );
-                let _ = resp_tx.send(r);
+                // Body ended. First flush any final line the server sent without
+                // a trailing newline (a [DONE] or finish chunk feed() couldn't
+                // parse). A flushed [DONE] finalizes exactly like the inline arm.
+                for event in parser.flush() {
+                    if handle_stream_event(
+                        event, &mut full_content, &mut reasoning_open, &mut filter,
+                        &mut think_notified, &mut finish_reason, &resp_tx, request_id,
+                    ) {
+                        if reasoning_open {
+                            full_content.push_str("</think>");
+                        }
+                        let incomplete = (finish_reason.as_deref() == Some("length"))
+                            .then(|| friendly_api_error(&ApiError::Truncated));
+                        let r = make_complete_response(
+                            &full_content, mode, request_id, "stream complete (flushed)", incomplete,
+                        );
+                        let _ = resp_tx.send(r);
+                        return;
+                    }
+                }
+                if reasoning_open {
+                    full_content.push_str("</think>");
+                }
+                // No [DONE], but the server may have already reported why it
+                // stopped. finish_reason="stop" => a clean completion whose
+                // [DONE] line never arrived (proxy dropped it / server closed
+                // early); treat it as success. Only a missing or non-stop reason
+                // is a genuinely truncated connection (proxy/server cut mid-reply,
+                // #60) — show the partial with a banner instead of dropping it (#65).
+                match finish_reason.as_deref() {
+                    Some("stop") => {
+                        debug!(
+                            "stream EOF with finish_reason=stop but no [DONE] ({} chars) — treating as complete",
+                            full_content.len()
+                        );
+                        let r = make_complete_response(
+                            &full_content, mode, request_id, "stream complete (no DONE)", None,
+                        );
+                        let _ = resp_tx.send(r);
+                    }
+                    other => {
+                        warn!(
+                            "worker: stream closed without [DONE] after {chunk_count} chunks/{byte_count} bytes, {} chars (finish_reason={other:?}) — treating as truncated",
+                            full_content.len()
+                        );
+                        let incomplete = if other == Some("length") {
+                            friendly_api_error(&ApiError::Truncated)
+                        } else {
+                            "The connection closed before the reply finished. Try again.".to_string()
+                        };
+                        let r = make_complete_response(
+                            &full_content, mode, request_id, "stream closed early", Some(incomplete),
+                        );
+                        let _ = resp_tx.send(r);
+                    }
+                }
                 return;
             }
             Err(e) => {
-                error!("worker: stream chunk error: {e}");
+                if reasoning_open {
+                    full_content.push_str("</think>");
+                }
+                error!("worker: stream chunk error after {chunk_count} chunks/{byte_count} bytes: {e}");
                 let r = make_complete_response(
                     &full_content, mode, request_id, "stream error",
                     Some(friendly_reqwest_error(&e)),
@@ -606,6 +718,79 @@ mod tests {
         );
         let msg = assert_error(&r, 8);
         assert_eq!(msg, "cut off");
+    }
+
+    // -- handle_stream_event tests --
+
+    use crate::api::client::SseEvent;
+    use crate::api::response::{extract_first_think_content, strip_think_blocks};
+
+    #[test]
+    fn handle_stream_event_wraps_reasoning_as_think() {
+        let (tx, rx) = mpsc::channel();
+        let mut full = String::new();
+        let mut reasoning_open = false;
+        let mut filter = ThinkBlockFilter::new();
+        let mut notified = false;
+        let mut finish = None;
+
+        // Reasoning token opens a think block and fires ThinkStarted once.
+        let done = handle_stream_event(
+            SseEvent::Reasoning("why".into()), &mut full, &mut reasoning_open,
+            &mut filter, &mut notified, &mut finish, &tx, 1,
+        );
+        assert!(!done);
+        assert!(reasoning_open);
+        assert!(notified);
+        assert_eq!(full, "<think>why");
+
+        // The answer token closes the think block and is streamed as visible.
+        handle_stream_event(
+            SseEvent::Content("answer".into()), &mut full, &mut reasoning_open,
+            &mut filter, &mut notified, &mut finish, &tx, 1,
+        );
+        assert!(!reasoning_open);
+        assert_eq!(full, "<think>why</think>answer");
+
+        // The reconstructed block extracts/strips exactly like an inline one.
+        assert_eq!(strip_think_blocks(&full), "answer");
+        assert_eq!(extract_first_think_content(&full).as_deref(), Some("why"));
+
+        assert!(matches!(rx.try_recv().unwrap(), WorkerResponse::ThinkStarted { .. }));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            WorkerResponse::StreamDelta { text, .. } if text == "answer"
+        ));
+    }
+
+    #[test]
+    fn handle_stream_event_done_signals_completion() {
+        let (tx, _rx) = mpsc::channel();
+        let mut full = String::new();
+        let mut reasoning_open = false;
+        let mut filter = ThinkBlockFilter::new();
+        let mut notified = false;
+        let mut finish = None;
+        let done = handle_stream_event(
+            SseEvent::Done, &mut full, &mut reasoning_open, &mut filter,
+            &mut notified, &mut finish, &tx, 1,
+        );
+        assert!(done);
+    }
+
+    #[test]
+    fn handle_stream_event_finish_records_reason() {
+        let (tx, _rx) = mpsc::channel();
+        let mut full = String::new();
+        let mut reasoning_open = false;
+        let mut filter = ThinkBlockFilter::new();
+        let mut notified = false;
+        let mut finish = None;
+        handle_stream_event(
+            SseEvent::Finish("length".into()), &mut full, &mut reasoning_open,
+            &mut filter, &mut notified, &mut finish, &tx, 1,
+        );
+        assert_eq!(finish.as_deref(), Some("length"));
     }
 
     // -- friendly_status_message tests --

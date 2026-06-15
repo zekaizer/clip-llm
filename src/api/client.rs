@@ -150,12 +150,19 @@ struct StreamChoice {
 #[derive(Deserialize)]
 struct Delta {
     content: Option<String>,
+    /// Reasoning/thinking tokens delivered in a separate field by servers that
+    /// run a reasoning parser (e.g. vLLM `--reasoning-parser` for Qwen3), rather
+    /// than inline `<think>` tags inside `content`.
+    reasoning_content: Option<String>,
 }
 
 /// Parsed SSE event from a streaming response.
 #[derive(Debug, PartialEq)]
 pub(crate) enum SseEvent {
     Content(String),
+    /// A reasoning/thinking token from a server-side reasoning parser
+    /// (separate `reasoning_content` field). Precedes the answer's `Content`.
+    Reasoning(String),
     /// The server reported why generation stopped (e.g. "stop", "length").
     Finish(String),
     Done,
@@ -227,6 +234,13 @@ impl SseParser {
             if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data)
                 && let Some(choice) = chunk.choices.first()
             {
+                // Reasoning tokens arrive before the answer; emit first so they
+                // wrap correctly as a leading think block downstream.
+                if let Some(reasoning) = &choice.delta.reasoning_content
+                    && !reasoning.is_empty()
+                {
+                    events.push(SseEvent::Reasoning(reasoning.clone()));
+                }
                 if let Some(content) = &choice.delta.content
                     && !content.is_empty()
                 {
@@ -239,6 +253,19 @@ impl SseParser {
         }
 
         events
+    }
+
+    /// Process a final line left in the buffer without a trailing newline.
+    /// Call once at end-of-stream: a server may send a last `data: [DONE]` or
+    /// finish chunk and then close the connection without the terminating
+    /// `\n`, leaving that line unparsed by [`feed`] (which is newline-driven).
+    pub fn flush(&mut self) -> Vec<SseEvent> {
+        if self.buffer.is_empty() {
+            return Vec::new();
+        }
+        // Append the missing newline so the line-based logic in `feed` runs.
+        self.buffer.push('\n');
+        self.feed(&[])
     }
 }
 
@@ -401,7 +428,25 @@ impl LlmClient {
 
         let client = Client::builder().timeout(timeout).build()?;
         // Streaming client: connect timeout only, no total body timeout.
-        let streaming_client = Client::builder().connect_timeout(timeout).build()?;
+        //
+        // pool_max_idle_per_host(0): never reuse a pooled keep-alive connection
+        // for streaming. This daemon fires one request per hotkey press, so a
+        // pooled connection sits idle between uses and the server/proxy often
+        // closes it by its own keep-alive timeout. Reusing such a half-closed
+        // connection makes the first request after an idle gap die mid-stream
+        // (then a retry on a fresh connection succeeds) — a frequent Windows
+        // symptom. A fresh TCP+TLS handshake per request is negligible here.
+        let mut streaming_builder = Client::builder()
+            .connect_timeout(timeout)
+            .pool_max_idle_per_host(0);
+        // Diagnostic escape hatch: force HTTP/1.1 for the streaming connection.
+        // Some HTTP/2 proxies mishandle SSE and end the stream after the first
+        // frame; CLIP_LLM_STREAM_HTTP1=1 isolates that case.
+        if env::var("CLIP_LLM_STREAM_HTTP1").is_ok() {
+            info!("streaming client forced to HTTP/1.1 (CLIP_LLM_STREAM_HTTP1)");
+            streaming_builder = streaming_builder.http1_only();
+        }
+        let streaming_client = streaming_builder.build()?;
         Ok(Self(Arc::new(LlmClientInner {
             client,
             streaming_client,
@@ -1029,6 +1074,24 @@ mod tests {
     }
 
     #[test]
+    fn sse_reasoning_event() {
+        // Qwen3/vLLM reasoning parser: thinking arrives in `reasoning_content`.
+        let mut p = SseParser::new();
+        let events =
+            p.feed(b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"}}]}\n");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Reasoning(s) if s == "thinking"));
+    }
+
+    #[test]
+    fn sse_reasoning_empty_not_emitted() {
+        let mut p = SseParser::new();
+        let events =
+            p.feed(b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"\"}}]}\n");
+        assert!(events.is_empty());
+    }
+
+    #[test]
     fn sse_done_event() {
         let mut p = SseParser::new();
         let events = p.feed(b"data: [DONE]\n");
@@ -1177,6 +1240,37 @@ mod tests {
         let events = p.feed(suffix);
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], SseEvent::Content(s) if s == "가"));
+    }
+
+    // flush() recovers a final line the server sent without a trailing newline.
+    #[test]
+    fn sse_flush_recovers_trailing_done_without_newline() {
+        let mut p = SseParser::new();
+        assert!(p.feed(b"data: [DONE]").is_empty()); // no newline yet
+        let events = p.flush();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Done));
+    }
+
+    #[test]
+    fn sse_flush_recovers_trailing_finish_without_newline() {
+        let mut p = SseParser::new();
+        assert!(
+            p.feed(br#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#.as_ref())
+                .is_empty()
+        );
+        let events = p.flush();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Finish(r) if r == "stop"));
+    }
+
+    #[test]
+    fn sse_flush_empty_buffer_is_noop() {
+        let mut p = SseParser::new();
+        assert!(p.flush().is_empty());
+        // After a clean newline-terminated feed, nothing is left to flush.
+        let _ = p.feed(b"data: [DONE]\n");
+        assert!(p.flush().is_empty());
     }
 
     // --- MessageContent serialization tests ---
