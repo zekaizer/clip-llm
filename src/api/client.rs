@@ -220,9 +220,14 @@ impl SseParser {
             let line = self.buffer[..pos].trim_end_matches('\r').to_string();
             self.buffer = self.buffer[pos + 1..].to_string();
 
-            let Some(data) = line.strip_prefix("data: ") else {
+            // SSE spec: a field line is `field:value` with an OPTIONAL single
+            // space after the colon ("data: x" and "data:x" are equivalent).
+            // Accepting only "data: " would silently drop every event if a
+            // server or proxy emits the no-space form.
+            let Some(data) = line.strip_prefix("data:") else {
                 continue;
             };
+            let data = data.strip_prefix(' ').unwrap_or(data);
 
             if data == "[DONE]" {
                 events.push(SseEvent::Done);
@@ -1173,6 +1178,30 @@ mod tests {
         assert!(events.is_empty()); // incomplete line
         let events = p.feed(b"\n");
         assert!(events.is_empty()); // no content field
+    }
+
+    // SSE allows `data:` with no space after the colon; events must still parse.
+    #[test]
+    fn sse_data_without_space_parsed() {
+        let mut p = SseParser::new();
+        let events = p.feed(b"data:{\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Content(s) if s == "x"));
+        // [DONE] terminator without the space is also recognized.
+        let events = p.feed(b"data:[DONE]\n");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Done));
+    }
+
+    // Only the FIRST space after the colon is the optional separator; a second
+    // leading space is part of the data value.
+    #[test]
+    fn sse_data_preserves_second_leading_space() {
+        let mut p = SseParser::new();
+        // Two spaces after the colon -> value retains one leading space, so this
+        // is not the bare "[DONE]" token and parses as (failed) JSON -> ignored.
+        let events = p.feed(b"data:  [DONE]\n");
+        assert!(events.is_empty());
     }
 
     #[test]
