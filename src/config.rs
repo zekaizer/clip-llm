@@ -611,43 +611,133 @@ pub fn candidate_path() -> Option<PathBuf> {
     Some(env::current_exe().ok()?.parent()?.join(CONFIG_FILENAME))
 }
 
-/// Starter template written by [`ensure_config_file`]. Every key is commented
-/// out so the built-in defaults — notably the rich prompts — stay active until
-/// the user opts in (config.example.toml ships simplified sample prompts that
-/// would silently degrade output if copied verbatim).
-const STARTER_TEMPLATE: &str = "\
-# clip-llm configuration
-#
-# Every key is optional — omitted keys keep their built-in defaults.
-# Changes apply on the next app start (no hot-reload yet).
-# Full schema with prompt examples: config.example.toml in the repository,
-# https://github.com/zekaizer/clip-llm/blob/main/config.example.toml
+/// Builds the starter config written by [`ensure_config_file`] when no config
+/// file exists yet. The three REQUIRED keys (api.endpoint / api.model /
+/// api.api_key — no built-in defaults) are emitted uncommented with empty values
+/// so it is obvious they must be filled in; every other key is commented out
+/// with its ACTUAL built-in default (prompt blocks generated from the same
+/// constants the app uses), so uncommenting a line reproduces current behavior
+/// exactly (unlike config.example.toml's simplified sample prompts).
+fn starter_template() -> String {
+    // A commented `# key = "value"` line, value TOML-escaped, optional trailing note.
+    fn s(key: &str, value: &str, note: &str) -> String {
+        let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+        if note.is_empty() {
+            format!("# {key} = \"{escaped}\"\n")
+        } else {
+            format!("# {key} = \"{escaped}\"   # {note}\n")
+        }
+    }
+    // A commented line for a non-string value (number/bool), optional trailing note.
+    fn r(key: &str, value: &str, note: &str) -> String {
+        if note.is_empty() {
+            format!("# {key} = {value}\n")
+        } else {
+            format!("# {key} = {value}   # {note}\n")
+        }
+    }
 
-# [api]
-# endpoint  = \"http://localhost:8000/v1\"   # CLIP_LLM_API_ENDPOINT
-# model     = \"MiniMaxAI/MiniMax-M2.5\"     # CLIP_LLM_MODEL
-# api_key   = \"...\"                        # CLIP_LLM_API_KEY
-# streaming = true
+    let mut t = String::new();
+    t.push_str(
+        "# clip-llm configuration\n\
+         #\n\
+         # api.endpoint, api.model, and api.api_key are REQUIRED (no defaults) — the\n\
+         # app logs an error and exits at startup until all three are set. Fill them\n\
+         # in below. Every other key is optional and shown commented with its actual\n\
+         # built-in default; uncomment a line to override it. Changes apply on the\n\
+         # next app start (no hot-reload yet).\n\
+         # Full schema/examples: config.example.toml in the repository,\n\
+         # https://github.com/zekaizer/clip-llm/blob/main/config.example.toml\n\
+         #\n\
+         # Placeholders substituted at runtime: {primary_lang}, {secondary_lang}\n\
+         # (and {style}, {length} inside [rephrase].base).\n\n",
+    );
 
-# [generation]
-# temperature = 0.1
-# max_tokens = 16384
-# request_timeout_secs = 30
-# initial_response_timeout_secs = 10
+    // [api] — the three required keys are uncommented (empty = unset = startup
+    // error); env vars still win over these when set.
+    t.push_str("[api]\n");
+    t.push_str("endpoint = \"\"   # REQUIRED — vLLM base URL, e.g. http://host:8000/v1 (or CLIP_LLM_API_ENDPOINT)\n");
+    t.push_str("model    = \"\"   # REQUIRED — model name served by the endpoint (or CLIP_LLM_MODEL)\n");
+    t.push_str("api_key  = \"\"   # REQUIRED — access token; use any non-empty value if the server needs none (or CLIP_LLM_API_KEY)\n");
+    t.push_str(&r("streaming", "true", "false disables SSE (like CLIP_LLM_NO_STREAM)"));
+    t.push('\n');
 
-# [hotkey]
-# double_tap_timeout_ms = 350
+    // [api.headers] — custom HTTP headers (like CLIP_LLM_CUSTOM_HEADERS).
+    t.push_str("# [api.headers]\n");
+    t.push_str("# X-Dep-Ticket = \"abc\"\n");
+    t.push_str("# User-Id = \"u1\"\n\n");
 
-# [ui]
-# single_tap_pinned = false
-# double_tap_pinned = false
+    // [generation] — no env-var equivalent.
+    t.push_str("# [generation]\n");
+    t.push_str(&r("temperature", "0.1", "sampling temperature (0.0–2.0)"));
+    t.push_str(&r("max_tokens", "16384", "max output tokens (a ceiling when token_budget is set)"));
+    t.push_str(&r("token_budget", "6000", "optional: total (prompt+completion) cap; max_tokens is computed per request to fit it"));
+    t.push_str(&r("request_timeout_secs", "30", "per-request timeout (also the streaming connect timeout)"));
+    t.push_str(&r("initial_response_timeout_secs", "10", "streaming only: max wait for response headers before retry"));
+    t.push('\n');
 
-# [languages]
-# primary   = \"Korean\"
-# secondary = \"English\"
-";
+    // [telemetry] — opt-in remote log/trace shipping (off unless url is set).
+    t.push_str("# [telemetry]\n");
+    t.push_str(&s("url", "http://192.168.1.15:9428", "VictoriaLogs base URL — presence enables shipping"));
+    t.push_str(&s("level", "info", "trace|debug|info|warn|error (trace/debug may include clipboard text)"));
+    t.push_str(&r("batch_max", "200", "max records coalesced per POST"));
+    t.push('\n');
 
-/// Returns the config file path, writing the commented [`STARTER_TEMPLATE`]
+    // [hotkey]
+    t.push_str("# [hotkey]\n");
+    t.push_str(&r("double_tap_timeout_ms", "350", "single/double-tap detection window (lower = snappier)"));
+    t.push('\n');
+
+    // [ui] — *_pinned: result starts pinned (stays open on focus loss).
+    t.push_str("# [ui]\n");
+    t.push_str(&r("single_tap_pinned", "false", "single-tap result is not auto-copied — set true to avoid losing it"));
+    t.push_str(&r("double_tap_pinned", "false", ""));
+    t.push('\n');
+
+    // [languages] — substituted into {primary_lang} / {secondary_lang}.
+    t.push_str("# [languages]\n");
+    t.push_str(&s("primary", "Korean", ""));
+    t.push_str(&s("secondary", "English", ""));
+    t.push('\n');
+
+    // [prompt] — shared preamble prepended to every mode (set "" to disable).
+    t.push_str("# [prompt]\n");
+    t.push_str(&s("preamble", DEFAULT_PROMPT_PREAMBLE, ""));
+    t.push('\n');
+
+    // [translate]
+    t.push_str("# [translate]\n");
+    t.push_str(&s("prompt", DEFAULT_TRANSLATE_PROMPT, ""));
+    t.push('\n');
+
+    // [rephrase] — base template; {style}/{length} filled from the tables below.
+    t.push_str("# [rephrase]\n");
+    t.push_str(&s("base", DEFAULT_REPHRASE_BASE, ""));
+    t.push('\n');
+    t.push_str("# [rephrase.style]\n");
+    t.push_str(&s("correct", DEFAULT_REPHRASE_STYLE_CORRECT, ""));
+    t.push_str(&s("casual", DEFAULT_REPHRASE_STYLE_CASUAL, ""));
+    t.push_str(&s("formal", DEFAULT_REPHRASE_STYLE_FORMAL, ""));
+    t.push_str(&s("business", DEFAULT_REPHRASE_STYLE_BUSINESS, ""));
+    t.push_str(&s("technical", DEFAULT_REPHRASE_STYLE_TECHNICAL, ""));
+    t.push('\n');
+    t.push_str("# [rephrase.length]   # values carry no surrounding space; `same` is intentionally empty\n");
+    t.push_str(&s("terse", DEFAULT_REPHRASE_LENGTH_TERSE, ""));
+    t.push_str(&s("brief", DEFAULT_REPHRASE_LENGTH_BRIEF, ""));
+    t.push_str(&s("same", DEFAULT_REPHRASE_LENGTH_SAME, ""));
+    t.push_str(&s("detailed", DEFAULT_REPHRASE_LENGTH_DETAILED, ""));
+    t.push_str(&s("full", DEFAULT_REPHRASE_LENGTH_FULL, ""));
+    t.push('\n');
+
+    // [summarize] — `prompt` for text, `image_prompt` for image-only clipboards.
+    t.push_str("# [summarize]\n");
+    t.push_str(&s("prompt", DEFAULT_SUMMARIZE_PROMPT, ""));
+    t.push_str(&s("image_prompt", DEFAULT_SUMMARIZE_IMAGE_PROMPT, ""));
+
+    t
+}
+
+/// Returns the config file path, writing the commented [`starter_template`]
 /// at the candidate location first when no file exists yet. Returns `None`
 /// when the location cannot be determined or the file cannot be created.
 /// Used by the tray's Open Config action.
@@ -657,7 +747,7 @@ pub fn ensure_config_file() -> Option<PathBuf> {
     match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
         Ok(mut file) => {
             use std::io::Write;
-            if let Err(e) = file.write_all(STARTER_TEMPLATE.as_bytes()) {
+            if let Err(e) = file.write_all(starter_template().as_bytes()) {
                 warn!("config: failed to write starter template to {}: {e}", path.display());
                 return None;
             }
@@ -915,6 +1005,42 @@ mod tests {
         let config: Config = toml::from_str("[prompt]\npreamble = \"GUARD-XYZ.\"").unwrap();
         let p = assemble(&config, ProcessMode::Summarize, RephraseParams::default(), false);
         assert!(p.starts_with("GUARD-XYZ.\n\n"));
+    }
+
+    #[test]
+    fn starter_template_parses_as_toml() {
+        // The template must be valid TOML: the three required keys are uncommented
+        // (empty), every other key is a comment that must not leak into the parse.
+        let t = starter_template();
+        let cfg: Config = toml::from_str(&t).expect("starter template must be valid TOML");
+        // Required keys parse as empty strings; client-side require_setting treats
+        // empty as unset, producing the startup error until the user fills them.
+        assert_eq!(cfg.api_endpoint(), Some(""));
+        assert_eq!(cfg.api_model(), Some(""));
+        assert_eq!(cfg.api_key(), Some(""));
+        // Commented optional keys stay at their built-in defaults (not parsed).
+        assert!(cfg.api.streaming.is_none());
+        assert!(cfg.prompt.preamble.is_none());
+    }
+
+    #[test]
+    fn starter_template_covers_all_sections_with_real_defaults() {
+        let t = starter_template();
+        for section in [
+            "[api]", "[api.headers]", "[generation]", "[telemetry]", "[hotkey]",
+            "[ui]", "[languages]", "[prompt]", "[translate]", "[rephrase]",
+            "[rephrase.style]", "[rephrase.length]", "[summarize]",
+        ] {
+            assert!(t.contains(section), "missing section {section}");
+        }
+        // Required keys are emitted UNCOMMENTED so they must be filled in.
+        assert!(t.contains("\nendpoint = \"\""));
+        assert!(t.contains("\nmodel    = \"\""));
+        assert!(t.contains("\napi_key  = \"\""));
+        // Commented values are the ACTUAL built-in defaults (sampled).
+        assert!(t.contains("max_tokens = 16384"));
+        assert!(t.contains(DEFAULT_REPHRASE_STYLE_CORRECT));
+        assert!(t.contains("The user message contains the clipboard content"));
     }
 
     #[test]
