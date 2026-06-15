@@ -151,7 +151,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // without blocking the single-threaded tokio runtime.
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerCommand>();
     let (resp_tx, resp_rx) = mpsc::channel::<WorkerResponse>();
-    let llm = LlmClient::new()?;
+    // The required api.endpoint/model/api_key have no defaults. When unset, the
+    // app cannot run and — since it exits before the tray exists — the user can't
+    // reach Open Config. So write the starter template here, point at it, and
+    // exit so the next launch finds a file to fill in.
+    let llm = match LlmClient::new() {
+        Ok(llm) => llm,
+        Err(e @ clip_llm::ApiError::MissingConfig(_)) => {
+            match clip_llm::config::ensure_config_file() {
+                Some(path) => error!(
+                    "{e}. Wrote a starter config to {} — set the required keys there and relaunch.",
+                    path.display()
+                ),
+                None => error!("{e}"),
+            }
+            return Err(e.into());
+        }
+        Err(e) => return Err(e.into()),
+    };
     let clipboard = ClipboardManager::new()?;
 
     info!("starting eframe overlay");
