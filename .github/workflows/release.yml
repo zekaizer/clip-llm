@@ -66,11 +66,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.release.tag_name }}
         run: |
+          # Version-stamp the asset filenames (strip the leading "v" from the tag),
+          # e.g. clip-llm-0.14.3-windows-x64.exe. Build/artifact names stay fixed.
+          VERSION="${TAG#v}"
+          cp artifacts/clip-llm-macos-arm64/clip-llm-macos-arm64.app.zip \
+            "clip-llm-${VERSION}-macos-arm64.app.zip"
+          cp artifacts/clip-llm-windows-x64/clip-llm-windows-x64.exe \
+            "clip-llm-${VERSION}-windows-x64.exe"
           gh release upload "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --clobber \
-            artifacts/clip-llm-macos-arm64/clip-llm-macos-arm64.app.zip \
-            artifacts/clip-llm-windows-x64/clip-llm-windows-x64.exe
+            "clip-llm-${VERSION}-macos-arm64.app.zip" \
+            "clip-llm-${VERSION}-windows-x64.exe"
 
       - name: Promote to full release
         env:
