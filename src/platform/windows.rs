@@ -174,6 +174,10 @@ impl Platform for WindowsPlatform {
         true // handled natively; caller must NOT send OuterPosition
     }
 
+    fn exclude_from_taskbar(&self) {
+        set_tool_window();
+    }
+
     fn paste_to_foreground(&self) -> Result<(), PlatformError> {
         use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
 
@@ -239,6 +243,42 @@ fn set_no_activate(hwnd: HWND, enabled: bool) {
         };
         if new_style != style {
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_style);
+        }
+    }
+}
+
+/// Add `WS_EX_TOOLWINDOW` to the overlay window so the shell never lists it in
+/// the taskbar.
+///
+/// winit's `with_taskbar(false)` calls `ITaskbarList::DeleteTab` once at window
+/// creation, which only removes the *current* taskbar button; the shell re-adds
+/// it whenever it re-evaluates the window — e.g. after this app's direct
+/// `ShowWindow(SW_SHOW)` + `SetForegroundWindow` (in `show_and_focus_window`) or
+/// the `SW_HIDE` -> `SW_SHOWNA` cycle (in `paste_to_foreground`) bypass winit, so
+/// winit never re-applies `DeleteTab`. `WS_EX_TOOLWINDOW` is a style bit, so the
+/// exclusion is permanent and immune to that race. Set once on the first frame.
+fn set_tool_window() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, SWP_FRAMECHANGED,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_EX_TOOLWINDOW,
+    };
+    if let Some(hwnd) = find_clip_llm_hwnd() {
+        unsafe {
+            let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            let new_style = style | WS_EX_TOOLWINDOW as isize;
+            if new_style != style {
+                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_style);
+                // SetWindowLong style changes require SWP_FRAMECHANGED to take effect.
+                SetWindowPos(
+                    hwnd,
+                    std::ptr::null_mut(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                );
+            }
         }
     }
 }

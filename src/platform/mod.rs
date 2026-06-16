@@ -53,6 +53,16 @@ pub trait Platform {
     /// Paste clipboard content into the previously focused application.
     /// Handles focus transfer, timing, key simulation, and platform-specific cleanup.
     fn paste_to_foreground(&self) -> Result<(), crate::PlatformError>;
+
+    /// Permanently exclude the overlay window from the taskbar / app switcher.
+    ///
+    /// Called once on the first frame. On Windows this sets `WS_EX_TOOLWINDOW`,
+    /// which the shell never lists in the taskbar — unlike the one-shot
+    /// `ITaskbarList::DeleteTab` winit uses for `with_taskbar(false)`, which the
+    /// shell re-adds when it re-evaluates the window after this app's direct
+    /// `ShowWindow` / `SetForegroundWindow` calls bypass winit. No-op on macOS
+    /// (the Accessory activation policy already excludes it).
+    fn exclude_from_taskbar(&self);
 }
 
 #[cfg(target_os = "macos")]

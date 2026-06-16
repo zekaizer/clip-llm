@@ -561,6 +561,11 @@ impl Platform for MacOsPlatform {
         false // caller should use ViewportCommand::OuterPosition
     }
 
+    fn exclude_from_taskbar(&self) {
+        // No-op: the Accessory activation policy already keeps the app out of
+        // the Dock and Cmd+Tab, and macOS has no taskbar.
+    }
+
     fn paste_to_foreground(&self) -> Result<(), PlatformError> {
         // Deactivate this app so the OS activates the previously focused app.
         // [NSApp hide:nil] is AppKit and must run on the main thread, so it stays

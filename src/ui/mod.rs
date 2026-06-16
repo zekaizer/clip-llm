@@ -808,6 +808,7 @@ impl OverlayApp {
     fn maybe_initial_hide(&mut self, ctx: &egui::Context) {
         if !self.initial_hide_done {
             self.initial_hide_done = true;
+            self.platform.exclude_from_taskbar();
             self.hide_window(ctx);
         }
     }
