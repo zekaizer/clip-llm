@@ -56,8 +56,9 @@ pub trait Platform {
 
     /// Permanently exclude the overlay window from the taskbar / app switcher.
     ///
-    /// Called once on the first frame. On Windows this sets `WS_EX_TOOLWINDOW`,
-    /// which the shell never lists in the taskbar — unlike the one-shot
+    /// Called once on the first frame. On Windows this clears `WS_EX_APPWINDOW`
+    /// (which forces taskbar presence regardless of `WS_EX_TOOLWINDOW`) and sets
+    /// `WS_EX_TOOLWINDOW` — a permanent style change, unlike the one-shot
     /// `ITaskbarList::DeleteTab` winit uses for `with_taskbar(false)`, which the
     /// shell re-adds when it re-evaluates the window after this app's direct
     /// `ShowWindow` / `SetForegroundWindow` calls bypass winit. No-op on macOS

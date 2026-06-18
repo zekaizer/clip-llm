@@ -247,37 +247,52 @@ fn set_no_activate(hwnd: HWND, enabled: bool) {
     }
 }
 
-/// Add `WS_EX_TOOLWINDOW` to the overlay window so the shell never lists it in
-/// the taskbar.
+/// Keep the overlay out of the taskbar by clearing `WS_EX_APPWINDOW` and setting
+/// `WS_EX_TOOLWINDOW`.
 ///
-/// winit's `with_taskbar(false)` calls `ITaskbarList::DeleteTab` once at window
-/// creation, which only removes the *current* taskbar button; the shell re-adds
-/// it whenever it re-evaluates the window — e.g. after this app's direct
-/// `ShowWindow(SW_SHOW)` + `SetForegroundWindow` (in `show_and_focus_window`) or
-/// the `SW_HIDE` -> `SW_SHOWNA` cycle (in `paste_to_foreground`) bypass winit, so
-/// winit never re-applies `DeleteTab`. `WS_EX_TOOLWINDOW` is a style bit, so the
-/// exclusion is permanent and immune to that race. Set once on the first frame.
+/// The shell lists a window in the taskbar whenever `WS_EX_APPWINDOW` is present,
+/// *regardless* of `WS_EX_TOOLWINDOW` — APPWINDOW wins. winit forces APPWINDOW
+/// onto every unowned top-level window (its `ON_TASKBAR` flag, set in
+/// `window.rs` when the window has no owner), so merely adding TOOLWINDOW is not
+/// enough; APPWINDOW must be cleared too. winit's `with_taskbar(false)` only
+/// issues a one-shot `ITaskbarList::DeleteTab`, which the shell undoes whenever
+/// it re-evaluates the window — e.g. after this app's direct `ShowWindow(SW_SHOW)`
+/// and `SetForegroundWindow` (in `show_and_focus_window`), or the `SW_HIDE` to
+/// `SW_SHOWNA` cycle (in `paste_to_foreground`) bypass winit. Clearing the style
+/// bit makes the exclusion permanent and immune to that race. Set once on the
+/// first frame.
 fn set_tool_window() {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, SWP_FRAMECHANGED,
-        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_EX_TOOLWINDOW,
+        GetWindowLongPtrW, IsWindowVisible, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+        GWL_EXSTYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+        SW_HIDE, SW_SHOWNA, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
     };
     if let Some(hwnd) = find_clip_llm_hwnd() {
         unsafe {
             let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-            let new_style = style | WS_EX_TOOLWINDOW as isize;
-            if new_style != style {
-                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_style);
-                // SetWindowLong style changes require SWP_FRAMECHANGED to take effect.
-                SetWindowPos(
-                    hwnd,
-                    std::ptr::null_mut(),
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-                );
+            let new_style = (style | WS_EX_TOOLWINDOW as isize) & !(WS_EX_APPWINDOW as isize);
+            if new_style == style {
+                return;
+            }
+            let was_visible = IsWindowVisible(hwnd) != 0;
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_style);
+            // SetWindowLong style changes require SWP_FRAMECHANGED to take effect.
+            SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+            // The taskbar re-reads APPWINDOW/TOOLWINDOW only on a hide -> show
+            // transition, not on SWP_FRAMECHANGED. If the window was already mapped
+            // (not the with_visible(false) startup case), cycle it; SW_SHOWNA keeps
+            // focus and position.
+            if was_visible {
+                ShowWindow(hwnd, SW_HIDE);
+                ShowWindow(hwnd, SW_SHOWNA);
             }
         }
     }
