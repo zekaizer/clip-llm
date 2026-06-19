@@ -53,8 +53,13 @@ pub struct OverlayApp {
     platform: NativePlatform,
     /// Mouse cursor position captured at hotkey trigger time.
     spawn_position: Option<egui::Pos2>,
-    /// Whether the initial Visible(false) command has been sent at startup.
+    /// Whether the startup hide has begun (the initial visibility command was sent).
     initial_hide_done: bool,
+    /// Windows-only: set on the first frame after the startup `Visible(true)`
+    /// sync. winit rebuilds the window exstyle on that visibility transition,
+    /// so the taskbar exclusion must be (re)applied on the *next* frame, once
+    /// that recomputation has happened. See [`OverlayApp::maybe_initial_hide`].
+    pending_taskbar_exclude: bool,
     /// One-shot startup notice (e.g. a failed config load) surfaced via the
     /// error overlay on the first frame after the initial hide settles.
     startup_notice: Option<String>,
@@ -158,6 +163,7 @@ impl OverlayApp {
             platform: NativePlatform,
             spawn_position: None,
             initial_hide_done: false,
+            pending_taskbar_exclude: false,
             startup_notice: None,
             tap_rx,
             last_desired_size: None,
@@ -204,6 +210,7 @@ impl OverlayApp {
             platform: NativePlatform,
             spawn_position: None,
             initial_hide_done: false,
+            pending_taskbar_exclude: false,
             startup_notice: None,
             tap_rx,
             last_desired_size: None,
@@ -805,11 +812,44 @@ impl OverlayApp {
     // -- update() helpers --
 
     /// Hide the window on the very first frame so the overlay is not visible at startup.
+    ///
+    /// On Windows this also defuses winit's taskbar-icon race. winit rebuilds the
+    /// full window exstyle — re-adding `WS_EX_APPWINDOW`, dropping the
+    /// `WS_EX_TOOLWINDOW` we set — every time its internal `VISIBLE` flag
+    /// *transitions*. The app starts `with_visible(false)`, so that transition
+    /// would otherwise fire on the first focus-show (`Visible(true)`) and re-add
+    /// the taskbar icon. Instead we force the transition here, while the window is
+    /// parked offscreen, then apply the exclusion on the *next* frame — after
+    /// winit's recomputation. From then on the app only uses
+    /// `move_window_offscreen` (never `Visible(false)`), so winit's `VISIBLE` flag
+    /// never changes again, no further exstyle recomputation occurs, and the
+    /// exclusion is genuinely permanent.
     fn maybe_initial_hide(&mut self, ctx: &egui::Context) {
-        if !self.initial_hide_done {
-            self.initial_hide_done = true;
+        // Windows step 2: winit has applied the startup `Visible(true)` and
+        // rebuilt the exstyle. Clear `WS_EX_APPWINDOW` / set `WS_EX_TOOLWINDOW`
+        // now — once, for good.
+        if self.pending_taskbar_exclude {
+            self.pending_taskbar_exclude = false;
             self.platform.exclude_from_taskbar();
-            self.hide_window(ctx);
+            return;
+        }
+        if self.initial_hide_done {
+            return;
+        }
+        self.initial_hide_done = true;
+        if self.platform.hide_window() {
+            // Windows: the window is now parked offscreen. Sync winit's `VISIBLE`
+            // flag to true so its one-time exstyle recomputation happens here
+            // (offscreen, invisible) rather than on the first focus-show. The
+            // exclusion is applied next frame, after that recomputation lands.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            self.pending_taskbar_exclude = true;
+            ctx.request_repaint();
+        } else {
+            // macOS / others: hidden via `Visible(false)`; no exstyle race, and
+            // `exclude_from_taskbar` is a no-op there.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.platform.exclude_from_taskbar();
         }
     }
 

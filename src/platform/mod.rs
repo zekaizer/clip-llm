@@ -56,13 +56,14 @@ pub trait Platform {
 
     /// Permanently exclude the overlay window from the taskbar / app switcher.
     ///
-    /// Called once on the first frame. On Windows this clears `WS_EX_APPWINDOW`
-    /// (which forces taskbar presence regardless of `WS_EX_TOOLWINDOW`) and sets
-    /// `WS_EX_TOOLWINDOW` — a permanent style change, unlike the one-shot
-    /// `ITaskbarList::DeleteTab` winit uses for `with_taskbar(false)`, which the
-    /// shell re-adds when it re-evaluates the window after this app's direct
-    /// `ShowWindow` / `SetForegroundWindow` calls bypass winit. No-op on macOS
-    /// (the Accessory activation policy already excludes it).
+    /// On Windows this clears `WS_EX_APPWINDOW` (which forces taskbar presence
+    /// regardless of `WS_EX_TOOLWINDOW`) and sets `WS_EX_TOOLWINDOW` — a direct
+    /// style change, unlike the one-shot `ITaskbarList::DeleteTab` winit uses for
+    /// `with_taskbar(false)`, which the shell re-adds on its next re-evaluation.
+    /// The style change is only durable if applied *after* winit's last exstyle
+    /// recomputation, so `maybe_initial_hide` calls this on the frame following
+    /// the startup `VISIBLE` sync (see its docs). No-op on macOS (the Accessory
+    /// activation policy already excludes it).
     fn exclude_from_taskbar(&self);
 }
 

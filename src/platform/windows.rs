@@ -253,14 +253,21 @@ fn set_no_activate(hwnd: HWND, enabled: bool) {
 /// The shell lists a window in the taskbar whenever `WS_EX_APPWINDOW` is present,
 /// *regardless* of `WS_EX_TOOLWINDOW` — APPWINDOW wins. winit forces APPWINDOW
 /// onto every unowned top-level window (its `ON_TASKBAR` flag, set in
-/// `window.rs` when the window has no owner), so merely adding TOOLWINDOW is not
-/// enough; APPWINDOW must be cleared too. winit's `with_taskbar(false)` only
-/// issues a one-shot `ITaskbarList::DeleteTab`, which the shell undoes whenever
-/// it re-evaluates the window — e.g. after this app's direct `ShowWindow(SW_SHOW)`
-/// and `SetForegroundWindow` (in `show_and_focus_window`), or the `SW_HIDE` to
-/// `SW_SHOWNA` cycle (in `paste_to_foreground`) bypass winit. Clearing the style
-/// bit makes the exclusion permanent and immune to that race. Set once on the
-/// first frame.
+/// `window.rs` when the window has no owner) and never sets `WS_EX_TOOLWINDOW`,
+/// so merely adding TOOLWINDOW is not enough; APPWINDOW must be cleared too.
+/// winit's `with_taskbar(false)` only issues a one-shot `ITaskbarList::DeleteTab`,
+/// which the shell undoes on its next re-evaluation, so the style bits must be
+/// changed directly.
+///
+/// Timing is critical. winit rebuilds the *entire* exstyle from its own
+/// `WindowFlags` — re-adding APPWINDOW, dropping TOOLWINDOW — on every transition
+/// of its internal `VISIBLE` flag (`WindowState::apply_diff`). So this must run
+/// *after* winit's last such recomputation, or the bits are wiped. The earlier
+/// "set once on the first frame, then it's permanent" approach was wrong: the
+/// first focus-show flips `VISIBLE` false->true and wiped the exclusion.
+/// `maybe_initial_hide` now drives that one transition at startup while the
+/// window is offscreen and calls this on the following frame; the app never
+/// toggles winit visibility again, so the exclusion sticks for good.
 fn set_tool_window() {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GetWindowLongPtrW, IsWindowVisible, SetWindowLongPtrW, SetWindowPos, ShowWindow,
@@ -287,9 +294,11 @@ fn set_tool_window() {
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
             );
             // The taskbar re-reads APPWINDOW/TOOLWINDOW only on a hide -> show
-            // transition, not on SWP_FRAMECHANGED. If the window was already mapped
-            // (not the with_visible(false) startup case), cycle it; SW_SHOWNA keeps
-            // focus and position.
+            // transition, not on SWP_FRAMECHANGED. The window is offscreen but
+            // mapped when this runs (maybe_initial_hide synced winit's VISIBLE
+            // flag the previous frame), so cycle it to force the re-read; the
+            // cycle is invisible offscreen. SW_SHOWNA keeps position and does not
+            // activate. The was_visible guard stays as a safety net.
             if was_visible {
                 ShowWindow(hwnd, SW_HIDE);
                 ShowWindow(hwnd, SW_SHOWNA);
