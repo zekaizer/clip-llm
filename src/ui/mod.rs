@@ -122,11 +122,13 @@ pub struct OverlayApp {
     /// still on the clipboard — the ↩ paste otherwise double-writes the
     /// result that auto-copy already placed (#16b).
     last_clipboard_write: Option<(String, u64)>,
-    /// Raw request/response of the most recent completed or failed request,
-    /// stashed for the overlay's on-demand "copy debug" button. Set on each
-    /// worker Complete/Error; cleared when a new request begins (ResetAreas) and
-    /// when the overlay hides, so a stale capture never attaches to an unrelated
-    /// error (e.g. a clipboard-read failure that never hit the server).
+    /// Raw request/response of the result currently shown, for the overlay's
+    /// on-demand "copy debug" button. Set in poll_responses AFTER the worker
+    /// Complete/Error effects run, so it survives the ResetAreas clear those
+    /// transitions also emit. ResetAreas (and HideWindow) clear it, so a result
+    /// shown WITHOUT a fresh worker response — a cached result, or a
+    /// capture-read failure that never hit the server — leaves it cleared and
+    /// the button hidden, never copying another request's data.
     last_debug: Option<crate::DebugCapture>,
     /// Completed-request tally for the tray Status menu: successes and errors
     /// seen so far this session. Drives the "Requests" / "Last" rows and the
@@ -361,8 +363,11 @@ impl OverlayApp {
                         let _ = self.diag_state_tx.send(to);
                     }
                     self.think_expanded = false;
-                    // A new capture/request begins here; drop the prior request's
-                    // debug snapshot so it cannot attach to an unrelated outcome.
+                    // Clear the debug snapshot on every area reset. For a worker
+                    // result this fires before poll_responses re-sets last_debug
+                    // (same frame, after effects); for a cached result or capture
+                    // failure nothing re-sets it, so the button stays hidden
+                    // rather than copying a prior request's data.
                     self.last_debug = None;
                     ctx.memory_mut(|m| m.reset_areas());
                 }
@@ -610,12 +615,16 @@ impl OverlayApp {
                     break;
                 }
             };
+            // Raw request/response of a finished request, held aside so it is
+            // stored AFTER the effects run. The Processing→Result/Error effects
+            // include ResetAreas, which clears last_debug; setting it before
+            // execute_effects would wipe it in the same frame, before render —
+            // so the copy-debug button would never appear.
+            let mut fresh_debug: Option<crate::DebugCapture> = None;
             let event = match response {
                 WorkerResponse::Complete { result, think_content, request_id, incomplete, debug } => {
                     self.record_request_outcome(true, if incomplete.is_some() { "partial" } else { "ok" });
-                    // Stash the raw request/response for the on-demand debug view;
-                    // it belongs to the Result this event produces.
-                    self.last_debug = Some(debug);
+                    fresh_debug = Some(debug);
                     UiEvent::WorkerResult {
                         text: result,
                         think_content,
@@ -625,7 +634,7 @@ impl OverlayApp {
                 }
                 WorkerResponse::Error { message, request_id, debug } => {
                     self.record_request_outcome(false, &tray_last_label(&message));
-                    self.last_debug = Some(debug);
+                    fresh_debug = Some(debug);
                     UiEvent::WorkerError {
                         message,
                         request_id,
@@ -650,6 +659,12 @@ impl OverlayApp {
             };
             let effects = self.sm.handle(event);
             self.execute_effects(effects, ctx);
+            // Store after effects: this result's debug survives the ResetAreas
+            // clear, while a cached result or capture failure (which don't set
+            // fresh_debug) correctly leaves last_debug cleared → button hidden.
+            if fresh_debug.is_some() {
+                self.last_debug = fresh_debug;
+            }
         }
 
         // Refresh the tray "Telemetry" row with the latest shipped/dropped
