@@ -918,6 +918,19 @@ impl OverlayApp {
             overlay::OverlayAction::PasteReplace => UiEvent::UserPaste,
             overlay::OverlayAction::TogglePin => UiEvent::UserTogglePin,
             overlay::OverlayAction::Retry => UiEvent::UserRetry,
+            overlay::OverlayAction::CopyDebug => {
+                // Side channel, not a state-machine event: write the raw
+                // request/response snapshot straight to the clipboard. Bypasses
+                // the WriteClipboard dedup so it never disturbs result tracking.
+                if let Some(debug) = &self.last_debug {
+                    let text = debug.to_clipboard_text();
+                    match self.clipboard.write_text(&text) {
+                        Ok(()) => info!("copied debug snapshot to clipboard ({} chars)", text.len()),
+                        Err(e) => error!("debug clipboard write failed: {e}"),
+                    }
+                }
+                return;
+            }
         };
         let effects = self.sm.handle(event);
         if debounce {
@@ -1077,6 +1090,7 @@ impl eframe::App for OverlayApp {
             self.sm.capture_source(),
             self.copy_confirmed_at.is_some(),
             elapsed,
+            self.last_debug.is_some(),
             ctx,
         );
 

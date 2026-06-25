@@ -58,6 +58,8 @@ pub enum OverlayAction {
     PasteReplace,
     TogglePin,
     Retry,
+    /// Copy the raw request/response debug snapshot to the clipboard.
+    CopyDebug,
 }
 
 pub struct OverlayOutput {
@@ -85,6 +87,7 @@ pub fn render(
     source: CaptureSource,
     copy_confirmed: bool,
     elapsed: Option<std::time::Duration>,
+    debug_available: bool,
     ctx: &egui::Context,
 ) -> OverlayOutput {
     if matches!(state, OverlayState::Hidden) {
@@ -190,13 +193,14 @@ pub fn render(
                             auto_copy,
                             copy_confirmed,
                             streaming.incomplete,
+                            debug_available,
                             &mut action,
                         );
                     }
                     OverlayState::Error(msg) => {
                         // Retry needs loaded content; a capture failure leaves
                         // none (available_modes is empty), so hide the button.
-                        render_error(ui, msg, !available_modes.is_empty(), &mut action);
+                        render_error(ui, msg, !available_modes.is_empty(), debug_available, &mut action);
                     }
                     // Hidden returns early at the top of render(); Capturing is handled above.
                     OverlayState::Hidden | OverlayState::Capturing => unreachable!(),
@@ -434,22 +438,48 @@ fn render_processing(
     }
 }
 
-fn render_error(ui: &mut egui::Ui, message: &str, can_retry: bool, action: &mut OverlayAction) {
+fn render_error(
+    ui: &mut egui::Ui,
+    message: &str,
+    can_retry: bool,
+    debug_available: bool,
+    action: &mut OverlayAction,
+) {
     ui.label(
         egui::RichText::new(format!("Error: {message}"))
             .color(egui::Color32::from_rgb(255, 100, 100))
             .size(14.0),
     );
-    if can_retry {
+    if can_retry || debug_available {
         ui.add_space(4.0);
-        let retry_btn = egui::Button::new(
-            egui::RichText::new("Retry").size(12.0).color(egui::Color32::WHITE),
-        )
-        .fill(egui::Color32::from_rgba_unmultiplied(50, 50, 50, 200))
-        .corner_radius(6.0);
-        if ui.add(retry_btn).clicked() {
-            *action = OverlayAction::Retry;
-        }
+        ui.horizontal(|ui| {
+            if can_retry {
+                let retry_btn = egui::Button::new(
+                    egui::RichText::new("Retry").size(12.0).color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgba_unmultiplied(50, 50, 50, 200))
+                .corner_radius(6.0);
+                if ui.add(retry_btn).clicked() {
+                    *action = OverlayAction::Retry;
+                }
+            }
+            if debug_available {
+                let debug_btn = egui::Button::new(
+                    egui::RichText::new("Copy debug")
+                        .size(12.0)
+                        .color(egui::Color32::from_gray(190)),
+                )
+                .fill(egui::Color32::from_rgba_unmultiplied(50, 50, 50, 200))
+                .corner_radius(6.0);
+                if ui
+                    .add(debug_btn)
+                    .on_hover_text("Copy the raw request + response to the clipboard")
+                    .clicked()
+                {
+                    *action = OverlayAction::CopyDebug;
+                }
+            }
+        });
     }
 }
 
@@ -463,6 +493,7 @@ fn render_result(
     auto_copy: bool,
     copy_confirmed: bool,
     incomplete: Option<&str>,
+    debug_available: bool,
     action: &mut OverlayAction,
 ) {
     // Truncation / interruption banner at the very top: the partial reply is
@@ -514,6 +545,15 @@ fn render_result(
     let retry_rect = btn_rect.translate(egui::vec2(-(ACTION_BTN_SIZE + 4.0), 0.0));
     if floating_action_button(ui, retry_rect, "\u{21bb}") {
         *action = OverlayAction::Retry;
+    }
+
+    // Copy-debug (🔍): copies the raw request + response snapshot. Shown only
+    // when a capture exists for this result.
+    if debug_available {
+        let debug_rect = retry_rect.translate(egui::vec2(-(ACTION_BTN_SIZE + 4.0), 0.0));
+        if floating_action_button(ui, debug_rect, "\u{1f50d}") {
+            *action = OverlayAction::CopyDebug;
+        }
     }
 }
 
