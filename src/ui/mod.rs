@@ -122,6 +122,12 @@ pub struct OverlayApp {
     /// still on the clipboard — the ↩ paste otherwise double-writes the
     /// result that auto-copy already placed (#16b).
     last_clipboard_write: Option<(String, u64)>,
+    /// Raw request/response of the most recent completed or failed request,
+    /// stashed for the overlay's on-demand "copy debug" button. Set on each
+    /// worker Complete/Error; cleared when a new request begins (ResetAreas) and
+    /// when the overlay hides, so a stale capture never attaches to an unrelated
+    /// error (e.g. a clipboard-read failure that never hit the server).
+    last_debug: Option<crate::DebugCapture>,
     /// Completed-request tally for the tray Status menu: successes and errors
     /// seen so far this session. Drives the "Requests" / "Last" rows and the
     /// derived error rate.
@@ -183,6 +189,7 @@ impl OverlayApp {
             pending_process: None,
             copy_confirmed_at: None,
             last_clipboard_write: None,
+            last_debug: None,
             req_ok: 0,
             req_err: 0,
             diag: crate::diagnostics::DiagCollector::new(),
@@ -230,6 +237,7 @@ impl OverlayApp {
             pending_process: None,
             copy_confirmed_at: None,
             last_clipboard_write: None,
+            last_debug: None,
             req_ok: 0,
             req_err: 0,
             last_focused: None,
@@ -339,6 +347,7 @@ impl OverlayApp {
                     self.pending_content = None;
                     self.single_commit_pending = false;
                     self.pending_process = None;
+                    self.last_debug = None;
                 }
                 UiEffect::CaptureMousePosition => self.capture_mouse_position(),
                 UiEffect::ResetAreas => {
@@ -352,6 +361,9 @@ impl OverlayApp {
                         let _ = self.diag_state_tx.send(to);
                     }
                     self.think_expanded = false;
+                    // A new capture/request begins here; drop the prior request's
+                    // debug snapshot so it cannot attach to an unrelated outcome.
+                    self.last_debug = None;
                     ctx.memory_mut(|m| m.reset_areas());
                 }
                 UiEffect::PasteClipboard => {
@@ -599,8 +611,11 @@ impl OverlayApp {
                 }
             };
             let event = match response {
-                WorkerResponse::Complete { result, think_content, request_id, incomplete } => {
+                WorkerResponse::Complete { result, think_content, request_id, incomplete, debug } => {
                     self.record_request_outcome(true, if incomplete.is_some() { "partial" } else { "ok" });
+                    // Stash the raw request/response for the on-demand debug view;
+                    // it belongs to the Result this event produces.
+                    self.last_debug = Some(debug);
                     UiEvent::WorkerResult {
                         text: result,
                         think_content,
@@ -608,8 +623,9 @@ impl OverlayApp {
                         incomplete,
                     }
                 }
-                WorkerResponse::Error { message, request_id } => {
+                WorkerResponse::Error { message, request_id, debug } => {
                     self.record_request_outcome(false, &tray_last_label(&message));
+                    self.last_debug = Some(debug);
                     UiEvent::WorkerError {
                         message,
                         request_id,

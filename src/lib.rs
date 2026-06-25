@@ -15,6 +15,150 @@ pub mod worker;
 
 use thiserror::Error;
 
+// -- Debug capture --
+
+/// Raw request/response snapshot for the on-demand debug view. Populated on
+/// every LLM call regardless of success or failure, so both a wrong-looking
+/// answer and an outright error expose the exact bytes exchanged with the
+/// server, plus when it happened and how long it took. Surfaced via the
+/// overlay's "copy debug" button; not logged by default.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DebugCapture {
+    /// Target URL the request was sent to.
+    pub endpoint: Option<String>,
+    /// Pretty-printed request body JSON. Inline image data URIs are elided to
+    /// keep the snapshot readable.
+    pub request: Option<String>,
+    /// HTTP status code of the response, when one arrived.
+    pub status: Option<u16>,
+    /// Raw response body: the full JSON for a non-streaming reply, the
+    /// concatenated SSE stream for a streaming reply, or the server's error
+    /// body for a non-2xx rejection.
+    pub response_raw: Option<String>,
+    /// Wall-clock time (UTC, e.g. `2026-06-25T01:02:03.123Z`) the request began.
+    pub timestamp: Option<String>,
+    /// Round-trip duration in milliseconds from request start to the final
+    /// response, error, or stream close.
+    pub elapsed_ms: Option<u128>,
+    /// Detailed failure description (the underlying transport/API error or the
+    /// reason a stream ended early). Present only when something went wrong;
+    /// the short user-facing message is shown separately in the overlay.
+    pub error: Option<String>,
+}
+
+impl DebugCapture {
+    /// Format the capture as a single human-readable block for the clipboard.
+    pub fn to_clipboard_text(&self) -> String {
+        let endpoint = self.endpoint.as_deref().unwrap_or("(unknown endpoint)");
+        let status = self
+            .status
+            .map_or_else(|| "(no response)".to_string(), |s| s.to_string());
+        let timestamp = self.timestamp.as_deref().unwrap_or("(unknown)");
+        let elapsed = self
+            .elapsed_ms
+            .map_or_else(|| "(unknown)".to_string(), |ms| format!("{ms} ms"));
+        let request = self.request.as_deref().unwrap_or("(not captured)");
+        let response = self.response_raw.as_deref().unwrap_or("(not captured)");
+        let mut out = format!(
+            "=== clip-llm debug ===\n\
+             time:        {timestamp}\n\
+             elapsed:     {elapsed}\n\
+             endpoint:    POST {endpoint}\n\
+             HTTP status: {status}\n"
+        );
+        if let Some(err) = &self.error {
+            out.push_str(&format!("\n--- ERROR ---\n{err}\n"));
+        }
+        out.push_str(&format!("\n--- REQUEST ---\n{request}\n"));
+        out.push_str(&format!("\n--- RESPONSE ---\n{response}\n"));
+        out
+    }
+}
+
+/// Format a `SystemTime` as an ISO-8601 UTC string (`YYYY-MM-DDThh:mm:ss.mmmZ`)
+/// without pulling in a calendar crate. Uses Howard Hinnant's `civil_from_days`
+/// algorithm. `chrono` is only a `diagnostics`-feature dependency, so the
+/// always-on debug capture cannot rely on it.
+pub fn format_utc(t: std::time::SystemTime) -> String {
+    let dur = t
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = dur.as_secs();
+    let millis = dur.subsec_millis();
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (hour, min, sec) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    // civil_from_days: days since 1970-01-01 -> (year, month, day).
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let day = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let month = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = if month <= 2 { y + 1 } else { y };
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}.{millis:03}Z")
+}
+
+#[cfg(test)]
+mod debug_capture_tests {
+    use super::{format_utc, DebugCapture};
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn to_clipboard_text_includes_all_sections() {
+        let cap = DebugCapture {
+            endpoint: Some("http://x/v1/chat/completions".into()),
+            request: Some("{\"model\":\"m\"}".into()),
+            status: Some(200),
+            response_raw: Some("{\"choices\":[]}".into()),
+            timestamp: Some("2026-06-25T01:02:03.123Z".into()),
+            elapsed_ms: Some(1234),
+            error: None,
+        };
+        let text = cap.to_clipboard_text();
+        assert!(text.contains("time:        2026-06-25T01:02:03.123Z"));
+        assert!(text.contains("elapsed:     1234 ms"));
+        assert!(text.contains("POST http://x/v1/chat/completions"));
+        assert!(text.contains("HTTP status: 200"));
+        assert!(text.contains("--- REQUEST ---"));
+        assert!(text.contains("\"model\":\"m\""));
+        assert!(text.contains("--- RESPONSE ---"));
+        assert!(text.contains("\"choices\":[]"));
+        // No error section when the call succeeded.
+        assert!(!text.contains("--- ERROR ---"));
+    }
+
+    #[test]
+    fn to_clipboard_text_shows_error_section() {
+        let cap = DebugCapture {
+            error: Some("connect timeout".into()),
+            ..Default::default()
+        };
+        let text = cap.to_clipboard_text();
+        assert!(text.contains("--- ERROR ---"));
+        assert!(text.contains("connect timeout"));
+    }
+
+    #[test]
+    fn to_clipboard_text_marks_missing_fields() {
+        let text = DebugCapture::default().to_clipboard_text();
+        assert!(text.contains("(no response)"));
+        assert!(text.contains("(not captured)"));
+        assert!(text.contains("time:        (unknown)"));
+    }
+
+    #[test]
+    fn format_utc_epoch_and_known_instant() {
+        assert_eq!(format_utc(UNIX_EPOCH), "1970-01-01T00:00:00.000Z");
+        // 1_700_000_000s -> 2023-11-14T22:13:20 UTC, plus 123ms.
+        let t = UNIX_EPOCH + Duration::from_millis(1_700_000_000_123);
+        assert_eq!(format_utc(t), "2023-11-14T22:13:20.123Z");
+    }
+}
+
 // -- Language constants --
 //
 // Default language names. Crate-internal: callers must read the runtime values
