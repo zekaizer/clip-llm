@@ -920,6 +920,10 @@ impl LlmClient {
             capture.response_raw = resp.text().await.ok();
             return Err(ApiError::Http(status_err));
         }
+        // Success: drop any error body captured on a prior (retried) attempt so
+        // it cannot masquerade as this response's body. The real body is filled
+        // by `complete` (non-streaming) or the streaming finalize.
+        capture.response_raw = None;
         Ok(resp)
     }
 

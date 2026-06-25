@@ -180,8 +180,9 @@ fn make_complete_response(
 
 /// Stamp a streaming capture at a finalize point: elapsed time, the raw SSE
 /// stream received so far, and an optional reason the stream ended abnormally.
-/// Leaves an already-set `response_raw` (e.g. a server error body captured
-/// before any SSE arrived) untouched only when `raw_sse` is empty.
+/// Reached only on the streaming success path, where `send_request` has already
+/// cleared `response_raw` to `None`, so the accumulated SSE is set unconditionally
+/// (an empty stream finalizes to an empty body, never a stale prior error).
 fn finalize_stream_capture(
     capture: &mut DebugCapture,
     started: Instant,
@@ -189,9 +190,7 @@ fn finalize_stream_capture(
     error: Option<&str>,
 ) {
     capture.elapsed_ms = Some(started.elapsed().as_millis());
-    if !raw_sse.is_empty() || capture.response_raw.is_none() {
-        capture.response_raw = Some(std::mem::take(raw_sse));
-    }
+    capture.response_raw = Some(std::mem::take(raw_sse));
     if let Some(reason) = error {
         capture.error = Some(reason.to_string());
     }
