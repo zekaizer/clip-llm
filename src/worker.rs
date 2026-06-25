@@ -1,12 +1,13 @@
 use std::sync::mpsc;
 use std::thread;
+use std::time::{Instant, SystemTime};
 
 use tokio::sync::mpsc as tokio_mpsc;
 use tracing::{debug, error, info, trace, warn, Instrument};
 
 use crate::api::client::{LlmClient, SseEvent, SseParser};
 use crate::api::response::{extract_first_think_content, strip_think_blocks, ThinkBlockFilter};
-use crate::{ApiError, ClipboardContent, ProcessMode, RephraseParams, ThinkingMode};
+use crate::{ApiError, ClipboardContent, DebugCapture, ProcessMode, RephraseParams, ThinkingMode};
 
 /// Maximum time to wait for the next streaming chunk before treating the stream
 /// as stalled. The streaming HTTP client has only a connect timeout (no overall
@@ -52,8 +53,15 @@ pub enum WorkerResponse {
         think_content: Option<String>,
         request_id: u64,
         incomplete: Option<String>,
+        /// Raw request/response snapshot for the on-demand debug view.
+        debug: DebugCapture,
     },
-    Error { message: String, request_id: u64 },
+    Error {
+        message: String,
+        request_id: u64,
+        /// Raw request/response snapshot for the on-demand debug view.
+        debug: DebugCapture,
+    },
     /// One-shot: vision + thinking-control capability from the startup probe
     /// (sent once). Drives both the state machine's thinking flag and the tray
     /// Status menu.
@@ -139,6 +147,7 @@ fn make_complete_response(
     request_id: u64,
     label: &str,
     incomplete: Option<String>,
+    debug: DebugCapture,
 ) -> WorkerResponse {
     let think_content = extract_first_think_content(raw);
     let text = strip_think_blocks(raw);
@@ -149,7 +158,7 @@ fn make_complete_response(
             "The model returned no visible output. Try switching mode or disabling thinking."
                 .to_string()
         });
-        WorkerResponse::Error { message, request_id }
+        WorkerResponse::Error { message, request_id, debug }
     } else {
         match &incomplete {
             Some(reason) => warn!(
@@ -164,7 +173,26 @@ fn make_complete_response(
             think_content,
             request_id,
             incomplete,
+            debug,
         }
+    }
+}
+
+/// Stamp a streaming capture at a finalize point: elapsed time, the raw SSE
+/// stream received so far, and an optional reason the stream ended abnormally.
+/// Reached only on the streaming success path, where `send_request` has already
+/// cleared `response_raw` to `None`, so the accumulated SSE is set unconditionally
+/// (an empty stream finalizes to an empty body, never a stale prior error).
+fn finalize_stream_capture(
+    capture: &mut DebugCapture,
+    started: Instant,
+    raw_sse: &mut String,
+    error: Option<&str>,
+) {
+    capture.elapsed_ms = Some(started.elapsed().as_millis());
+    capture.response_raw = Some(std::mem::take(raw_sse));
+    if let Some(reason) = error {
+        capture.error = Some(reason.to_string());
     }
 }
 
@@ -237,20 +265,28 @@ async fn run_non_streaming(
     mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
     let ProcessTask { content, mode, rephrase_params, thinking_mode, request_id } = task;
+    let mut capture = DebugCapture {
+        timestamp: Some(crate::format_utc(SystemTime::now())),
+        ..Default::default()
+    };
+    let started = Instant::now();
     let result = tokio::select! {
-        r = llm.complete(&content, mode, rephrase_params, thinking_mode) => r,
+        r = llm.complete(&content, mode, rephrase_params, thinking_mode, &mut capture) => r,
         _ = &mut cancel_rx => {
             debug!("worker: request cancelled during connect");
             return;
         }
     };
+    capture.elapsed_ms = Some(started.elapsed().as_millis());
     let r = match result {
-        Ok(raw) => make_complete_response(&raw, mode, request_id, "complete", None),
+        Ok(raw) => make_complete_response(&raw, mode, request_id, "complete", None, capture),
         Err(e) => {
             error!("worker: LLM error: {e}");
+            capture.error = Some(format!("{e:?}"));
             WorkerResponse::Error {
                 message: friendly_api_error(&e),
                 request_id,
+                debug: capture,
             }
         }
     };
@@ -265,8 +301,13 @@ async fn run_streaming(
     mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
     let ProcessTask { content, mode, rephrase_params, thinking_mode, request_id } = task;
+    let mut capture = DebugCapture {
+        timestamp: Some(crate::format_utc(SystemTime::now())),
+        ..Default::default()
+    };
+    let started = Instant::now();
     let resp = tokio::select! {
-        r = llm.complete_stream(&content, mode, rephrase_params, thinking_mode) => r,
+        r = llm.complete_stream(&content, mode, rephrase_params, thinking_mode, &mut capture) => r,
         _ = &mut cancel_rx => {
             debug!("worker: request cancelled during connect");
             return;
@@ -277,9 +318,13 @@ async fn run_streaming(
         Ok(r) => r,
         Err(e) => {
             error!("worker: LLM stream error: {e}");
+            // A non-2xx rejection already stored its body/status in `capture`.
+            capture.elapsed_ms = Some(started.elapsed().as_millis());
+            capture.error = Some(format!("{e:?}"));
             let _ = resp_tx.send(WorkerResponse::Error {
                 message: friendly_api_error(&e),
                 request_id,
+                debug: capture,
             });
             return;
         }
@@ -307,6 +352,9 @@ async fn run_streaming(
     // distinguish "died after the first frame" from a genuine mid-reply cut.
     let mut chunk_count: u32 = 0;
     let mut byte_count: usize = 0;
+    // Raw SSE bytes as received, accumulated for the debug view (the parsed
+    // visible text in `full_content` is not the wire data).
+    let mut raw_sse = String::new();
 
     loop {
         let chunk = tokio::select! {
@@ -321,9 +369,14 @@ async fn run_streaming(
                     if reasoning_open {
                         full_content.push_str("</think>");
                     }
+                    finalize_stream_capture(
+                        &mut capture, started, &mut raw_sse,
+                        Some("stream idle timeout — server stopped responding mid-reply"),
+                    );
                     let r = make_complete_response(
                         &full_content, mode, request_id, "stream stalled",
                         Some("The server stopped responding mid-reply. Try again.".to_string()),
+                        capture,
                     );
                     let _ = resp_tx.send(r);
                     return;
@@ -339,7 +392,9 @@ async fn run_streaming(
             Ok(Some(bytes)) => {
                 chunk_count += 1;
                 byte_count += bytes.len();
-                trace!("SSE raw chunk #{chunk_count} ({} bytes):\n{}", bytes.len(), String::from_utf8_lossy(&bytes));
+                let chunk_str = String::from_utf8_lossy(&bytes);
+                trace!("SSE raw chunk #{chunk_count} ({} bytes):\n{chunk_str}", bytes.len());
+                raw_sse.push_str(&chunk_str);
                 for event in parser.feed(&bytes) {
                     let done = handle_stream_event(
                         event, &mut full_content, &mut reasoning_open, &mut filter,
@@ -355,8 +410,10 @@ async fn run_streaming(
                         debug!("SSE stream done, full content ({} chars):\n{full_content}", full_content.len());
                         let incomplete = (finish_reason.as_deref() == Some("length"))
                             .then(|| friendly_api_error(&ApiError::Truncated));
+                        finalize_stream_capture(&mut capture, started, &mut raw_sse, incomplete.as_deref());
                         let r = make_complete_response(
                             &full_content, mode, request_id, "stream complete", incomplete,
+                            capture,
                         );
                         let _ = resp_tx.send(r);
                         return;
@@ -377,8 +434,10 @@ async fn run_streaming(
                         }
                         let incomplete = (finish_reason.as_deref() == Some("length"))
                             .then(|| friendly_api_error(&ApiError::Truncated));
+                        finalize_stream_capture(&mut capture, started, &mut raw_sse, incomplete.as_deref());
                         let r = make_complete_response(
                             &full_content, mode, request_id, "stream complete (flushed)", incomplete,
+                            capture,
                         );
                         let _ = resp_tx.send(r);
                         return;
@@ -399,8 +458,10 @@ async fn run_streaming(
                             "stream EOF with finish_reason=stop but no [DONE] ({} chars) — treating as complete",
                             full_content.len()
                         );
+                        finalize_stream_capture(&mut capture, started, &mut raw_sse, None);
                         let r = make_complete_response(
                             &full_content, mode, request_id, "stream complete (no DONE)", None,
+                            capture,
                         );
                         let _ = resp_tx.send(r);
                     }
@@ -414,8 +475,13 @@ async fn run_streaming(
                         } else {
                             "The connection closed before the reply finished. Try again.".to_string()
                         };
+                        finalize_stream_capture(
+                            &mut capture, started, &mut raw_sse,
+                            Some(&format!("stream closed early (finish_reason={other:?})")),
+                        );
                         let r = make_complete_response(
                             &full_content, mode, request_id, "stream closed early", Some(incomplete),
+                            capture,
                         );
                         let _ = resp_tx.send(r);
                     }
@@ -427,9 +493,14 @@ async fn run_streaming(
                     full_content.push_str("</think>");
                 }
                 error!("worker: stream chunk error after {chunk_count} chunks/{byte_count} bytes: {e}");
+                finalize_stream_capture(
+                    &mut capture, started, &mut raw_sse,
+                    Some(&format!("stream chunk error after {chunk_count} chunks/{byte_count} bytes: {e:?}")),
+                );
                 let r = make_complete_response(
                     &full_content, mode, request_id, "stream error",
                     Some(friendly_reqwest_error(&e)),
+                    capture,
                 );
                 let _ = resp_tx.send(r);
                 return;
@@ -471,6 +542,7 @@ async fn run_mock_streaming(
                 think_content: None,
                 request_id,
                 incomplete: None,
+                debug: DebugCapture::default(),
             });
         }
         Err(msg) => {
@@ -478,6 +550,7 @@ async fn run_mock_streaming(
             let _ = resp_tx.send(WorkerResponse::Error {
                 message: msg,
                 request_id,
+                debug: DebugCapture::default(),
             });
         }
     }
@@ -635,7 +708,7 @@ mod tests {
 
     fn assert_error(r: &WorkerResponse, expected_id: u64) -> String {
         match r {
-            WorkerResponse::Error { message, request_id } => {
+            WorkerResponse::Error { message, request_id, .. } => {
                 assert_eq!(*request_id, expected_id);
                 message.clone()
             }
@@ -655,7 +728,7 @@ mod tests {
 
     #[test]
     fn make_complete_response_plain_text() {
-        let r = make_complete_response("hello world", ProcessMode::Translate, 1, "complete", None);
+        let r = make_complete_response("hello world", ProcessMode::Translate, 1, "complete", None, DebugCapture::default());
         let text = assert_complete(&r, 1);
         assert_eq!(text, "hello world");
     }
@@ -663,7 +736,7 @@ mod tests {
     #[test]
     fn make_complete_response_strips_think_blocks() {
         let raw = "<think>internal</think>visible output";
-        let r = make_complete_response(raw, ProcessMode::Rephrase, 2, "stream complete", None);
+        let r = make_complete_response(raw, ProcessMode::Rephrase, 2, "stream complete", None, DebugCapture::default());
         let text = assert_complete(&r, 2);
         assert_eq!(text, "visible output");
     }
@@ -671,14 +744,14 @@ mod tests {
     #[test]
     fn make_complete_response_empty_after_strip() {
         let raw = "<think>only thinking</think>";
-        let r = make_complete_response(raw, ProcessMode::Summarize, 3, "complete", None);
+        let r = make_complete_response(raw, ProcessMode::Summarize, 3, "complete", None, DebugCapture::default());
         let msg = assert_error(&r, 3);
         assert!(msg.contains("no visible output"));
     }
 
     #[test]
     fn make_complete_response_empty_input() {
-        let r = make_complete_response("", ProcessMode::Translate, 4, "complete", None);
+        let r = make_complete_response("", ProcessMode::Translate, 4, "complete", None, DebugCapture::default());
         let msg = assert_error(&r, 4);
         assert!(msg.contains("no visible output"));
     }
@@ -686,7 +759,7 @@ mod tests {
     #[test]
     fn make_complete_response_whitespace_only_after_strip() {
         let raw = "<think>x</think>   \n  ";
-        let r = make_complete_response(raw, ProcessMode::Translate, 5, "complete", None);
+        let r = make_complete_response(raw, ProcessMode::Translate, 5, "complete", None, DebugCapture::default());
         // strip_think_blocks trims whitespace; empty after trim → error.
         let msg = assert_error(&r, 5);
         assert!(msg.contains("no visible output"));
@@ -694,7 +767,7 @@ mod tests {
 
     #[test]
     fn make_complete_response_preserves_request_id() {
-        let r = make_complete_response("ok", ProcessMode::Translate, 42, "test", None);
+        let r = make_complete_response("ok", ProcessMode::Translate, 42, "test", None, DebugCapture::default());
         assert_complete(&r, 42);
     }
 
@@ -704,6 +777,7 @@ mod tests {
         // the reason as the `incomplete` banner.
         let r = make_complete_response(
             "partial text", ProcessMode::Translate, 7, "stream", Some("cut off".to_string()),
+            DebugCapture::default(),
         );
         match r {
             WorkerResponse::Complete { result, incomplete, request_id, .. } => {
@@ -720,6 +794,7 @@ mod tests {
         // Cut off before any visible content → error using the cut-off reason.
         let r = make_complete_response(
             "<think>x</think>", ProcessMode::Translate, 8, "stream", Some("cut off".to_string()),
+            DebugCapture::default(),
         );
         let msg = assert_error(&r, 8);
         assert_eq!(msg, "cut off");

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 use tracing::{debug, info, trace, warn};
 
-use crate::{ApiError, ClipboardContent, ProcessMode, RephraseParams, ThinkingMode};
+use crate::{ApiError, ClipboardContent, DebugCapture, ProcessMode, RephraseParams, ThinkingMode};
 
 // Defaults — overridable via environment variables.
 const CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
@@ -376,6 +376,20 @@ fn parse_custom_headers(raw: &str) -> Vec<(String, String)> {
             Some((key.trim().to_string(), value.trim().to_string()))
         })
         .collect()
+}
+
+/// Replace long inline `data:` URIs (base64 images) in a request JSON value with
+/// a short placeholder, so the debug capture stays readable instead of being a
+/// wall of base64. Recurses through arrays and objects.
+fn sanitize_debug_json(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::String(s) if s.starts_with("data:") && s.len() > 128 => {
+            *s = format!("[inline data elided, {} bytes]", s.len());
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(sanitize_debug_json),
+        serde_json::Value::Object(map) => map.values_mut().for_each(sanitize_debug_json),
+        _ => {}
+    }
 }
 
 impl LlmClient {
@@ -790,6 +804,7 @@ impl LlmClient {
         rephrase_params: RephraseParams,
         thinking_mode: ThinkingMode,
         stream: bool,
+        capture: &mut DebugCapture,
     ) -> Result<reqwest::Response, ApiError> {
         let inner = &self.0;
         let vision = self.probe_vision().await;
@@ -846,10 +861,16 @@ impl LlmClient {
             chat_template_kwargs: template_kwargs,
         };
 
-        if tracing::enabled!(tracing::Level::DEBUG)
-            && let Ok(json) = serde_json::to_string_pretty(&body)
-        {
-            debug!("LLM request body:\n{json}");
+        // Capture the final request for the debug view: serialize, then elide
+        // base64 image payloads so the snapshot (and the DEBUG log below) stay
+        // readable. Auth lives in headers, not the body, so no secret is stored.
+        capture.endpoint = Some(inner.endpoint.clone());
+        if let Ok(mut value) = serde_json::to_value(&body) {
+            sanitize_debug_json(&mut value);
+            capture.request = serde_json::to_string_pretty(&value).ok();
+        }
+        if let Some(req_json) = &capture.request {
+            debug!("LLM request body:\n{req_json}");
         }
         let client = if stream { &inner.streaming_client } else { &inner.client };
         let mut req = inner.apply_auth(client.post(&inner.endpoint).json(&body));
@@ -861,7 +882,7 @@ impl LlmClient {
         for attempt in 1..=MAX_RETRIES {
             // try_clone() fails only for stream bodies; JSON bodies always clone.
             let Some(retry_req) = req.try_clone() else { break };
-            match Self::send_request(req, headers_timeout).await {
+            match Self::send_request(req, headers_timeout, capture).await {
                 Err(e) if is_transient_error(&e) => {
                     warn!(
                         "transient request failure (attempt {attempt}/{}): {e}; retrying in {}ms",
@@ -874,14 +895,18 @@ impl LlmClient {
                 result => return result,
             }
         }
-        Self::send_request(req, headers_timeout).await
+        Self::send_request(req, headers_timeout, capture).await
     }
 
     /// Send a single request attempt. When `headers_timeout` is set, the wait
-    /// for response headers is bounded.
+    /// for response headers is bounded. Records the response status into
+    /// `capture`, and on a non-2xx rejection reads the server's error body
+    /// (which `error_for_status` would otherwise discard) so the debug view can
+    /// show why the request was refused.
     async fn send_request(
         req: reqwest::RequestBuilder,
         headers_timeout: Option<Duration>,
+        capture: &mut DebugCapture,
     ) -> Result<reqwest::Response, ApiError> {
         let resp = match headers_timeout {
             Some(t) => tokio::time::timeout(t, req.send())
@@ -889,7 +914,17 @@ impl LlmClient {
                 .map_err(|_| ApiError::InitialResponseTimeout(t.as_secs()))??,
             None => req.send().await?,
         };
-        Ok(resp.error_for_status()?)
+        capture.status = Some(resp.status().as_u16());
+        if let Err(status_err) = resp.error_for_status_ref() {
+            // Consume the body for the error detail before dropping the response.
+            capture.response_raw = resp.text().await.ok();
+            return Err(ApiError::Http(status_err));
+        }
+        // Success: drop any error body captured on a prior (retried) attempt so
+        // it cannot masquerade as this response's body. The real body is filled
+        // by `complete` (non-streaming) or the streaming finalize.
+        capture.response_raw = None;
+        Ok(resp)
     }
 
     /// Send content to the vLLM server and return the raw response content.
@@ -900,15 +935,18 @@ impl LlmClient {
         mode: ProcessMode,
         rephrase_params: RephraseParams,
         thinking_mode: ThinkingMode,
+        capture: &mut DebugCapture,
     ) -> Result<String, ApiError> {
         let inner = &self.0;
         info!("sending request to {}", inner.endpoint);
         debug!("model={}, temperature={}, max_tokens={}", inner.model, inner.temperature, inner.max_tokens);
 
         let resp = self
-            .build_and_send(content, mode, rephrase_params, thinking_mode, false)
+            .build_and_send(content, mode, rephrase_params, thinking_mode, false, capture)
             .await?;
         let text = resp.text().await?;
+        // Record the raw body before parsing, so even a parse failure exposes it.
+        capture.response_raw = Some(text.clone());
         if tracing::enabled!(tracing::Level::DEBUG) {
             if let Ok(pretty) = serde_json::from_str::<serde_json::Value>(&text) {
                 debug!(
@@ -948,10 +986,11 @@ impl LlmClient {
         mode: ProcessMode,
         rephrase_params: RephraseParams,
         thinking_mode: ThinkingMode,
+        capture: &mut DebugCapture,
     ) -> Result<reqwest::Response, ApiError> {
         let inner = &self.0;
         info!("sending streaming request to {}", inner.endpoint);
-        self.build_and_send(content, mode, rephrase_params, thinking_mode, true)
+        self.build_and_send(content, mode, rephrase_params, thinking_mode, true, capture)
             .await
     }
 }

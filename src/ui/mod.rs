@@ -122,6 +122,14 @@ pub struct OverlayApp {
     /// still on the clipboard — the ↩ paste otherwise double-writes the
     /// result that auto-copy already placed (#16b).
     last_clipboard_write: Option<(String, u64)>,
+    /// Raw request/response of the result currently shown, for the overlay's
+    /// on-demand "copy debug" button. Set in poll_responses AFTER the worker
+    /// Complete/Error effects run, so it survives the ResetAreas clear those
+    /// transitions also emit. ResetAreas (and HideWindow) clear it, so a result
+    /// shown WITHOUT a fresh worker response — a cached result, or a
+    /// capture-read failure that never hit the server — leaves it cleared and
+    /// the button hidden, never copying another request's data.
+    last_debug: Option<crate::DebugCapture>,
     /// Completed-request tally for the tray Status menu: successes and errors
     /// seen so far this session. Drives the "Requests" / "Last" rows and the
     /// derived error rate.
@@ -183,6 +191,7 @@ impl OverlayApp {
             pending_process: None,
             copy_confirmed_at: None,
             last_clipboard_write: None,
+            last_debug: None,
             req_ok: 0,
             req_err: 0,
             diag: crate::diagnostics::DiagCollector::new(),
@@ -230,6 +239,7 @@ impl OverlayApp {
             pending_process: None,
             copy_confirmed_at: None,
             last_clipboard_write: None,
+            last_debug: None,
             req_ok: 0,
             req_err: 0,
             last_focused: None,
@@ -339,6 +349,7 @@ impl OverlayApp {
                     self.pending_content = None;
                     self.single_commit_pending = false;
                     self.pending_process = None;
+                    self.last_debug = None;
                 }
                 UiEffect::CaptureMousePosition => self.capture_mouse_position(),
                 UiEffect::ResetAreas => {
@@ -352,6 +363,12 @@ impl OverlayApp {
                         let _ = self.diag_state_tx.send(to);
                     }
                     self.think_expanded = false;
+                    // Clear the debug snapshot on every area reset. For a worker
+                    // result this fires before poll_responses re-sets last_debug
+                    // (same frame, after effects); for a cached result or capture
+                    // failure nothing re-sets it, so the button stays hidden
+                    // rather than copying a prior request's data.
+                    self.last_debug = None;
                     ctx.memory_mut(|m| m.reset_areas());
                 }
                 UiEffect::PasteClipboard => {
@@ -598,9 +615,16 @@ impl OverlayApp {
                     break;
                 }
             };
+            // Raw request/response of a finished request, held aside so it is
+            // stored AFTER the effects run. The Processing→Result/Error effects
+            // include ResetAreas, which clears last_debug; setting it before
+            // execute_effects would wipe it in the same frame, before render —
+            // so the copy-debug button would never appear.
+            let mut fresh_debug: Option<crate::DebugCapture> = None;
             let event = match response {
-                WorkerResponse::Complete { result, think_content, request_id, incomplete } => {
+                WorkerResponse::Complete { result, think_content, request_id, incomplete, debug } => {
                     self.record_request_outcome(true, if incomplete.is_some() { "partial" } else { "ok" });
+                    fresh_debug = Some(debug);
                     UiEvent::WorkerResult {
                         text: result,
                         think_content,
@@ -608,8 +632,9 @@ impl OverlayApp {
                         incomplete,
                     }
                 }
-                WorkerResponse::Error { message, request_id } => {
+                WorkerResponse::Error { message, request_id, debug } => {
                     self.record_request_outcome(false, &tray_last_label(&message));
+                    fresh_debug = Some(debug);
                     UiEvent::WorkerError {
                         message,
                         request_id,
@@ -634,6 +659,12 @@ impl OverlayApp {
             };
             let effects = self.sm.handle(event);
             self.execute_effects(effects, ctx);
+            // Store after effects: this result's debug survives the ResetAreas
+            // clear, while a cached result or capture failure (which don't set
+            // fresh_debug) correctly leaves last_debug cleared → button hidden.
+            if fresh_debug.is_some() {
+                self.last_debug = fresh_debug;
+            }
         }
 
         // Refresh the tray "Telemetry" row with the latest shipped/dropped
@@ -902,6 +933,19 @@ impl OverlayApp {
             overlay::OverlayAction::PasteReplace => UiEvent::UserPaste,
             overlay::OverlayAction::TogglePin => UiEvent::UserTogglePin,
             overlay::OverlayAction::Retry => UiEvent::UserRetry,
+            overlay::OverlayAction::CopyDebug => {
+                // Side channel, not a state-machine event: write the raw
+                // request/response snapshot straight to the clipboard. Bypasses
+                // the WriteClipboard dedup so it never disturbs result tracking.
+                if let Some(debug) = &self.last_debug {
+                    let text = debug.to_clipboard_text();
+                    match self.clipboard.write_text(&text) {
+                        Ok(()) => info!("copied debug snapshot to clipboard ({} chars)", text.len()),
+                        Err(e) => error!("debug clipboard write failed: {e}"),
+                    }
+                }
+                return;
+            }
         };
         let effects = self.sm.handle(event);
         if debounce {
@@ -1061,6 +1105,7 @@ impl eframe::App for OverlayApp {
             self.sm.capture_source(),
             self.copy_confirmed_at.is_some(),
             elapsed,
+            self.last_debug.is_some(),
             ctx,
         );
 
