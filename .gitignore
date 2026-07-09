@@ -10,6 +10,10 @@
 
 # Claude Code
 .claude/
+CLAUDE.local.md
+
+# Local dev .app bundle (packaged by scripts/package-macos-app.sh; contains config.toml with API key)
+/clip-llm.app/
 
 # OS
 .DS_Store
@@ -17,3 +21,4 @@ Thumbs.db
 
 # Cargo lock is committed for binaries (keep it)
 # Cargo.lock
+/run-dev-macos.sh
