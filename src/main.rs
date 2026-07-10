@@ -105,6 +105,19 @@ fn select_wgpu_adapter(
     Ok(selected)
 }
 
+/// Show a user-visible alert when the global hotkey cannot be registered — the
+/// most common real-world causes are a second clip-llm instance already
+/// running, or another app having reserved the Ctrl+Shift+C combination.
+fn show_hotkey_failure_alert(e: &HotkeyError) {
+    let message = format!(
+        "clip-llm could not register the Ctrl+Shift+C hotkey ({e}).\n\n\
+         This usually means either:\n\
+         - clip-llm is already running, or\n\
+         - another app has reserved this key combination."
+    );
+    clip_llm::platform::show_startup_alert("clip-llm: hotkey registration failed", &message);
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Load prompt overrides from config.toml (if any) before any worker or UI
     // thread reads them. Falls back to built-in defaults on any error.
@@ -138,12 +151,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // GlobalHotKeyManager must be created on the main thread and kept alive.
-    let manager = GlobalHotKeyManager::new()
-        .map_err(|e| HotkeyError::InitFailed(e.to_string()))?;
+    // A failure here is usually caused by another clip-llm instance already
+    // running, or another app having reserved Ctrl+Shift+C — but with no
+    // window/Dock icon on this code path, stderr is invisible in the .app
+    // bundle, so also show a native alert (mirrors the accessibility and
+    // missing-config startup paths above/below).
+    let manager = match GlobalHotKeyManager::new() {
+        Ok(m) => m,
+        Err(e) => {
+            let err = HotkeyError::InitFailed(e.to_string());
+            show_hotkey_failure_alert(&err);
+            return Err(err.into());
+        }
+    };
     let hotkey = HotKey::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyC);
-    manager
-        .register(hotkey)
-        .map_err(|e| HotkeyError::RegisterFailed(e.to_string()))?;
+    if let Err(e) = manager.register(hotkey) {
+        let err = HotkeyError::RegisterFailed(e.to_string());
+        show_hotkey_failure_alert(&err);
+        return Err(err.into());
+    }
     info!("registered hotkey: Ctrl+Shift+C (single-tap: clipboard, double-tap: copy selection)");
 
     // Set up channels and spawn the async worker thread.

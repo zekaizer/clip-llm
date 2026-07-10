@@ -333,6 +333,17 @@ pub fn poll_tray_events(ctx: &eframe::egui::Context) {
     }
 }
 
+/// Show a native, modal alert with the given title and message, blocking until
+/// the user dismisses it. Intended for fatal startup errors — before the tray,
+/// window, or event loop exist — that would otherwise only reach stderr, which
+/// is invisible when running as a windowless .app bundle.
+pub fn show_startup_alert(title: &str, message: &str) {
+    #[cfg(target_os = "macos")]
+    macos::show_alert(title, message);
+    #[cfg(target_os = "windows")]
+    windows::show_alert_blocking(title, message);
+}
+
 /// Returns a platform-specific callback for pre-show hooks (coordinator / diagnostics threads).
 ///
 /// On Windows, hidden windows (SW_HIDE) do not receive WM_PAINT, so eframe `update()`
