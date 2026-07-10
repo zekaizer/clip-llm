@@ -328,6 +328,22 @@ fn render_elapsed_label(ui: &mut egui::Ui, elapsed: Option<std::time::Duration>)
     }
 }
 
+/// Render the "Cancel" button shown while a capture or LLM request is in
+/// flight (Capturing / Processing states), setting `action` to
+/// `OverlayAction::Cancel` when clicked.
+fn render_cancel_button(ui: &mut egui::Ui, action: &mut OverlayAction) {
+    let cancel_btn = egui::Button::new(
+        egui::RichText::new("Cancel")
+            .size(12.0)
+            .color(egui::Color32::from_rgb(255, 140, 140)),
+    )
+    .fill(egui::Color32::from_rgba_unmultiplied(80, 30, 30, 180))
+    .corner_radius(6.0);
+    if ui.add(cancel_btn).clicked() {
+        *action = OverlayAction::Cancel;
+    }
+}
+
 /// Render the Capturing state: a spinner shown immediately on double-tap while the
 /// selection is copied on a background thread (no content/tabs yet).
 fn render_capturing(
@@ -361,16 +377,7 @@ fn render_capturing(
         });
     }
     ui.add_space(4.0);
-    let cancel_btn = egui::Button::new(
-        egui::RichText::new("Cancel")
-            .size(12.0)
-            .color(egui::Color32::from_rgb(255, 140, 140)),
-    )
-    .fill(egui::Color32::from_rgba_unmultiplied(80, 30, 30, 180))
-    .corner_radius(6.0);
-    if ui.add(cancel_btn).clicked() {
-        *action = OverlayAction::Cancel;
-    }
+    render_cancel_button(ui, action);
 }
 
 fn render_processing(
@@ -426,16 +433,7 @@ fn render_processing(
         }
     }
     ui.add_space(4.0);
-    let cancel_btn = egui::Button::new(
-        egui::RichText::new("Cancel")
-            .size(12.0)
-            .color(egui::Color32::from_rgb(255, 140, 140)),
-    )
-    .fill(egui::Color32::from_rgba_unmultiplied(80, 30, 30, 180))
-    .corner_radius(6.0);
-    if ui.add(cancel_btn).clicked() {
-        *action = OverlayAction::Cancel;
-    }
+    render_cancel_button(ui, action);
 }
 
 fn render_error(
