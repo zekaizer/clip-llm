@@ -384,6 +384,9 @@ pub enum PlatformError {
 
     #[error("paste simulation failed: {0}")]
     PasteFailed(String),
+
+    #[error("launch-at-login setting failed: {0}")]
+    LaunchAtLoginFailed(String),
 }
 
 #[derive(Debug, Error)]

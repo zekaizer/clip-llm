@@ -267,6 +267,8 @@ mod tests {
         fn reposition_window(&self, _x: f32, _y: f32) -> bool { false }
         fn paste_to_foreground(&self) -> Result<(), PlatformError> { Ok(()) }
         fn exclude_from_taskbar(&self) {}
+        fn launch_at_login_enabled(&self) -> bool { false }
+        fn set_launch_at_login(&self, _enabled: bool) -> Result<(), PlatformError> { Ok(()) }
     }
 
     #[test]

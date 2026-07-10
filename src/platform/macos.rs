@@ -426,6 +426,92 @@ pub fn log_window_diagnostics() {
     }
 }
 
+/// Label used both as the LaunchAgent plist `Label` key and its filename
+/// (`~/Library/LaunchAgents/<label>.plist`).
+const LAUNCH_AGENT_LABEL: &str = "com.clip-llm";
+
+/// Path to the per-user LaunchAgent plist that launches clip-llm at login.
+/// Returns `None` if `$HOME` is not set (should not happen for a GUI session).
+fn launch_agent_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(
+        std::path::PathBuf::from(home)
+            .join("Library/LaunchAgents")
+            .join(format!("{LAUNCH_AGENT_LABEL}.plist")),
+    )
+}
+
+/// Escape a string for use as plist XML text content.
+fn plist_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+/// Generate the LaunchAgent plist content that runs `exe_path` at login.
+/// `RunAtLoad` starts the app the next time the user logs in; no `launchctl`
+/// call is needed to arm that behavior — `launchd` picks up plists under
+/// `~/Library/LaunchAgents` automatically at login.
+fn launch_agent_plist(exe_path: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\">\n\
+         <dict>\n\
+         \t<key>Label</key>\n\
+         \t<string>{label}</string>\n\
+         \t<key>ProgramArguments</key>\n\
+         \t<array>\n\
+         \t\t<string>{exe}</string>\n\
+         \t</array>\n\
+         \t<key>RunAtLoad</key>\n\
+         \t<true/>\n\
+         </dict>\n\
+         </plist>\n",
+        label = LAUNCH_AGENT_LABEL,
+        exe = plist_escape(exe_path),
+    )
+}
+
+/// Whether the LaunchAgent plist exists. Does not verify its contents point at
+/// the current executable — a stale plist still counts as "enabled" here;
+/// [`set_launch_at_login`] corrects the path on the next toggle-on.
+pub fn launch_at_login_enabled() -> bool {
+    launch_agent_path().is_some_and(|p| p.is_file())
+}
+
+/// Write (overwriting any existing plist) or remove the LaunchAgent plist.
+pub fn set_launch_at_login(enabled: bool) -> Result<(), PlatformError> {
+    let path = launch_agent_path().ok_or_else(|| {
+        PlatformError::LaunchAtLoginFailed("could not determine home directory ($HOME unset)".into())
+    })?;
+
+    if !enabled {
+        return match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(PlatformError::LaunchAtLoginFailed(format!(
+                "failed to remove LaunchAgent plist: {e}"
+            ))),
+        };
+    }
+
+    let exe = std::env::current_exe().map_err(|e| {
+        PlatformError::LaunchAtLoginFailed(format!("failed to resolve current executable: {e}"))
+    })?;
+    let exe_str = exe.to_string_lossy();
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            PlatformError::LaunchAtLoginFailed(format!(
+                "failed to create LaunchAgents directory: {e}"
+            ))
+        })?;
+    }
+
+    std::fs::write(&path, launch_agent_plist(&exe_str)).map_err(|e| {
+        PlatformError::LaunchAtLoginFailed(format!("failed to write LaunchAgent plist: {e}"))
+    })
+}
+
 pub struct MacOsPlatform;
 
 impl MacOsPlatform {
@@ -605,11 +691,42 @@ impl Platform for MacOsPlatform {
         });
         Ok(())
     }
+
+    fn launch_at_login_enabled(&self) -> bool {
+        launch_at_login_enabled()
+    }
+
+    fn set_launch_at_login(&self, enabled: bool) -> Result<(), PlatformError> {
+        set_launch_at_login(enabled)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{appkit_rect_to_cg, bounds_contain};
+    use super::{appkit_rect_to_cg, bounds_contain, launch_agent_plist, plist_escape};
+
+    #[test]
+    fn launch_agent_plist_contains_label_and_exe_path() {
+        let plist = launch_agent_plist("/Applications/clip-llm.app/Contents/MacOS/clip-llm");
+        assert!(plist.contains("<key>Label</key>"));
+        assert!(plist.contains("<string>com.clip-llm</string>"));
+        assert!(plist.contains("<string>/Applications/clip-llm.app/Contents/MacOS/clip-llm</string>"));
+        assert!(plist.contains("<key>RunAtLoad</key>"));
+        assert!(plist.contains("<true/>"));
+    }
+
+    #[test]
+    fn launch_agent_plist_escapes_xml_special_chars() {
+        let plist = launch_agent_plist("/Users/a & b/<clip-llm>");
+        assert!(plist.contains("/Users/a &amp; b/&lt;clip-llm&gt;"));
+        assert!(!plist.contains("a & b"));
+    }
+
+    #[test]
+    fn plist_escape_handles_all_special_chars() {
+        assert_eq!(plist_escape("a&b<c>d"), "a&amp;b&lt;c&gt;d");
+        assert_eq!(plist_escape("plain"), "plain");
+    }
 
     #[test]
     fn appkit_to_cg_flips_y_around_primary_height() {

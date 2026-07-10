@@ -65,6 +65,20 @@ pub trait Platform {
     /// the startup `VISIBLE` sync (see its docs). No-op on macOS (the Accessory
     /// activation policy already excludes it).
     fn exclude_from_taskbar(&self);
+
+    /// Check whether the app is currently configured to launch automatically at
+    /// login. macOS: whether the LaunchAgent plist exists. Windows: whether the
+    /// `Run` registry value exists. Never panics; returns `false` on any lookup
+    /// failure (treated as "not enabled").
+    fn launch_at_login_enabled(&self) -> bool;
+
+    /// Enable or disable launching the app automatically at login.
+    ///
+    /// Enabling always (re)writes the launch entry to point at the current
+    /// executable, so a stale entry left over from a moved/reinstalled binary
+    /// is corrected rather than left pointing at the old path. Disabling
+    /// removes the entry; it is not an error to disable when already disabled.
+    fn set_launch_at_login(&self, enabled: bool) -> Result<(), crate::PlatformError>;
 }
 
 #[cfg(target_os = "macos")]
