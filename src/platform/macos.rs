@@ -29,7 +29,9 @@ type MsgSendPoint = unsafe extern "C" fn(*mut c_void, *mut c_void, CGPoint);
 type MsgSendPtr = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void);
 type MsgSendRetI64 = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i64;
 type MsgSendRetI32 = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
-type MsgSendRetBool = unsafe extern "C" fn(*mut c_void, *mut c_void) -> bool;
+// Same `BOOL` representation caveat for return values: read as `i8`, treat
+// any non-zero as true.
+type MsgSendRetBool = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i8;
 type MsgSendUlongRetPtr = unsafe extern "C" fn(*mut c_void, *mut c_void, c_ulong) -> *mut c_void;
 #[cfg(target_arch = "aarch64")]
 type MsgSendRetRect = unsafe extern "C" fn(*mut c_void, *mut c_void) -> CGRect;
@@ -413,9 +415,9 @@ pub fn log_window_diagnostics() {
 
         let behavior = msg_send_i64(window, sel_registerName(c"collectionBehavior".as_ptr()));
         let level = msg_send_i64(window, sel_registerName(c"level".as_ptr()));
-        let visible = msg_send_bool(window, sel_registerName(c"isVisible".as_ptr()));
-        let is_key = msg_send_bool(window, sel_registerName(c"isKeyWindow".as_ptr()));
-        let is_main = msg_send_bool(window, sel_registerName(c"isMainWindow".as_ptr()));
+        let visible = msg_send_bool(window, sel_registerName(c"isVisible".as_ptr())) != 0;
+        let is_key = msg_send_bool(window, sel_registerName(c"isKeyWindow".as_ptr())) != 0;
+        let is_main = msg_send_bool(window, sel_registerName(c"isMainWindow".as_ptr())) != 0;
 
         info!(
             "window_diag: policy={policy_name}({policy}), behavior=0x{behavior:x}, \
