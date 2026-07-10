@@ -67,6 +67,15 @@ pub struct OverlayApp {
     tap_rx: mpsc::Receiver<TapEvent>,
     /// Cached desired_size to avoid redundant send_viewport_cmd calls.
     last_desired_size: Option<egui::Vec2>,
+    /// The window position last actually applied (native reposition or
+    /// `OuterPosition`), so repeated per-frame repositioning to the same spot
+    /// is skipped. `send_viewport_cmd` internally triggers `request_repaint`,
+    /// so resending an unchanged `OuterPosition` every frame while visible
+    /// defeats the event-driven repaint model for Result/Error (CLAUDE.md
+    /// repaint model). Reset on hide, on a fresh show, and whenever a new
+    /// trigger updates `spawn_position`, so the next display still centers
+    /// correctly.
+    last_sent_pos: Option<egui::Pos2>,
     /// Whether the think block section is expanded in the Result state.
     think_expanded: bool,
     /// request_id whose Processing start time is currently tracked; a change
@@ -175,6 +184,7 @@ impl OverlayApp {
             startup_notice: None,
             tap_rx,
             last_desired_size: None,
+            last_sent_pos: None,
             think_expanded: false,
             processing_request_id: None,
             processing_started_at: None,
@@ -223,6 +233,7 @@ impl OverlayApp {
             startup_notice: None,
             tap_rx,
             last_desired_size: None,
+            last_sent_pos: None,
             think_expanded: false,
             processing_request_id: None,
             processing_started_at: None,
@@ -326,8 +337,18 @@ impl OverlayApp {
                         );
                     }
                 }
-                UiEffect::ShowWindow => self.show_window(ctx),
-                UiEffect::ShowWindowNoActivate => self.show_window_no_activate(ctx),
+                UiEffect::ShowWindow => {
+                    // A fresh show applies its own initial position natively
+                    // (below); invalidate the reposition cache so the first
+                    // subsequent per-frame reposition_window call isn't gated
+                    // out by a position left over from a previous display.
+                    self.last_sent_pos = None;
+                    self.show_window(ctx);
+                }
+                UiEffect::ShowWindowNoActivate => {
+                    self.last_sent_pos = None;
+                    self.show_window_no_activate(ctx);
+                }
                 UiEffect::StartCapture => {
                     // Defer the Cmd+C simulation until the cycle modifiers are
                     // released (handled in the CycleCommit tap arm). Copying while
@@ -342,6 +363,7 @@ impl OverlayApp {
                     ctx.memory_mut(|m| m.reset_areas());
                     self.hide_window(ctx);
                     self.spawn_position = None;
+                    self.last_sent_pos = None;
                     // Cancel any in-progress cycling gesture / deferred capture,
                     // and drop a debounce-parked request (overlay is closing).
                     self.preview_mode = None;
@@ -407,6 +429,11 @@ impl OverlayApp {
             // (which skips if already set) preserves the first-press position.
             if let Some((x, y)) = tap_event.mouse_pos {
                 self.spawn_position = Some(egui::pos2(x as f32, y as f32));
+                // A new trigger's spawn point invalidates any cached
+                // reposition target — a re-trigger that skips HideWindow
+                // (e.g. re-double-tap while Result is still shown) must
+                // still reposition to the new cursor location.
+                self.last_sent_pos = None;
             }
 
             match tap_event.action {
@@ -740,10 +767,19 @@ impl OverlayApp {
     ///
     /// Delegates to the platform for native DPI-safe repositioning (e.g. Windows SetWindowPos
     /// bypasses winit's per-monitor scaling). Falls back to ViewportCommand::OuterPosition.
-    fn reposition_window(&self, ctx: &egui::Context, win_size: egui::Vec2) {
-        if let Some(pos) = self.calculate_centered_position(win_size)
-            && !self.platform.reposition_window(pos.x, pos.y)
-        {
+    ///
+    /// Gated on `last_sent_pos`: this runs every frame while visible, and both the
+    /// native path and `OuterPosition` would otherwise repeat pointlessly each
+    /// frame — on macOS `OuterPosition` also triggers `request_repaint`
+    /// internally, which would defeat the event-driven repaint model for
+    /// Result/Error (CLAUDE.md repaint model) by busy-looping forever.
+    fn reposition_window(&mut self, ctx: &egui::Context, win_size: egui::Vec2) {
+        let Some(pos) = self.calculate_centered_position(win_size) else { return };
+        if self.last_sent_pos == Some(pos) {
+            return;
+        }
+        self.last_sent_pos = Some(pos);
+        if !self.platform.reposition_window(pos.x, pos.y) {
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
         }
     }
