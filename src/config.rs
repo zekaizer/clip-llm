@@ -781,6 +781,48 @@ fn resolve_path() -> Option<PathBuf> {
         .map(|_| candidate)
 }
 
+/// Replaces `[generation]` fields set to a meaningless `0` with `None` (so the
+/// built-in default applies), warning once per corrected field.
+///
+/// A `0` timeout would make `reqwest` apply `Duration::ZERO`, so every
+/// request times out instantly; a `0` `max_tokens`/`token_budget` leaves no
+/// room to generate (or even receive) a response. All four are easy to
+/// mistake for "unlimited" — which none of them mean — so they are corrected
+/// here rather than passed through to the client. `temperature` is
+/// deliberately left untouched: `0.0` is a legitimate (fully deterministic)
+/// sampling value.
+fn sanitize_generation(mut generation: GenerationConfig) -> GenerationConfig {
+    if generation.max_tokens == Some(0) {
+        eprintln!(
+            "clip-llm: [generation].max_tokens = 0 would cap every response at zero output \
+             tokens — ignoring, built-in default applies"
+        );
+        generation.max_tokens = None;
+    }
+    if generation.token_budget == Some(0) {
+        eprintln!(
+            "clip-llm: [generation].token_budget = 0 leaves no room for prompt or completion \
+             tokens — ignoring, built-in default applies"
+        );
+        generation.token_budget = None;
+    }
+    if generation.request_timeout_secs == Some(0) {
+        eprintln!(
+            "clip-llm: [generation].request_timeout_secs = 0 would time out every request \
+             instantly — ignoring, built-in default applies"
+        );
+        generation.request_timeout_secs = None;
+    }
+    if generation.initial_response_timeout_secs == Some(0) {
+        eprintln!(
+            "clip-llm: [generation].initial_response_timeout_secs = 0 would time out every \
+             request instantly — ignoring, built-in default applies"
+        );
+        generation.initial_response_timeout_secs = None;
+    }
+    generation
+}
+
 /// Converts a byte offset into `contents` to a 1-based `(line, column)` pair.
 ///
 /// This is used to point at *where* a TOML parse error occurred without
@@ -863,7 +905,8 @@ fn load_or_default() -> Config {
 
     match std::fs::read_to_string(&path) {
         Ok(contents) => match toml::from_str::<Config>(&contents) {
-            Ok(config) => {
+            Ok(mut config) => {
+                config.generation = sanitize_generation(config.generation);
                 info!("config: loaded from {}", path.display());
                 eprintln!("clip-llm: config loaded from {}", path.display());
                 record_outcome(LoadOutcome::Loaded(path));
@@ -1153,6 +1196,44 @@ mod tests {
         assert_eq!(config.generation_max_tokens(), Some(2048));
         assert_eq!(config.generation_request_timeout_secs(), Some(60));
         assert_eq!(config.generation_initial_response_timeout_secs(), Some(5));
+    }
+
+    #[test]
+    fn sanitize_generation_rejects_meaningless_zeros() {
+        let config: Config = toml::from_str(
+            "[generation]\n\
+             temperature = 0.0\n\
+             max_tokens = 0\n\
+             token_budget = 0\n\
+             request_timeout_secs = 0\n\
+             initial_response_timeout_secs = 0\n",
+        )
+        .unwrap();
+        let sanitized = sanitize_generation(config.generation);
+        // Zero timeouts/token caps are meaningless (an instant timeout, or no
+        // room to generate/receive a response) — cleared so the built-in
+        // default applies.
+        assert_eq!(sanitized.max_tokens, None);
+        assert_eq!(sanitized.token_budget, None);
+        assert_eq!(sanitized.request_timeout_secs, None);
+        assert_eq!(sanitized.initial_response_timeout_secs, None);
+        // temperature = 0.0 is a legitimate (fully deterministic) value and
+        // must pass through untouched.
+        assert_eq!(sanitized.temperature, Some(0.0));
+    }
+
+    #[test]
+    fn sanitize_generation_leaves_nonzero_values_untouched() {
+        let config: Config = toml::from_str(
+            "[generation]\nmax_tokens = 2048\ntoken_budget = 6000\n\
+             request_timeout_secs = 30\ninitial_response_timeout_secs = 10\n",
+        )
+        .unwrap();
+        let sanitized = sanitize_generation(config.generation);
+        assert_eq!(sanitized.max_tokens, Some(2048));
+        assert_eq!(sanitized.token_budget, Some(6000));
+        assert_eq!(sanitized.request_timeout_secs, Some(30));
+        assert_eq!(sanitized.initial_response_timeout_secs, Some(10));
     }
 
     #[test]
