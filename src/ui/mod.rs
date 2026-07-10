@@ -45,6 +45,54 @@ fn tray_last_label(message: &str) -> String {
     }
 }
 
+/// Format a compact completion summary ("✓ 2.4s · 850 tokens") for the
+/// Result bottom row — the same slot Processing's spinner+elapsed+Cancel row
+/// occupies (see `TOP_ROW_HEIGHT`/`BOTTOM_ROW_HEIGHT` in overlay.rs), so it
+/// fills what would otherwise be empty space left by those controls
+/// disappearing. Token usage is often unavailable — not every server reports
+/// it on streaming responses (see `DebugCapture::total_tokens`) — so it's
+/// appended only when present. `None` when even the elapsed time isn't known
+/// (nothing meaningful to show).
+fn format_completion_status(debug: &crate::DebugCapture) -> Option<String> {
+    let elapsed_ms = debug.elapsed_ms?;
+    let secs = elapsed_ms as f32 / 1000.0;
+    Some(match debug.total_tokens {
+        Some(tokens) => format!("\u{2713} {secs:.1}s \u{b7} {tokens} tokens"),
+        None => format!("\u{2713} {secs:.1}s"),
+    })
+}
+
+/// Window geometry latched at a Processing→Result/Error transition. See
+/// `OverlayApp::result_latch`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ResultLatch {
+    /// Floor for `ui.set_min_height` in the Result/Error content: the
+    /// content may still render taller (e.g. an expanded Think section), but
+    /// never renders shorter — even after that growth reverts (e.g.
+    /// collapsing Think returns to exactly this floor, not to whatever
+    /// egui would auto-measure).
+    min_content_height: f32,
+    /// The window's top-left, last actually applied while Processing; kept
+    /// fixed for the Result/Error display, clamped only if a taller render
+    /// would overflow the display work area (`anchored_clamped_to_bounds`).
+    top_left: egui::Pos2,
+}
+
+/// Whether `UiEffect::ResetAreas`'s Area geometry reset should be skipped for
+/// the current transition: true exactly when we're in a Result/Error display
+/// with an active geometry latch. That is precisely a Processing→Result/Error
+/// transition whose exact-height-pinned render reproduces the very same
+/// content size Processing last measured — re-measuring the Area buys nothing
+/// there but a one-frame flicker (the jump this fix addresses). Every other
+/// call site (a fresh show from Hidden, a mode/content change with no active
+/// latch) still needs the real reset and this returns `false` for it.
+///
+/// Extracted as a pure function, separate from the `ctx.memory_mut` call
+/// itself, so the *decision* is unit-testable without a live `egui::Context`.
+fn skip_area_reset_for_latched_result(state: &OverlayState, result_latch: Option<ResultLatch>) -> bool {
+    matches!(state, OverlayState::Result(_) | OverlayState::Error(_)) && result_latch.is_some()
+}
+
 pub struct OverlayApp {
     sm: StateMachine,
     cmd_tx: tokio_mpsc::UnboundedSender<WorkerCommand>,
@@ -72,6 +120,10 @@ pub struct OverlayApp {
     tap_rx: mpsc::Receiver<TapEvent>,
     /// Cached desired_size to avoid redundant send_viewport_cmd calls.
     last_desired_size: Option<egui::Vec2>,
+    /// Raw content size (pre shadow-padding) from the last rendered frame,
+    /// regardless of state. Used to latch the Result/Error minimum height at
+    /// a Processing→Result/Error transition — see `result_latch`.
+    last_content_size: Option<egui::Vec2>,
     /// The window position last actually applied (native reposition or
     /// `OuterPosition`), so repeated per-frame repositioning to the same spot
     /// is skipped. `send_viewport_cmd` internally triggers `request_repaint`,
@@ -81,6 +133,23 @@ pub struct OverlayApp {
     /// trigger updates `spawn_position`, so the next display still centers
     /// correctly.
     last_sent_pos: Option<egui::Pos2>,
+    /// Window geometry latched at a Processing→Result/Error transition, so
+    /// the final answer's frame renders at (at least) the same size and
+    /// position as the last streaming (Processing) frame — this is the fix
+    /// for the visible jump at that transition. Streaming-time positioning
+    /// itself is unaffected and keeps re-centering as before; only the
+    /// Result/Error display honors this latch (see `calculate_target_position`).
+    ///
+    /// Captured by `latch_result_geometry` (invoked from `sm_handle`) on every
+    /// genuine Processing→Result/Error transition — covers both the streamed
+    /// answer and a mode-switch/retry that resolves straight from Processing
+    /// via the cache. Cleared at session boundaries (`ShowWindow`,
+    /// `ShowWindowNoActivate`, `HideWindow`, a new trigger's fresh
+    /// `spawn_position`) and whenever the state leaves Result/Error back into
+    /// Processing/Capturing, so a stale latch from a previous answer never
+    /// pins a completely different request — the next Processing→Result
+    /// transition re-latches on its own.
+    result_latch: Option<ResultLatch>,
     /// Whether the think block section is expanded in the Result state.
     think_expanded: bool,
     /// request_id whose Processing start time is currently tracked; a change
@@ -191,7 +260,9 @@ impl OverlayApp {
             startup_notice: None,
             tap_rx,
             last_desired_size: None,
+            last_content_size: None,
             last_sent_pos: None,
+            result_latch: None,
             think_expanded: false,
             processing_request_id: None,
             processing_started_at: None,
@@ -242,7 +313,9 @@ impl OverlayApp {
             startup_notice: None,
             tap_rx,
             last_desired_size: None,
+            last_content_size: None,
             last_sent_pos: None,
+            result_latch: None,
             think_expanded: false,
             processing_request_id: None,
             processing_started_at: None,
@@ -273,6 +346,60 @@ impl OverlayApp {
     pub fn with_startup_notice(mut self, notice: Option<String>) -> Self {
         self.startup_notice = notice;
         self
+    }
+
+    // -- State machine dispatch --
+
+    /// Dispatch an event to the state machine, additionally maintaining
+    /// `result_latch` alongside the transition it produces. This is the sole
+    /// entry point into `StateMachine::handle` from the adapter (all
+    /// `sm.handle` call sites route through here) so every real
+    /// Processing→Result/Error transition gets latched, however it was
+    /// reached — a streamed answer, or a mode-switch/retry that resolves
+    /// straight from Processing via the cache.
+    fn sm_handle(&mut self, event: UiEvent) -> Vec<UiEffect> {
+        let old_state = self.sm.state().clone();
+        let effects = self.sm.handle(event);
+        let was_processing = matches!(old_state, OverlayState::Processing);
+        let was_result_or_error =
+            matches!(old_state, OverlayState::Result(_) | OverlayState::Error(_));
+        match self.sm.state() {
+            OverlayState::Result(_) | OverlayState::Error(_) if was_processing => {
+                self.latch_result_geometry();
+            }
+            // Leaving Result/Error back into Processing/Capturing (mode
+            // switch, retry, a debounced param change, a re-trigger): the
+            // latch belongs to the answer being left behind, not whatever
+            // comes next. The next Processing→Result/Error transition
+            // re-latches on its own; session-boundary resets (ShowWindow /
+            // ShowWindowNoActivate / HideWindow / new spawn_position) cover
+            // the rest.
+            OverlayState::Processing | OverlayState::Capturing if was_result_or_error => {
+                self.result_latch = None;
+            }
+            _ => {}
+        }
+        effects
+    }
+
+    /// Latch this session's Result/Error window geometry from the
+    /// just-finished Processing frame: the content height last rendered (so
+    /// the Result/Error view never renders shorter, avoiding a visible
+    /// shrink) and the top-left position last actually applied to the OS
+    /// window (so it never re-centers). `last_content_size`/`last_sent_pos`
+    /// still hold the *previous* frame's (Processing) values at this point —
+    /// this runs from `sm_handle`, before `update_viewport` has processed the
+    /// current (now-Result/Error) frame.
+    fn latch_result_geometry(&mut self) {
+        self.result_latch = match (self.last_content_size, self.last_sent_pos) {
+            (Some(size), Some(pos)) => {
+                Some(ResultLatch { min_content_height: size.y, top_left: pos })
+            }
+            // No known Processing-time geometry (e.g. a request resolved on
+            // the very first Processing frame) — fall back to normal
+            // centering/auto-sizing rather than latching a bogus value.
+            _ => None,
+        };
     }
 
     // -- Effect execution --
@@ -320,7 +447,7 @@ impl OverlayApp {
                     } else if let Err(e) = self.clipboard.write_text(&text) {
                         error!("clipboard write failed: {e}");
                         let err_effects =
-                            self.sm.handle(UiEvent::ClipboardError(friendly_clipboard_error(&e)));
+                            self.sm_handle(UiEvent::ClipboardError(friendly_clipboard_error(&e)));
                         // ClipboardError never emits WriteClipboard — recursion safe.
                         self.execute_effects(err_effects, ctx);
                         // Abort remaining effects: the state machine transitioned to
@@ -342,11 +469,15 @@ impl OverlayApp {
                     // (below); invalidate the reposition cache so the first
                     // subsequent per-frame reposition_window call isn't gated
                     // out by a position left over from a previous display.
+                    // A new session also drops any Result/Error latch from a
+                    // previous answer — this trigger has no known geometry yet.
                     self.last_sent_pos = None;
+                    self.result_latch = None;
                     self.show_window(ctx);
                 }
                 UiEffect::ShowWindowNoActivate => {
                     self.last_sent_pos = None;
+                    self.result_latch = None;
                     self.show_window_no_activate(ctx);
                 }
                 UiEffect::StartCapture => {
@@ -364,6 +495,7 @@ impl OverlayApp {
                     self.hide_window(ctx);
                     self.spawn_position = None;
                     self.last_sent_pos = None;
+                    self.result_latch = None;
                     // Cancel any in-progress cycling gesture / deferred capture,
                     // and drop a debounce-parked request (overlay is closing).
                     self.preview_mode = None;
@@ -391,7 +523,21 @@ impl OverlayApp {
                     // failure nothing re-sets it, so the button stays hidden
                     // rather than copying a prior request's data.
                     self.last_debug = None;
-                    ctx.memory_mut(|m| m.reset_areas());
+                    // Skip the Area geometry reset specifically for a
+                    // Processing->Result/Error transition that just landed a
+                    // fresh geometry latch (`sm_handle` sets `result_latch`
+                    // before this effect runs). The exact-height-pinned
+                    // Result/Error render reproduces the very same content
+                    // size Processing last measured, so the Area's
+                    // carried-over max_rect from that frame is already
+                    // correct — forcing a re-measure here bought nothing but
+                    // a one-frame flicker (the very jump this fix addresses).
+                    // Every other ResetAreas call site (a fresh show from
+                    // Hidden, a mode/content change with no active latch) is
+                    // unaffected and still forces the remeasure it needs.
+                    if !skip_area_reset_for_latched_result(self.sm.state(), self.result_latch) {
+                        ctx.memory_mut(|m| m.reset_areas());
+                    }
                 }
                 UiEffect::PasteClipboard => {
                     if let Err(e) = self.platform.paste_to_foreground() {
@@ -432,8 +578,10 @@ impl OverlayApp {
                 // A new trigger's spawn point invalidates any cached
                 // reposition target — a re-trigger that skips HideWindow
                 // (e.g. re-double-tap while Result is still shown) must
-                // still reposition to the new cursor location.
+                // still reposition to the new cursor location. Also drops any
+                // Result/Error latch from a previous answer at this spot.
                 self.last_sent_pos = None;
+                self.result_latch = None;
             }
 
             match tap_event.action {
@@ -450,7 +598,7 @@ impl OverlayApp {
                     // pending_content (preview) or flows straight to processing
                     // if the commit already happened. CaptureStarted shows the
                     // overlay and sets pending_capture via StartCapture.
-                    let effects = self.sm.handle(UiEvent::CaptureStarted {
+                    let effects = self.sm_handle(UiEvent::CaptureStarted {
                         source: state_machine::CaptureSource::Clipboard,
                     });
                     self.execute_effects(effects, ctx);
@@ -474,7 +622,7 @@ impl OverlayApp {
                     // Show the picking overlay (spinner) immediately (non-activating).
                     // The actual copy is deferred (StartCapture -> pending_capture)
                     // until the modifiers are released, then started in CycleCommit.
-                    let effects = self.sm.handle(UiEvent::CaptureStarted {
+                    let effects = self.sm_handle(UiEvent::CaptureStarted {
                         source: state_machine::CaptureSource::Selection,
                     });
                     self.execute_effects(effects, ctx);
@@ -509,7 +657,7 @@ impl OverlayApp {
                     if let Some(mode) = preview
                         && mode != self.sm.mode()
                     {
-                        let effects = self.sm.handle(UiEvent::UserSwitchMode(mode));
+                        let effects = self.sm_handle(UiEvent::UserSwitchMode(mode));
                         self.execute_effects(effects, ctx);
                     }
                     // Run the deferred capture/processing now the modifiers are up.
@@ -578,7 +726,7 @@ impl OverlayApp {
                     UiEvent::ClipboardError(friendly_clipboard_error(&e))
                 }
             };
-            let effects = self.sm.handle(event);
+            let effects = self.sm_handle(event);
             self.execute_effects(effects, ctx);
         }
     }
@@ -591,19 +739,19 @@ impl OverlayApp {
             match action {
                 crate::diagnostics::ScenarioAction::ShowOverlay { mode, text } => {
                     // Switch mode first (no-op effects in Hidden state) before ContentReady.
-                    self.sm.handle(UiEvent::UserSwitchMode(mode));
-                    let effects = self.sm.handle(UiEvent::ContentReady {
+                    self.sm_handle(UiEvent::UserSwitchMode(mode));
+                    let effects = self.sm_handle(UiEvent::ContentReady {
                         content: crate::ClipboardContent::text_only(text),
                         auto_copy: true,
                     });
                     self.execute_effects(effects, ctx);
                 }
                 crate::diagnostics::ScenarioAction::SwitchMode(mode) => {
-                    let effects = self.sm.handle(UiEvent::UserSwitchMode(mode));
+                    let effects = self.sm_handle(UiEvent::UserSwitchMode(mode));
                     self.execute_effects(effects, ctx);
                 }
                 crate::diagnostics::ScenarioAction::HideOverlay => {
-                    let effects = self.sm.handle(UiEvent::UserClose);
+                    let effects = self.sm_handle(UiEvent::UserClose);
                     self.execute_effects(effects, ctx);
                 }
                 crate::diagnostics::ScenarioAction::Quit => {
@@ -705,7 +853,7 @@ impl OverlayApp {
                     UiEvent::ThinkingProbeResult(thinking_method != Tcm::Unsupported)
                 }
             };
-            let effects = self.sm.handle(event);
+            let effects = self.sm_handle(event);
             self.execute_effects(effects, ctx);
             // Store after effects: this result's debug survives the ResetAreas
             // clear, while a cached result or capture failure (which don't set
@@ -754,10 +902,10 @@ impl OverlayApp {
             // Execute the effects symmetrically with FocusLost. The list is empty
             // today, but discarding it silently would hide any future FocusGained
             // effect with no compiler warning.
-            let effects = self.sm.handle(UiEvent::FocusGained);
+            let effects = self.sm_handle(UiEvent::FocusGained);
             self.execute_effects(effects, ctx);
         } else if focused == Some(false) {
-            let effects = self.sm.handle(UiEvent::FocusLost);
+            let effects = self.sm_handle(UiEvent::FocusLost);
             self.execute_effects(effects, ctx);
         }
     }
@@ -784,6 +932,26 @@ impl OverlayApp {
         Some(center_clamped_to_bounds(cursor, win_size, bounds))
     }
 
+    /// Position for this frame's reposition pass. Streaming-time positioning
+    /// (Capturing/Processing, or Result/Error with no active latch) is
+    /// unchanged from before this fix: always centers on `spawn_position`.
+    /// Only a Result/Error display with an active `result_latch` deviates —
+    /// it keeps the latched top-left fixed (only clamped if the render grew
+    /// taller than the display work area), instead of re-centering the whole
+    /// window on the Processing→Result content-height delta (the resize-jump
+    /// this fix addresses).
+    fn calculate_target_position(&self, win_size: egui::Vec2) -> Option<egui::Pos2> {
+        if matches!(self.sm.state(), OverlayState::Result(_) | OverlayState::Error(_))
+            && let Some(latch) = self.result_latch
+        {
+            let bounds = self
+                .spawn_position
+                .and_then(|c| self.platform.display_bounds_at_point(c.x as f64, c.y as f64));
+            return Some(anchored_clamped_to_bounds(latch.top_left, win_size, bounds));
+        }
+        self.calculate_centered_position(win_size)
+    }
+
     /// Reposition the window while the overlay is already visible (e.g. after size change).
     ///
     /// Delegates to the platform for native DPI-safe repositioning (e.g. Windows SetWindowPos
@@ -795,7 +963,7 @@ impl OverlayApp {
     /// internally, which would defeat the event-driven repaint model for
     /// Result/Error (CLAUDE.md repaint model) by busy-looping forever.
     fn reposition_window(&mut self, ctx: &egui::Context, win_size: egui::Vec2) {
-        let Some(pos) = self.calculate_centered_position(win_size) else { return };
+        let Some(pos) = self.calculate_target_position(win_size) else { return };
         if self.last_sent_pos == Some(pos) {
             return;
         }
@@ -950,11 +1118,27 @@ impl OverlayApp {
     }
 
     /// Resize the viewport when the desired content size changes, then reposition.
-    fn update_viewport(&mut self, ctx: &egui::Context, desired: Option<egui::Vec2>) {
+    fn update_viewport(
+        &mut self,
+        ctx: &egui::Context,
+        desired: Option<egui::Vec2>,
+        content_size: Option<egui::Vec2>,
+    ) {
+        self.last_content_size = content_size;
         let Some(size) = desired else { return };
         if self.last_desired_size != Some(size) {
             self.last_desired_size = Some(size);
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+            // A resize while a Result/Error latch is pinning the top-left can
+            // itself move the OS window (some platforms resize anchored at
+            // the window's center rather than its top-left) — invalidate the
+            // reposition gate so `reposition_window` below re-asserts the
+            // latched position this same frame, even though the *computed*
+            // target position hasn't changed. Streaming (no latch) keeps the
+            // original gating untouched.
+            if self.result_latch.is_some() {
+                self.last_sent_pos = None;
+            }
         }
         if !matches!(self.sm.state(), OverlayState::Hidden) && !self.sm.user_repositioned() {
             self.reposition_window(ctx, size);
@@ -1012,7 +1196,7 @@ impl OverlayApp {
                 return;
             }
         };
-        let effects = self.sm.handle(event);
+        let effects = self.sm_handle(event);
         if debounce {
             self.execute_effects_debounced(effects, ctx);
         } else {
@@ -1127,7 +1311,7 @@ impl eframe::App for OverlayApp {
         if startup_settled {
             if let Some(msg) = self.startup_notice.take() {
                 self.capture_mouse_position();
-                let effects = self.sm.handle(UiEvent::ClipboardError(msg));
+                let effects = self.sm_handle(UiEvent::ClipboardError(msg));
                 self.execute_effects(effects, ctx);
             }
         } else if self.startup_notice.is_some() {
@@ -1188,11 +1372,13 @@ impl eframe::App for OverlayApp {
             self.copy_confirmed_at.is_some(),
             elapsed,
             self.last_debug.is_some(),
+            self.last_debug.as_ref().and_then(format_completion_status),
+            self.result_latch.map(|l| l.min_content_height),
             ctx,
         );
 
         self.handle_overlay_action(ctx, output.action);
-        self.update_viewport(ctx, output.desired_size);
+        self.update_viewport(ctx, output.desired_size, output.content_size);
 
         // Diagnostics: record frame data + flush stale screenshots.
         #[cfg(feature = "diagnostics")]
@@ -1247,6 +1433,27 @@ fn friendly_clipboard_error(e: &crate::ClipboardError) -> String {
     }
 }
 
+/// Clamp a top-left position so the window of `win_size` stays fully within
+/// `bounds`. `bounds` is `(origin_x, origin_y, width, height)` in the same
+/// coordinate space as `pos`. Shared clamping logic for both
+/// `center_clamped_to_bounds` and `anchored_clamped_to_bounds`.
+fn clamp_top_left_to_bounds(
+    pos: egui::Pos2,
+    win_size: egui::Vec2,
+    bounds: Option<(f64, f64, f64, f64)>,
+) -> egui::Pos2 {
+    let mut x = pos.x;
+    let mut y = pos.y;
+
+    if let Some((ox, oy, w, h)) = bounds {
+        let (ox, oy, w, h) = (ox as f32, oy as f32, w as f32, h as f32);
+        x = x.clamp(ox, (ox + w - win_size.x).max(ox));
+        y = y.clamp(oy, (oy + h - win_size.y).max(oy));
+    }
+
+    egui::pos2(x, y)
+}
+
 /// Center `win_size` on `cursor` and clamp the result within `bounds`.
 ///
 /// `bounds` is `(origin_x, origin_y, width, height)` in the same coordinate space
@@ -1259,16 +1466,27 @@ fn center_clamped_to_bounds(
     win_size: egui::Vec2,
     bounds: Option<(f64, f64, f64, f64)>,
 ) -> egui::Pos2 {
-    let mut x = cursor.x - win_size.x / 2.0;
-    let mut y = cursor.y - win_size.y / 2.0;
+    let center = egui::pos2(cursor.x - win_size.x / 2.0, cursor.y - win_size.y / 2.0);
+    clamp_top_left_to_bounds(center, win_size, bounds)
+}
 
-    if let Some((ox, oy, w, h)) = bounds {
-        let (ox, oy, w, h) = (ox as f32, oy as f32, w as f32, h as f32);
-        x = x.clamp(ox, (ox + w - win_size.x).max(ox));
-        y = y.clamp(oy, (oy + h - win_size.y).max(oy));
-    }
-
-    egui::pos2(x, y)
+/// Keep a fixed top-left `anchor` in place, clamping it within `bounds` only
+/// when the window would otherwise overflow the display work area — shifting
+/// it up/left just enough to fit, never past the opposite edge (so a window
+/// taller than the work area pins to the top rather than centering).
+///
+/// `bounds` has the same shape as in `center_clamped_to_bounds`. Used to keep
+/// the overlay's top edge stationary across a session's height changes
+/// (`OverlayApp::calculate_anchored_position`), instead of re-centering the
+/// whole window on every resize — the fix for the Processing→Result
+/// resize-jump defect (window visibly moving on the final answer's height
+/// delta).
+fn anchored_clamped_to_bounds(
+    anchor_top_left: egui::Pos2,
+    win_size: egui::Vec2,
+    bounds: Option<(f64, f64, f64, f64)>,
+) -> egui::Pos2 {
+    clamp_top_left_to_bounds(anchor_top_left, win_size, bounds)
 }
 
 #[cfg(test)]
@@ -1431,6 +1649,112 @@ mod tests {
         assert_eq!(pos, egui::pos2(-290.0, -190.0));
     }
 
+    // --- anchored_clamped_to_bounds: mirrors the center_clamped_to_bounds suite
+    // above, but the input is already a top-left corner (an anchor recorded
+    // from a prior centering pass), not a cursor to center on. ---
+
+    #[test]
+    fn anchored_no_bounds_keeps_anchor() {
+        let pos = anchored_clamped_to_bounds(egui::pos2(800.0, 350.0), egui::vec2(400.0, 300.0), None);
+        assert_eq!(pos, egui::pos2(800.0, 350.0));
+    }
+
+    #[test]
+    fn anchored_fits_stays_put() {
+        // Anchor well inside the work area and the new (taller) size still fits
+        // → top-left is unchanged, only the bottom edge would move.
+        let pos = anchored_clamped_to_bounds(
+            egui::pos2(980.0, 520.0),
+            egui::vec2(600.0, 500.0),
+            bounds(0.0, 0.0, 2560.0, 1440.0),
+        );
+        assert_eq!(pos, egui::pos2(980.0, 520.0));
+    }
+
+    #[test]
+    fn anchored_bottom_overflow_shifts_up() {
+        // Anchor near the bottom edge; growing taller would overflow the work
+        // area, so the top-left shifts up just enough to keep the bottom in
+        // bounds (the x coordinate is untouched).
+        let pos = anchored_clamped_to_bounds(
+            egui::pos2(980.0, 1200.0),
+            egui::vec2(600.0, 400.0),
+            bounds(0.0, 0.0, 2560.0, 1440.0),
+        );
+        // max_y = 0 + 1440 - 400 = 1040
+        assert_eq!(pos, egui::pos2(980.0, 1040.0));
+    }
+
+    #[test]
+    fn anchored_right_overflow_shifts_left() {
+        let pos = anchored_clamped_to_bounds(
+            egui::pos2(2200.0, 520.0),
+            egui::vec2(600.0, 400.0),
+            bounds(0.0, 0.0, 2560.0, 1440.0),
+        );
+        // max_x = 0 + 2560 - 600 = 1960
+        assert_eq!(pos, egui::pos2(1960.0, 520.0));
+    }
+
+    #[test]
+    fn anchored_taller_than_work_area_pins_to_top() {
+        // A window taller than the work area must pin to the top of the work
+        // area, never centering or overflowing above it.
+        let pos = anchored_clamped_to_bounds(
+            egui::pos2(980.0, 600.0),
+            egui::vec2(600.0, 2000.0),
+            bounds(0.0, 0.0, 2560.0, 1440.0),
+        );
+        assert_eq!(pos, egui::pos2(980.0, 0.0));
+    }
+
+    #[test]
+    fn anchored_never_shifts_above_top_of_work_area() {
+        // Anchor already at the very top; even a tall window must not move
+        // above origin y.
+        let pos = anchored_clamped_to_bounds(
+            egui::pos2(980.0, 0.0),
+            egui::vec2(600.0, 400.0),
+            bounds(0.0, 0.0, 2560.0, 1440.0),
+        );
+        assert_eq!(pos, egui::pos2(980.0, 0.0));
+    }
+
+    #[test]
+    fn anchored_secondary_monitor_fits_no_clamp() {
+        // Anchor on a secondary monitor with an offset origin; the taller
+        // window still fits within that monitor's own work area.
+        let pos = anchored_clamped_to_bounds(
+            egui::pos2(3200.0, 300.0),
+            egui::vec2(600.0, 500.0),
+            bounds(2560.0, 0.0, 1920.0, 1080.0),
+        );
+        assert_eq!(pos, egui::pos2(3200.0, 300.0));
+    }
+
+    #[test]
+    fn anchored_secondary_monitor_bottom_overflow_shifts_up() {
+        let pos = anchored_clamped_to_bounds(
+            egui::pos2(3200.0, 900.0),
+            egui::vec2(600.0, 400.0),
+            bounds(2560.0, 0.0, 1920.0, 1080.0),
+        );
+        // max_y = 0 + 1080 - 400 = 680
+        assert_eq!(pos, egui::pos2(3200.0, 680.0));
+    }
+
+    #[test]
+    fn anchored_negative_origin_monitor_no_clamp() {
+        // Secondary monitor to the left of primary (negative x origin); anchor
+        // and size both fit within its work area.
+        let pos = anchored_clamped_to_bounds(
+            egui::pos2(-1260.0, 340.0),
+            egui::vec2(600.0, 400.0),
+            bounds(-1920.0, 0.0, 1920.0, 1080.0),
+        );
+        assert_eq!(pos, egui::pos2(-1260.0, 340.0));
+    }
+
     // --- poll_responses: stale worker responses must not pollute adapter state ---
 
     /// Build a minimal `OverlayApp` for adapter-level tests, returning the app
@@ -1584,5 +1908,177 @@ mod tests {
         assert_eq!(app.req_ok, 1);
         assert_eq!(app.req_err, 0);
         assert!(app.last_debug.is_some(), "current completion's debug snapshot must surface");
+    }
+
+    // --- format_completion_status: Result bottom-row summary ---
+
+    #[test]
+    fn completion_status_elapsed_only() {
+        let debug = crate::DebugCapture { elapsed_ms: Some(2400), ..Default::default() };
+        assert_eq!(format_completion_status(&debug).as_deref(), Some("\u{2713} 2.4s"));
+    }
+
+    #[test]
+    fn completion_status_elapsed_and_tokens() {
+        let debug =
+            crate::DebugCapture { elapsed_ms: Some(2400), total_tokens: Some(850), ..Default::default() };
+        assert_eq!(
+            format_completion_status(&debug).as_deref(),
+            Some("\u{2713} 2.4s \u{b7} 850 tokens"),
+        );
+    }
+
+    #[test]
+    fn completion_status_none_without_elapsed() {
+        let debug = crate::DebugCapture { total_tokens: Some(850), ..Default::default() };
+        assert_eq!(format_completion_status(&debug), None);
+    }
+
+    // --- result_latch: Processing→Result/Error geometry latching (the
+    // resize-jump fix) ---
+
+    fn dummy_latch() -> ResultLatch {
+        ResultLatch { min_content_height: 145.0, top_left: egui::pos2(10.0, 20.0) }
+    }
+
+    /// The core flicker-fix claim: a latched Result/Error skips the Area
+    /// geometry reset (see `UiEffect::ResetAreas` handling in
+    /// `execute_effects`) — this is the transition-frame condition under
+    /// test.
+    #[test]
+    fn skip_area_reset_true_for_latched_result_and_error() {
+        assert!(skip_area_reset_for_latched_result(
+            &OverlayState::Result("answer".into()),
+            Some(dummy_latch()),
+        ));
+        assert!(skip_area_reset_for_latched_result(
+            &OverlayState::Error("oops".into()),
+            Some(dummy_latch()),
+        ));
+    }
+
+    /// Without an active latch (e.g. the very first Result of a session, no
+    /// known Processing-time geometry — see `latch_result_geometry`), the
+    /// Area reset must still run: there is no pinned geometry to trust yet.
+    #[test]
+    fn skip_area_reset_false_for_result_without_latch() {
+        assert!(!skip_area_reset_for_latched_result(&OverlayState::Result("answer".into()), None));
+        assert!(!skip_area_reset_for_latched_result(&OverlayState::Error("oops".into()), None));
+    }
+
+    /// Every other state must still force the reset even with a latch value
+    /// lying around (defensive: a latch is meaningless outside Result/Error,
+    /// and every such state should be unaffected by this skip).
+    #[test]
+    fn skip_area_reset_false_outside_result_and_error() {
+        assert!(!skip_area_reset_for_latched_result(&OverlayState::Hidden, Some(dummy_latch())));
+        assert!(!skip_area_reset_for_latched_result(&OverlayState::Capturing, Some(dummy_latch())));
+        assert!(!skip_area_reset_for_latched_result(&OverlayState::Processing, Some(dummy_latch())));
+    }
+
+    /// A genuine Processing→Result transition (a worker response landing via
+    /// `poll_responses`, which routes through `sm_handle`) must latch the
+    /// window geometry from the last Processing-time frame — i.e. whatever
+    /// `last_content_size`/`last_sent_pos` held just before the transition,
+    /// simulating that a Processing frame's `update_viewport` had already run.
+    #[test]
+    fn poll_responses_latches_result_geometry_from_last_processing_frame() {
+        let _lock = crate::clipboard::test_support::CLIPBOARD_LOCK.lock().unwrap();
+        let (mut app, resp_tx) = new_test_app();
+        let ctx = egui::Context::default();
+
+        app.sm_handle(UiEvent::ContentReady {
+            content: crate::ClipboardContent::text_only("only".into()),
+            auto_copy: true,
+        });
+        let current_id = app.sm.current_request_id();
+
+        // Simulate the last Processing frame's applied geometry.
+        app.last_content_size = Some(egui::vec2(400.0, 150.0));
+        app.last_sent_pos = Some(egui::pos2(100.0, 200.0));
+
+        resp_tx
+            .send(WorkerResponse::Complete {
+                result: "fresh answer".into(),
+                think_content: None,
+                request_id: current_id,
+                incomplete: None,
+                debug: crate::DebugCapture::default(),
+            })
+            .unwrap();
+        app.poll_responses(&ctx);
+
+        assert_eq!(
+            app.result_latch,
+            Some(ResultLatch { min_content_height: 150.0, top_left: egui::pos2(100.0, 200.0) }),
+        );
+    }
+
+    /// Without any known Processing-time geometry (`last_content_size`/
+    /// `last_sent_pos` still `None`, e.g. a response resolving before any
+    /// Processing frame ever ran `update_viewport`), the transition must not
+    /// latch a bogus value — it falls back to normal auto-sizing/centering.
+    #[test]
+    fn poll_responses_no_latch_without_known_processing_geometry() {
+        let _lock = crate::clipboard::test_support::CLIPBOARD_LOCK.lock().unwrap();
+        let (mut app, resp_tx) = new_test_app();
+        let ctx = egui::Context::default();
+
+        app.sm_handle(UiEvent::ContentReady {
+            content: crate::ClipboardContent::text_only("only".into()),
+            auto_copy: true,
+        });
+        let current_id = app.sm.current_request_id();
+        assert!(app.last_content_size.is_none());
+        assert!(app.last_sent_pos.is_none());
+
+        resp_tx
+            .send(WorkerResponse::Complete {
+                result: "fresh answer".into(),
+                think_content: None,
+                request_id: current_id,
+                incomplete: None,
+                debug: crate::DebugCapture::default(),
+            })
+            .unwrap();
+        app.poll_responses(&ctx);
+
+        assert!(app.result_latch.is_none());
+    }
+
+    /// Retrying from Result re-sends the request and transitions back to
+    /// Processing directly inside `reprocess_or_cache` (no `poll_responses`
+    /// round trip) — `sm_handle` must still drop the stale latch from the
+    /// answer being left behind, so it cannot pin the window for whatever
+    /// comes next.
+    #[test]
+    fn retry_from_result_clears_stale_latch() {
+        let _lock = crate::clipboard::test_support::CLIPBOARD_LOCK.lock().unwrap();
+        let (mut app, resp_tx) = new_test_app();
+        let ctx = egui::Context::default();
+
+        app.sm_handle(UiEvent::ContentReady {
+            content: crate::ClipboardContent::text_only("only".into()),
+            auto_copy: true,
+        });
+        let current_id = app.sm.current_request_id();
+        app.last_content_size = Some(egui::vec2(400.0, 150.0));
+        app.last_sent_pos = Some(egui::pos2(100.0, 200.0));
+        resp_tx
+            .send(WorkerResponse::Complete {
+                result: "fresh answer".into(),
+                think_content: None,
+                request_id: current_id,
+                incomplete: None,
+                debug: crate::DebugCapture::default(),
+            })
+            .unwrap();
+        app.poll_responses(&ctx);
+        assert!(app.result_latch.is_some(), "test setup must reach a latched Result");
+
+        app.sm_handle(UiEvent::UserRetry);
+
+        assert!(matches!(app.sm.state(), OverlayState::Processing));
+        assert!(app.result_latch.is_none(), "retry must drop the previous answer's latch");
     }
 }
