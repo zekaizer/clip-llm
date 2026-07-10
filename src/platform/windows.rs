@@ -493,6 +493,32 @@ pub fn show_about() {
     });
 }
 
+/// Show a native, modal message box with the given title and message, blocking
+/// the calling thread until the user dismisses it.
+///
+/// Unlike [`show_about`], this runs `MessageBoxW` directly on the calling thread
+/// rather than a dedicated one — safe here because callers use this only for
+/// fatal startup errors, before the winit event loop starts (so the nested
+/// modal loop hazard that `show_about` works around, winit#1698, does not
+/// apply). Blocking is desirable: it keeps the process alive long enough for
+/// the user to read the message before the caller exits.
+pub fn show_alert_blocking(title: &str, message: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        MessageBoxW, MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MB_TOPMOST,
+    };
+
+    let body: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
+    let title: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        let _ = MessageBoxW(
+            std::ptr::null_mut(),
+            body.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND,
+        );
+    }
+}
+
 /// Show the clip-llm window at `position` (logical points) WITHOUT activating it,
 /// so the foreground app stays the same and `SendInput(Ctrl+C)` still targets it.
 /// Like `show_no_activate()` but honors an explicit position (the capture spawn

@@ -213,6 +213,17 @@ unsafe fn ns_string(s: &str) -> *mut c_void {
 /// the Windows message box. (The standard macOS About panel does not surface the
 /// author, so an NSAlert is used for parity.)
 pub fn show_about() {
+    show_alert(
+        &format!("clip-llm v{}", env!("CARGO_PKG_VERSION")),
+        env!("CARGO_PKG_AUTHORS"),
+    );
+}
+
+/// Show a native, modal `NSAlert` with the given title and message, blocking the
+/// calling thread until the user dismisses it. Used both for the tray "About"
+/// dialog and for fatal startup errors that would otherwise be invisible in the
+/// windowless .app bundle (no terminal attached).
+pub fn show_alert(title: &str, message: &str) {
     unsafe {
         // Bring the Accessory app forward so the alert appears in front.
         let app_cls = objc_getClass(c"NSApplication".as_ptr());
@@ -233,8 +244,8 @@ pub fn show_about() {
         }
 
         let msg_send_ptr: MsgSendPtr = std::mem::transmute(objc_msgSend as *const ());
-        let title = ns_string(concat!("clip-llm v", env!("CARGO_PKG_VERSION")));
-        let body = ns_string(env!("CARGO_PKG_AUTHORS"));
+        let title = ns_string(title);
+        let body = ns_string(message);
         msg_send_ptr(alert, sel_registerName(c"setMessageText:".as_ptr()), title);
         msg_send_ptr(alert, sel_registerName(c"setInformativeText:".as_ptr()), body);
 
@@ -242,7 +253,7 @@ pub fn show_about() {
         objc_msgSend(alert, sel_registerName(c"runModal".as_ptr()));
 
         // We own `alert` (alloc+init), so it must be released — otherwise
-        // every About click leaks one NSAlert.
+        // every alert leaks one NSAlert.
         objc_msgSend(alert, sel_registerName(c"release".as_ptr()));
     }
 }
