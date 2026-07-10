@@ -230,8 +230,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let modifier_state = clip_llm::platform::spawn_modifier_watcher();
 
             // Coordinator thread: event-driven hotkey detection (off-UI).
-            let tap_rx =
-                spawn_coordinator_thread(hotkey_rx, cc.egui_ctx.clone(), modifier_state);
+            // Cloned: the same live state is also attached to each selection
+            // capture's ClipboardManager (via OverlayApp) so copy_and_read can
+            // wait for an actual modifier release instead of a flat delay.
+            let tap_rx = spawn_coordinator_thread(
+                hotkey_rx,
+                cc.egui_ctx.clone(),
+                modifier_state.clone(),
+            );
 
             // Diagnostics: spawn scenario runner thread (off-UI, like coordinator).
             #[cfg(feature = "diagnostics")]
@@ -255,11 +261,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
             #[cfg(feature = "diagnostics")]
             let app = OverlayApp::new(
-                cmd_tx, resp_rx, clipboard, tap_rx,
+                cmd_tx, resp_rx, clipboard, tap_rx, modifier_state,
                 diag_action_rx, diag_state_tx,
             );
             #[cfg(not(feature = "diagnostics"))]
-            let app = OverlayApp::new(cmd_tx, resp_rx, clipboard, tap_rx);
+            let app = OverlayApp::new(cmd_tx, resp_rx, clipboard, tap_rx, modifier_state);
             let app = app.with_startup_notice(startup_notice);
 
             Ok(Box::new(app))
