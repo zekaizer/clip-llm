@@ -186,11 +186,13 @@ fn make_complete_response(
 fn finalize_stream_capture(
     capture: &mut DebugCapture,
     started: Instant,
-    raw_sse: &mut String,
+    raw_sse: &mut Vec<u8>,
     error: Option<&str>,
 ) {
     capture.elapsed_ms = Some(started.elapsed().as_millis());
-    capture.response_raw = Some(std::mem::take(raw_sse));
+    // Convert once over the whole body: per-chunk lossy conversion would put a
+    // U+FFFD wherever a multi-byte char happened to straddle a chunk boundary.
+    capture.response_raw = Some(String::from_utf8_lossy(&std::mem::take(raw_sse)).into_owned());
     if let Some(reason) = error {
         capture.error = Some(reason.to_string());
     }
@@ -353,8 +355,10 @@ async fn run_streaming(
     let mut chunk_count: u32 = 0;
     let mut byte_count: usize = 0;
     // Raw SSE bytes as received, accumulated for the debug view (the parsed
-    // visible text in `full_content` is not the wire data).
-    let mut raw_sse = String::new();
+    // visible text in `full_content` is not the wire data). Kept as bytes and
+    // converted once at finalize, so a multi-byte char straddling a chunk
+    // boundary is not mangled into U+FFFD by per-chunk conversion.
+    let mut raw_sse: Vec<u8> = Vec::new();
 
     loop {
         let chunk = tokio::select! {
@@ -392,9 +396,14 @@ async fn run_streaming(
             Ok(Some(bytes)) => {
                 chunk_count += 1;
                 byte_count += bytes.len();
-                let chunk_str = String::from_utf8_lossy(&bytes);
-                trace!("SSE raw chunk #{chunk_count} ({} bytes):\n{chunk_str}", bytes.len());
-                raw_sse.push_str(&chunk_str);
+                if tracing::enabled!(tracing::Level::TRACE) {
+                    trace!(
+                        "SSE raw chunk #{chunk_count} ({} bytes):\n{}",
+                        bytes.len(),
+                        String::from_utf8_lossy(&bytes)
+                    );
+                }
+                raw_sse.extend_from_slice(&bytes);
                 for event in parser.feed(&bytes) {
                     let done = handle_stream_event(
                         event, &mut full_content, &mut reasoning_open, &mut filter,
