@@ -282,22 +282,13 @@ impl OverlayApp {
                     // (#22) — flushing the stale task later would queue a
                     // wasted LLM round-trip behind this request.
                     self.pending_process = None;
-                    let text_len = content.text.as_ref().map_or(0, |t| t.len());
-                    let img_count = content.images.len();
-                    info!(
-                        request_id,
-                        mode = mode.label(),
-                        text_len,
-                        img_count,
-                        "ui: dispatch request to worker"
-                    );
-                    let _ = self.cmd_tx.send(WorkerCommand::Process(ProcessTask {
+                    self.dispatch_process(ProcessTask {
                         content,
                         mode,
                         rephrase_params,
                         thinking_mode,
                         request_id,
-                    }));
+                    });
                 }
                 UiEffect::SendCancel => {
                     debug!("ui: cancel in-flight request");
@@ -1055,11 +1046,28 @@ impl OverlayApp {
         let now = std::time::Instant::now();
         if now >= deadline {
             let (task, _) = self.pending_process.take().expect("checked above");
-            info!("param debounce expired: sending request {}", task.request_id);
-            let _ = self.cmd_tx.send(WorkerCommand::Process(task));
+            self.dispatch_process(task);
         } else {
             ctx.request_repaint_after(deadline - now);
         }
+    }
+
+    /// Dispatch a `ProcessTask` to the worker thread, logging its shape
+    /// (request_id, mode, content size) for observability. Shared by the
+    /// immediate `SendProcess` effect and the parameter-change debounce flush
+    /// (#22), so every worker dispatch is logged the same way regardless of
+    /// which path sent it.
+    fn dispatch_process(&self, task: ProcessTask) {
+        let text_len = task.content.text.as_ref().map_or(0, |t| t.len());
+        let img_count = task.content.images.len();
+        info!(
+            request_id = task.request_id,
+            mode = task.mode.label(),
+            text_len,
+            img_count,
+            "ui: dispatch request to worker"
+        );
+        let _ = self.cmd_tx.send(WorkerCommand::Process(task));
     }
 
     /// Track how long the active Processing request has been running, keyed on its
