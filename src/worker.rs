@@ -128,6 +128,10 @@ fn friendly_api_error(e: &ApiError) -> String {
             "The model returned no visible output. Try switching mode or disabling thinking."
                 .to_string()
         }
+        ApiError::MalformedResponse(_) => {
+            "The server returned an unreadable response. Check the endpoint address (details in debug copy)."
+                .to_string()
+        }
         ApiError::NoUsableContent => {
             "Image cannot be processed — the connected model does not support vision.".to_string()
         }

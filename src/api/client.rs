@@ -983,7 +983,11 @@ impl LlmClient {
                 debug!("LLM response (raw):\n{text}");
             }
         }
-        let chat: ChatResponse = serde_json::from_str(&text).map_err(|_| ApiError::EmptyResponse)?;
+        // A 200 with a non-completion body (proxy error page, truncated body)
+        // is not "the model returned nothing" — surface the parse failure so
+        // the real cause isn't masked. The raw body is already in `capture`.
+        let chat: ChatResponse =
+            serde_json::from_str(&text).map_err(|e| ApiError::MalformedResponse(e.to_string()))?;
 
         let choice = chat
             .choices
