@@ -61,6 +61,21 @@ struct ResultLatch {
     top_left: egui::Pos2,
 }
 
+/// Whether `UiEffect::ResetAreas`'s Area geometry reset should be skipped for
+/// the current transition: true exactly when we're in a Result/Error display
+/// with an active geometry latch. That is precisely a Processing→Result/Error
+/// transition whose exact-height-pinned render reproduces the very same
+/// content size Processing last measured — re-measuring the Area buys nothing
+/// there but a one-frame flicker (the jump this fix addresses). Every other
+/// call site (a fresh show from Hidden, a mode/content change with no active
+/// latch) still needs the real reset and this returns `false` for it.
+///
+/// Extracted as a pure function, separate from the `ctx.memory_mut` call
+/// itself, so the *decision* is unit-testable without a live `egui::Context`.
+fn skip_area_reset_for_latched_result(state: &OverlayState, result_latch: Option<ResultLatch>) -> bool {
+    matches!(state, OverlayState::Result(_) | OverlayState::Error(_)) && result_latch.is_some()
+}
+
 pub struct OverlayApp {
     sm: StateMachine,
     cmd_tx: tokio_mpsc::UnboundedSender<WorkerCommand>,
@@ -482,7 +497,21 @@ impl OverlayApp {
                     // failure nothing re-sets it, so the button stays hidden
                     // rather than copying a prior request's data.
                     self.last_debug = None;
-                    ctx.memory_mut(|m| m.reset_areas());
+                    // Skip the Area geometry reset specifically for a
+                    // Processing->Result/Error transition that just landed a
+                    // fresh geometry latch (`sm_handle` sets `result_latch`
+                    // before this effect runs). The exact-height-pinned
+                    // Result/Error render reproduces the very same content
+                    // size Processing last measured, so the Area's
+                    // carried-over max_rect from that frame is already
+                    // correct — forcing a re-measure here bought nothing but
+                    // a one-frame flicker (the very jump this fix addresses).
+                    // Every other ResetAreas call site (a fresh show from
+                    // Hidden, a mode/content change with no active latch) is
+                    // unaffected and still forces the remeasure it needs.
+                    if !skip_area_reset_for_latched_result(self.sm.state(), self.result_latch) {
+                        ctx.memory_mut(|m| m.reset_areas());
+                    }
                 }
                 UiEffect::PasteClipboard => {
                     if let Err(e) = self.platform.paste_to_foreground() {
@@ -1837,6 +1866,45 @@ mod tests {
 
     // --- result_latch: Processing→Result/Error geometry latching (the
     // resize-jump fix) ---
+
+    fn dummy_latch() -> ResultLatch {
+        ResultLatch { min_content_height: 145.0, top_left: egui::pos2(10.0, 20.0) }
+    }
+
+    /// The core flicker-fix claim: a latched Result/Error skips the Area
+    /// geometry reset (see `UiEffect::ResetAreas` handling in
+    /// `execute_effects`) — this is the transition-frame condition under
+    /// test.
+    #[test]
+    fn skip_area_reset_true_for_latched_result_and_error() {
+        assert!(skip_area_reset_for_latched_result(
+            &OverlayState::Result("answer".into()),
+            Some(dummy_latch()),
+        ));
+        assert!(skip_area_reset_for_latched_result(
+            &OverlayState::Error("oops".into()),
+            Some(dummy_latch()),
+        ));
+    }
+
+    /// Without an active latch (e.g. the very first Result of a session, no
+    /// known Processing-time geometry — see `latch_result_geometry`), the
+    /// Area reset must still run: there is no pinned geometry to trust yet.
+    #[test]
+    fn skip_area_reset_false_for_result_without_latch() {
+        assert!(!skip_area_reset_for_latched_result(&OverlayState::Result("answer".into()), None));
+        assert!(!skip_area_reset_for_latched_result(&OverlayState::Error("oops".into()), None));
+    }
+
+    /// Every other state must still force the reset even with a latch value
+    /// lying around (defensive: a latch is meaningless outside Result/Error,
+    /// and every such state should be unaffected by this skip).
+    #[test]
+    fn skip_area_reset_false_outside_result_and_error() {
+        assert!(!skip_area_reset_for_latched_result(&OverlayState::Hidden, Some(dummy_latch())));
+        assert!(!skip_area_reset_for_latched_result(&OverlayState::Capturing, Some(dummy_latch())));
+        assert!(!skip_area_reset_for_latched_result(&OverlayState::Processing, Some(dummy_latch())));
+    }
 
     /// A genuine Processing→Result transition (a worker response landing via
     /// `poll_responses`, which routes through `sm_handle`) must latch the
