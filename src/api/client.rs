@@ -205,18 +205,39 @@ impl SseParser {
             std::borrow::Cow::Owned(v)
         };
 
-        // Find the longest valid UTF-8 prefix and carry over the remainder.
-        let (valid, remainder) = match std::str::from_utf8(&data) {
-            Ok(s) => (s, &[][..]),
-            Err(e) => {
-                let valid_up_to = e.valid_up_to();
-                // Safety: valid_up_to is guaranteed to be a valid UTF-8 boundary.
-                let s = unsafe { std::str::from_utf8_unchecked(&data[..valid_up_to]) };
-                (s, &data[valid_up_to..])
+        // Decode into the line buffer. An *incomplete* sequence at the end of
+        // the chunk (a multi-byte char split across chunks) is carried over to
+        // the next feed; *invalid* bytes in the middle are replaced with
+        // U+FFFD and decoding continues — otherwise a single corrupt byte
+        // would pin `valid_up_to` at 0 forever, absorbing all later chunks
+        // into the tail and silently stalling the stream.
+        let mut rest: &[u8] = &data;
+        loop {
+            match std::str::from_utf8(rest) {
+                Ok(s) => {
+                    self.buffer.push_str(s);
+                    break;
+                }
+                Err(e) => {
+                    let valid_up_to = e.valid_up_to();
+                    // Safety: valid_up_to is guaranteed to be a valid UTF-8 boundary.
+                    let s = unsafe { std::str::from_utf8_unchecked(&rest[..valid_up_to]) };
+                    self.buffer.push_str(s);
+                    match e.error_len() {
+                        // Invalid bytes mid-data: replace and keep decoding.
+                        Some(n) => {
+                            self.buffer.push(char::REPLACEMENT_CHARACTER);
+                            rest = &rest[valid_up_to + n..];
+                        }
+                        // Chunk ends mid-sequence: carry over to the next feed.
+                        None => {
+                            self.tail.extend_from_slice(&rest[valid_up_to..]);
+                            break;
+                        }
+                    }
+                }
             }
-        };
-        self.tail.extend_from_slice(remainder);
-        self.buffer.push_str(valid);
+        }
 
         let mut events = Vec::new();
         while let Some(pos) = self.buffer.find('\n') {
@@ -266,6 +287,11 @@ impl SseParser {
     /// finish chunk and then close the connection without the terminating
     /// `\n`, leaving that line unparsed by [`feed`] (which is newline-driven).
     pub fn flush(&mut self) -> Vec<SseEvent> {
+        // A leftover tail at end-of-stream is a truncated multi-byte char that
+        // can never complete. Discard it: any line needing those bytes is
+        // unparseable regardless, while appending a replacement char would
+        // corrupt an otherwise-parseable final line (e.g. `data: [DONE]`).
+        self.tail.clear();
         if self.buffer.is_empty() {
             return Vec::new();
         }
@@ -1338,6 +1364,36 @@ mod tests {
         let events = p.feed(suffix);
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], SseEvent::Content(s) if s == "가"));
+    }
+
+    // A genuinely invalid byte (not a chunk-split sequence) must not stall the
+    // parser: it is replaced with U+FFFD and later events still parse.
+    #[test]
+    fn sse_invalid_byte_does_not_stall_stream() {
+        let mut p = SseParser::new();
+        // 0xFF is never valid UTF-8; it corrupts this line's JSON.
+        let corrupt = b"data: {\"choices\":[{\"delta\":{\"content\":\"a\xFFb\"}}]}\n";
+        let events = p.feed(corrupt);
+        // The corrupted line still decodes (with U+FFFD) and parses as JSON.
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Content(s) if s == "a\u{FFFD}b"));
+        // Subsequent well-formed events must keep flowing.
+        let events = p.feed(b"data: [DONE]\n");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Done));
+    }
+
+    // A truncated multi-byte char at end-of-stream must not corrupt the final
+    // (newline-less) line: flush() discards the unfinishable tail bytes and
+    // still recovers the buffered line.
+    #[test]
+    fn sse_flush_discards_incomplete_utf8_tail() {
+        let mut p = SseParser::new();
+        assert!(p.feed(b"data: [DONE]").is_empty()); // no newline yet
+        assert!(p.feed(b"\xEA").is_empty()); // first byte of a 3-byte char, never completed
+        let events = p.flush();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Done));
     }
 
     // flush() recovers a final line the server sent without a trailing newline.
