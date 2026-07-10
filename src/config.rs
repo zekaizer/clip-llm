@@ -781,11 +781,36 @@ fn resolve_path() -> Option<PathBuf> {
         .map(|_| candidate)
 }
 
+/// Converts a byte offset into `contents` to a 1-based `(line, column)` pair.
+///
+/// This is used to point at *where* a TOML parse error occurred without
+/// echoing any of the surrounding file content (which, for `config.toml`,
+/// could be an `api_key` line) — unlike `toml::de::Error`'s `Display` impl,
+/// which renders a source snippet alongside the message.
+fn line_col_at(contents: &str, byte_offset: usize) -> (usize, usize) {
+    let mut line = 1usize;
+    let mut column = 1usize;
+    for (idx, ch) in contents.char_indices() {
+        if idx >= byte_offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    (line, column)
+}
+
 /// Reads and parses the config file, falling back to defaults on any failure.
 ///
-/// Full error details (which for a TOML error can echo a line of file content)
-/// go to `debug!` only; the `warn!` lines stay generic so a misdirected
-/// `CLIP_LLM_CONFIG` cannot leak file contents into ordinary logs.
+/// A TOML parse error is reported via `message()` + a computed line/column
+/// only — never via the error's full `Display` impl, which would render a
+/// snippet of the offending source line (potentially an `api_key` line) — so
+/// the location can safely reach `warn!`/`eprintln!` instead of being
+/// confined to `debug!`.
 fn load_or_default() -> Config {
     let Some(path) = resolve_path() else {
         record_outcome(LoadOutcome::NoFile);
@@ -845,7 +870,23 @@ fn load_or_default() -> Config {
                 config
             }
             Err(e) => {
-                warn!("config: {}: invalid TOML — using built-in defaults", path.display());
+                let location = e
+                    .span()
+                    .map(|span| {
+                        let (line, column) = line_col_at(&contents, span.start);
+                        format!(" at line {line}, column {column}")
+                    })
+                    .unwrap_or_default();
+                warn!(
+                    "config: {}: invalid TOML{location}: {} — using built-in defaults",
+                    path.display(),
+                    e.message()
+                );
+                eprintln!(
+                    "clip-llm: {}: invalid TOML{location}: {} — using built-in defaults",
+                    path.display(),
+                    e.message()
+                );
                 debug!("config parse error: {e}");
                 record_outcome(LoadOutcome::Failed { path, reason: "invalid TOML" });
                 Config::default()
@@ -1181,5 +1222,35 @@ mod tests {
         // load_or_default() turns this into a defaults fallback; here we assert the
         // parser itself errors so that fallback path is exercised.
         assert!(toml::from_str::<Config>("not = = valid").is_err());
+    }
+
+    #[test]
+    fn line_col_at_locates_offsets() {
+        let text = "abc\ndef\nghi";
+        assert_eq!(line_col_at(text, 0), (1, 1));
+        assert_eq!(line_col_at(text, 2), (1, 3));
+        // Offset 4 is right after the first '\n', i.e. the start of line 2.
+        assert_eq!(line_col_at(text, 4), (2, 1));
+        assert_eq!(line_col_at(text, 6), (2, 3));
+        // An offset past the end of the string does not panic; it reports the
+        // position at the end of the last line.
+        assert_eq!(line_col_at(text, 1000), (3, 4));
+    }
+
+    #[test]
+    fn toml_parse_error_reports_message_and_span_without_snippet() {
+        // A malformed value on line 2 — the error's span should point there, and
+        // `message()` alone (as opposed to the error's `Display` impl) must not
+        // echo the offending source line.
+        let contents = "[api]\nendpoint = not-a-string\n";
+        let err = toml::from_str::<Config>(contents).unwrap_err();
+        let span = err.span().expect("parse error carries a span");
+        let (line, _column) = line_col_at(contents, span.start);
+        assert_eq!(line, 2);
+        assert!(
+            !err.message().contains("not-a-string"),
+            "message() unexpectedly echoed source content: {}",
+            err.message()
+        );
     }
 }
