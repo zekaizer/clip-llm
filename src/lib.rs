@@ -403,6 +403,11 @@ pub enum ApiError {
     #[error("empty response from model")]
     EmptyResponse,
 
+    /// The server returned 2xx but the body is not a chat completion (e.g. a
+    /// proxy served an HTML error page with status 200, or the body was cut).
+    #[error("malformed response body: {0}")]
+    MalformedResponse(String),
+
     #[error("no usable content: image-only clipboard but model lacks vision support")]
     NoUsableContent,
 

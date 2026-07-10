@@ -5,14 +5,18 @@ use regex::Regex;
 // Matches a reasoning block delimited by any of the known tag variants emitted
 // by different models inline in the content: `<think>` (DeepSeek R1, Qwen,
 // most), `<thought>` (Gemma), `<thinking>`, `<reasoning>`. The Rust regex crate
-// has no backreferences, so open/close tags aren't pinned to the same name; in
-// practice models emit matched tags and a stray mix would still strip cleanly.
-// `thinking` precedes `think` so the longer alternative is preferred. (Models
-// that put reasoning in a separate `reasoning_content` field instead leave
-// `content` clean, so they need no stripping here.)
+// has no backreferences, so each variant is spelled out as its own paired
+// alternative — a close tag only terminates a block opened by the same name.
+// Otherwise a block that merely *mentions* another variant's close tag (e.g.
+// `<think>… the </reasoning> tag …</think>`) would be cut short, leaking the
+// rest of the reasoning into the visible output. (Models that put reasoning in
+// a separate `reasoning_content` field instead leave `content` clean, so they
+// need no stripping here.)
 static THINK_CAPTURE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<(?:thinking|think|thought|reasoning)>(.*?)</(?:thinking|think|thought|reasoning)>")
-        .unwrap()
+    Regex::new(
+        r"(?s)<think>(.*?)</think>|<thought>(.*?)</thought>|<thinking>(.*?)</thinking>|<reasoning>(.*?)</reasoning>",
+    )
+    .unwrap()
 });
 
 /// Extract the content of the first reasoning block (any of the
@@ -21,7 +25,8 @@ static THINK_CAPTURE_RE: LazyLock<Regex> = LazyLock::new(|| {
 pub fn extract_first_think_content(text: &str) -> Option<String> {
     THINK_CAPTURE_RE
         .captures(text)
-        .and_then(|c| c.get(1))
+        // One capture group per paired alternative — take whichever matched.
+        .and_then(|c| (1..=OPEN_TAGS.len()).find_map(|i| c.get(i)))
         .map(|m| m.as_str().trim().to_string())
         .filter(|s| !s.is_empty())
 }
@@ -43,11 +48,8 @@ pub fn strip_think_blocks(text: &str) -> String {
 /// once the closing `>` is present, so full-tag `starts_with` matching stays
 /// unambiguous.
 const OPEN_TAGS: [&str; 4] = ["<think>", "<thought>", "<thinking>", "<reasoning>"];
-/// Matching close tags for [`OPEN_TAGS`].
+/// Matching close tags for [`OPEN_TAGS`] (same index = same variant).
 const CLOSE_TAGS: [&str; 4] = ["</think>", "</thought>", "</thinking>", "</reasoning>"];
-/// Longest close tag (`</reasoning>` = 12 bytes); the streaming tail must retain
-/// `len - 1` bytes so a close tag split across chunks is still detected.
-const MAX_CLOSE_TAG_LEN: usize = 12;
 
 /// Incremental filter that strips the first reasoning block (any [`OPEN_TAGS`]
 /// variant) from a token stream. Feed tokens one at a time via [`feed`]; only
@@ -59,6 +61,13 @@ pub struct ThinkBlockFilter {
     trim_leading_newlines: bool,
     /// Accumulated content of the first think block (populated when InsideThink).
     think_content: String,
+    /// Close tag matching the open tag that entered the block. Only this
+    /// variant terminates the block — a different variant's close tag inside
+    /// the content is reasoning text, not a terminator.
+    close_tag: &'static str,
+    /// Sticky: set once non-whitespace think content has been seen, so a
+    /// block that opens and closes within a single feed still reports it.
+    think_seen: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,16 +93,21 @@ impl ThinkBlockFilter {
             pending: String::new(),
             trim_leading_newlines: false,
             think_content: String::new(),
+            close_tag: CLOSE_TAGS[0],
+            think_seen: false,
         }
     }
 
-    /// Returns `true` when inside a think block AND non-whitespace content
-    /// has been accumulated. Use this to delay `ThinkStarted` notifications
-    /// until meaningful content is detected (avoids UI flicker for empty blocks).
+    /// Returns `true` once non-whitespace think content has been seen. Sticky:
+    /// stays `true` after the block closes, so a block that opens and closes
+    /// within a single feed (large batched delta) is still reported. Use this
+    /// to delay `ThinkStarted` notifications until meaningful content is
+    /// detected (avoids UI flicker for empty blocks).
     pub fn has_think_content(&self) -> bool {
-        self.state == ThinkState::InsideThink
-            && (self.think_content.contains(|c: char| !c.is_whitespace())
-                || self.pending.contains(|c: char| !c.is_whitespace()))
+        self.think_seen
+            || (self.state == ThinkState::InsideThink
+                && (self.think_content.contains(|c: char| !c.is_whitespace())
+                    || self.pending.contains(|c: char| !c.is_whitespace())))
     }
 
     /// Take the accumulated think-block content, leaving it empty.
@@ -114,11 +128,13 @@ impl ThinkBlockFilter {
     fn feed_before(&mut self, token: &str) -> String {
         self.pending.push_str(token);
 
-        if let Some(open) = OPEN_TAGS.iter().find(|t| self.pending.starts_with(**t)) {
-            // Full open tag matched (possibly with trailing chars).
-            let remainder = self.pending[open.len()..].to_string();
+        if let Some(idx) = OPEN_TAGS.iter().position(|t| self.pending.starts_with(*t)) {
+            // Full open tag matched (possibly with trailing chars). Remember
+            // which variant opened so only its own close tag terminates it.
+            let remainder = self.pending[OPEN_TAGS[idx].len()..].to_string();
             self.pending.clear();
             self.state = ThinkState::InsideThink;
+            self.close_tag = CLOSE_TAGS[idx];
             self.feed_inside(&remainder)
         } else if OPEN_TAGS.iter().any(|t| t.starts_with(self.pending.as_str())) {
             // Pending is a proper prefix of some open tag — keep buffering.
@@ -134,24 +150,24 @@ impl ThinkBlockFilter {
     fn feed_inside(&mut self, token: &str) -> String {
         self.pending.push_str(token);
 
-        // Earliest close tag of any variant.
-        let close = CLOSE_TAGS
-            .iter()
-            .filter_map(|t| self.pending.find(*t).map(|pos| (pos, t.len())))
-            .min_by_key(|(pos, _)| *pos);
-        if let Some((pos, close_len)) = close {
+        // Only the close tag paired with the open tag terminates the block; a
+        // different variant's close tag inside the content is reasoning text.
+        if let Some(pos) = self.pending.find(self.close_tag) {
             // Save the think content before the close tag.
             self.think_content.push_str(&self.pending[..pos]);
-            let after = &self.pending[pos + close_len..];
+            if self.think_content.contains(|c: char| !c.is_whitespace()) {
+                self.think_seen = true;
+            }
+            let after = &self.pending[pos + self.close_tag.len()..];
             let trimmed = after.trim_start_matches(['\n', '\r']).to_string();
             self.trim_leading_newlines = trimmed.is_empty();
             self.pending.clear();
             self.state = ThinkState::PassThrough;
             trimmed
         } else {
-            // Retain last (MAX_CLOSE_TAG_LEN - 1) bytes so a split close tag of
-            // any variant spanning two chunks is still detected on the next feed.
-            let keep = MAX_CLOSE_TAG_LEN - 1;
+            // Retain the last (close tag len - 1) bytes so a close tag split
+            // across two chunks is still detected on the next feed.
+            let keep = self.close_tag.len() - 1;
             if self.pending.len() > keep {
                 let mut start = self.pending.len() - keep;
                 while !self.pending.is_char_boundary(start) {
@@ -297,6 +313,17 @@ mod tests {
         assert_eq!(f.feed("ing>done"), "done");
     }
 
+    // A different variant's close tag inside the block is reasoning text, not
+    // a terminator — the block only ends at its own paired close tag.
+    #[test]
+    fn filter_cross_variant_close_tag_ignored() {
+        let mut f = ThinkBlockFilter::new();
+        assert_eq!(f.feed("<think>about the </thinking> tag"), "");
+        assert_eq!(f.feed(" and more"), "");
+        assert_eq!(f.feed("</think>answer"), "answer");
+        assert_eq!(f.feed(" rest"), " rest");
+    }
+
     #[test]
     fn filter_split_across_tokens() {
         let mut f = ThinkBlockFilter::new();
@@ -409,6 +436,27 @@ mod tests {
         assert_eq!(strip_think_blocks(input), "answer");
     }
 
+    // A different variant's close tag mentioned inside the block must not
+    // terminate it early — only the paired close tag does.
+    #[test]
+    fn cross_variant_close_tag_inside_block_ignored() {
+        let input = "<think>the </reasoning> tag versus think</think>answer";
+        assert_eq!(strip_think_blocks(input), "answer");
+        assert_eq!(
+            extract_first_think_content(input).as_deref(),
+            Some("the </reasoning> tag versus think")
+        );
+    }
+
+    // An open tag closed only by a different variant is not a complete block
+    // and must be preserved verbatim.
+    #[test]
+    fn mismatched_open_close_pair_preserved() {
+        let input = "<think>no matching close</thought>";
+        assert_eq!(strip_think_blocks(input), input);
+        assert_eq!(extract_first_think_content(input), None);
+    }
+
     // --- has_think_content tests ---
 
     #[test]
@@ -451,11 +499,31 @@ mod tests {
         assert!(filter.has_think_content());
     }
 
+    // Sticky: a block that opened and closed still reports its content, so a
+    // ThinkStarted checked after the fact (single batched delta) is not lost.
     #[test]
-    fn has_think_content_false_after_close_tag() {
+    fn has_think_content_sticky_after_close_tag() {
         let mut filter = ThinkBlockFilter::new();
         filter.feed("<think>reasoning</think>");
-        // After close tag, no longer inside think block.
+        assert!(filter.has_think_content());
+    }
+
+    // The whole block plus the answer in ONE feed (large batched SSE delta):
+    // the caller checks has_think_content only after feed() returns, so the
+    // sticky flag is what makes the notification possible at all.
+    #[test]
+    fn has_think_content_true_for_single_feed_whole_block() {
+        let mut filter = ThinkBlockFilter::new();
+        assert_eq!(filter.feed("<think>brief thought</think>Answer"), "Answer");
+        assert!(filter.has_think_content());
+    }
+
+    // An empty block that opens and closes in one feed must NOT report
+    // content (no ThinkStarted flicker for empty blocks).
+    #[test]
+    fn has_think_content_false_for_empty_block_single_feed() {
+        let mut filter = ThinkBlockFilter::new();
+        assert_eq!(filter.feed("<think>  \n </think>Answer"), "Answer");
         assert!(!filter.has_think_content());
     }
 }
