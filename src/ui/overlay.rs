@@ -26,6 +26,17 @@ const ACTION_BTN_FADE_RADIUS: f32 = 80.0;
 const ACTION_BTN_ALPHA_MAX: f32 = 200.0;
 /// Action button size (square).
 const ACTION_BTN_SIZE: f32 = 26.0;
+/// Height of the shared top "status/think" row: Processing's spinner+label
+/// (or locked "Thinking" header) and Result's clickable think toggle are
+/// both rendered inside a row pinned to this height (see `fixed_height_row`),
+/// so that row occupies the same slot regardless of which content variant is
+/// showing — no shift in the text block below it across the Processing→Result
+/// transition, or between the row's own content variants.
+const TOP_ROW_HEIGHT: f32 = 24.0;
+/// Height of the shared bottom "controls" row: Processing's Cancel button and
+/// Result's reserved space for the floating action buttons (see
+/// `ACTION_BTN_SIZE`, which this matches) both occupy this same slot.
+const BOTTOM_ROW_HEIGHT: f32 = ACTION_BTN_SIZE;
 
 /// Streaming and think-block display state for Processing/Result rendering.
 pub struct StreamingState<'a> {
@@ -276,6 +287,20 @@ pub fn render(
     }
 }
 
+/// Render `add_contents` inside a row whose height is pinned to exactly
+/// `height` (a floor — content is never clipped, only ever centered within
+/// more space than it naturally needs). Used for the shared top status/think
+/// row and bottom controls row in both Processing and Result, so those rows'
+/// vertical footprint is identical regardless of which content variant (or
+/// which state) renders inside them — only the *contents* swap in place at
+/// the Processing→Result transition, not the layout around them.
+fn fixed_height_row(ui: &mut egui::Ui, height: f32, add_contents: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        ui.set_min_height(height);
+        add_contents(ui);
+    });
+}
+
 /// Renders a vertically scrollable, word-wrapped text label with a consistent style.
 fn render_scrollable_text(
     ui: &mut egui::Ui,
@@ -300,12 +325,15 @@ fn render_scrollable_text(
         });
 }
 
-fn render_think_toggle(
-    ui: &mut egui::Ui,
-    expanded: bool,
-    content: &str,
-    action: &mut OverlayAction,
-) {
+/// Render just the clickable "▶/▼ Thinking" toggle (icon + label, unchanged
+/// styling/size — #6), no expanded content. This is Result's counterpart to
+/// Processing's status row and is rendered inside the shared `TOP_ROW_HEIGHT`
+/// slot (see `fixed_height_row`), so it doesn't shift the text block below
+/// when it replaces Processing's row at the transition. Call
+/// `render_think_content` separately, *outside* that fixed slot, when
+/// `expanded` — that growth is a deliberate user action, not part of the
+/// pinned transition geometry.
+fn render_think_toggle_header(ui: &mut egui::Ui, expanded: bool, action: &mut OverlayAction) {
     let icon = if expanded { "\u{25bc}" } else { "\u{25b6}" };
     let btn = egui::Button::new(
         egui::RichText::new(format!("{icon} Thinking"))
@@ -316,25 +344,29 @@ fn render_think_toggle(
     if ui.add(btn).clicked() {
         *action = OverlayAction::ToggleThink;
     }
-    if expanded {
-        egui::ScrollArea::vertical()
-            .id_salt("think_content")
-            .max_height(120.0)
-            .auto_shrink([false, true])
-            .scroll_bar_visibility(
-                egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
-            )
-            .show(ui, |ui| {
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(content)
-                            .color(egui::Color32::from_gray(130))
-                            .size(13.0),
-                    )
-                    .wrap_mode(egui::TextWrapMode::Wrap),
-                );
-            });
-    }
+}
+
+/// Render the expanded think-block content (scrollable). Only shown once
+/// `render_think_toggle_header`'s toggle is expanded; deliberately rendered
+/// outside the fixed-height/pinned-height budget, so it's free to grow the
+/// window (collapsing returns to the pinned floor, not to whatever egui
+/// would otherwise auto-measure).
+fn render_think_content(ui: &mut egui::Ui, content: &str) {
+    egui::ScrollArea::vertical()
+        .id_salt("think_content")
+        .max_height(120.0)
+        .auto_shrink([false, true])
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+        .show(ui, |ui| {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(content)
+                        .color(egui::Color32::from_gray(130))
+                        .size(13.0),
+                )
+                .wrap_mode(egui::TextWrapMode::Wrap),
+            );
+        });
 }
 
 /// Small dim label showing how long the current request has been processing.
@@ -410,9 +442,12 @@ fn render_processing(
     elapsed: Option<std::time::Duration>,
     action: &mut OverlayAction,
 ) {
-    if think_started && streaming_text.is_empty() {
-        // Think block in progress, no visible output yet.
-        ui.horizontal(|ui| {
+    // Top row: shared slot with Result's think toggle (see `TOP_ROW_HEIGHT`)
+    // — whichever of these three variants is showing on the last Processing
+    // frame, it occupies the same height as Result's row that replaces it.
+    fixed_height_row(ui, TOP_ROW_HEIGHT, |ui| {
+        if think_started && streaming_text.is_empty() {
+            // Think block in progress, no visible output yet.
             ui.spinner();
             ui.label(
                 egui::RichText::new("Thinking...")
@@ -420,21 +455,15 @@ fn render_processing(
                     .size(15.0),
             );
             render_elapsed_label(ui, elapsed);
-        });
-    } else if think_started {
-        // Think done, answer streaming: show locked collapsed header.
-        ui.horizontal(|ui| {
+        } else if think_started {
+            // Think done, answer streaming: show locked collapsed header.
             ui.label(
                 egui::RichText::new("\u{25b6} Thinking")
                     .color(egui::Color32::from_gray(100))
                     .size(13.0),
             );
             render_elapsed_label(ui, elapsed);
-        });
-        ui.add_space(4.0);
-        render_scrollable_text(ui, ("streaming", mode), streaming_text, MAX_RESULT_HEIGHT, true);
-    } else {
-        ui.horizontal(|ui| {
+        } else {
             ui.spinner();
             ui.label(
                 egui::RichText::new(mode.processing_label())
@@ -442,20 +471,18 @@ fn render_processing(
                     .size(15.0),
             );
             render_elapsed_label(ui, elapsed);
-        });
-        if !streaming_text.is_empty() {
-            ui.add_space(4.0);
-            render_scrollable_text(
-                ui,
-                ("streaming", mode),
-                streaming_text,
-                MAX_RESULT_HEIGHT,
-                true,
-            );
         }
+    });
+    if !streaming_text.is_empty() {
+        ui.add_space(4.0);
+        render_scrollable_text(ui, ("streaming", mode), streaming_text, MAX_RESULT_HEIGHT, true);
     }
     ui.add_space(4.0);
-    render_cancel_button(ui, action);
+    // Bottom row: shared slot with Result's reserved action-button space (see
+    // `BOTTOM_ROW_HEIGHT`).
+    fixed_height_row(ui, BOTTOM_ROW_HEIGHT, |ui| {
+        render_cancel_button(ui, action);
+    });
 }
 
 fn render_error(
@@ -526,18 +553,37 @@ fn render_result(
         );
         ui.add_space(4.0);
     }
-    if let Some(content) = think_content {
-        render_think_toggle(ui, think_expanded, content, action);
-        ui.add_space(4.0);
+
+    // Top row: shared slot with Processing's status/thinking row (see
+    // `TOP_ROW_HEIGHT`) — reserved even with no think content, so the text
+    // block below doesn't shift depending on whether this particular result
+    // has a think section or not (Processing always shows *some* status row).
+    fixed_height_row(ui, TOP_ROW_HEIGHT, |ui| {
+        if think_content.is_some() {
+            render_think_toggle_header(ui, think_expanded, action);
+        }
+    });
+    // Expanded think content is deliberate, user-triggered growth — kept
+    // outside the fixed slot above (unaffected styling/size — #6).
+    if think_expanded && let Some(content) = think_content {
+        render_think_content(ui, content);
     }
+    ui.add_space(4.0);
 
     // Action buttons: always rendered at top-right of result area.
     // auto_copy (double-tap): paste/replace button (↩)
     // !auto_copy (single-tap): copy button (📋)
     // plus a retry button (↻) to its left, for a fresh generation.
-    // Opacity changes on hover (subtle when idle, prominent when hovered).
+    // Opacity changes on hover (subtle when idle, prominent when hovered — #24).
     let result_top = ui.cursor().min;
     render_scrollable_text(ui, ("result", mode), text, MAX_RESULT_HEIGHT, false);
+
+    // Bottom row: reserved space matching Processing's Cancel-button row (see
+    // `BOTTOM_ROW_HEIGHT`), so the pinned total lines up even though the
+    // action buttons below float over the text rather than consuming layout
+    // space of their own.
+    ui.add_space(4.0);
+    fixed_height_row(ui, BOTTOM_ROW_HEIGHT, |_ui| {});
 
     let btn_size = egui::vec2(ACTION_BTN_SIZE, ACTION_BTN_SIZE);
     let btn_pos = egui::pos2(
