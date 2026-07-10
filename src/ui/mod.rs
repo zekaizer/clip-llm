@@ -45,6 +45,23 @@ fn tray_last_label(message: &str) -> String {
     }
 }
 
+/// Format a compact completion summary ("✓ 2.4s · 850 tokens") for the
+/// Result bottom row — the same slot Processing's spinner+elapsed+Cancel row
+/// occupies (see `TOP_ROW_HEIGHT`/`BOTTOM_ROW_HEIGHT` in overlay.rs), so it
+/// fills what would otherwise be empty space left by those controls
+/// disappearing. Token usage is often unavailable — not every server reports
+/// it on streaming responses (see `DebugCapture::total_tokens`) — so it's
+/// appended only when present. `None` when even the elapsed time isn't known
+/// (nothing meaningful to show).
+fn format_completion_status(debug: &crate::DebugCapture) -> Option<String> {
+    let elapsed_ms = debug.elapsed_ms?;
+    let secs = elapsed_ms as f32 / 1000.0;
+    Some(match debug.total_tokens {
+        Some(tokens) => format!("\u{2713} {secs:.1}s \u{b7} {tokens} tokens"),
+        None => format!("\u{2713} {secs:.1}s"),
+    })
+}
+
 /// Window geometry latched at a Processing→Result/Error transition. See
 /// `OverlayApp::result_latch`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1355,6 +1372,7 @@ impl eframe::App for OverlayApp {
             self.copy_confirmed_at.is_some(),
             elapsed,
             self.last_debug.is_some(),
+            self.last_debug.as_ref().and_then(format_completion_status),
             self.result_latch.map(|l| l.min_content_height),
             ctx,
         );
@@ -1890,6 +1908,30 @@ mod tests {
         assert_eq!(app.req_ok, 1);
         assert_eq!(app.req_err, 0);
         assert!(app.last_debug.is_some(), "current completion's debug snapshot must surface");
+    }
+
+    // --- format_completion_status: Result bottom-row summary ---
+
+    #[test]
+    fn completion_status_elapsed_only() {
+        let debug = crate::DebugCapture { elapsed_ms: Some(2400), ..Default::default() };
+        assert_eq!(format_completion_status(&debug).as_deref(), Some("\u{2713} 2.4s"));
+    }
+
+    #[test]
+    fn completion_status_elapsed_and_tokens() {
+        let debug =
+            crate::DebugCapture { elapsed_ms: Some(2400), total_tokens: Some(850), ..Default::default() };
+        assert_eq!(
+            format_completion_status(&debug).as_deref(),
+            Some("\u{2713} 2.4s \u{b7} 850 tokens"),
+        );
+    }
+
+    #[test]
+    fn completion_status_none_without_elapsed() {
+        let debug = crate::DebugCapture { total_tokens: Some(850), ..Default::default() };
+        assert_eq!(format_completion_status(&debug), None);
     }
 
     // --- result_latch: Processing→Result/Error geometry latching (the

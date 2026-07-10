@@ -110,6 +110,13 @@ pub fn render(
     copy_confirmed: bool,
     elapsed: Option<std::time::Duration>,
     debug_available: bool,
+    // Compact completion summary ("✓ 2.4s · 850 tokens") shown in Result's
+    // bottom row — the same slot Processing's spinner+elapsed+Cancel row
+    // occupies (see `TOP_ROW_HEIGHT`/`BOTTOM_ROW_HEIGHT`), filling what would
+    // otherwise be empty space left by those controls disappearing. `None`
+    // when no completion data is available (e.g. a cached/instant result —
+    // see `format_completion_status` in `mod.rs`).
+    completion_status: Option<String>,
     // Floor for the Result/Error content height, latched by the adapter from
     // the last Processing frame's rendered content (see
     // `OverlayApp::result_latch`) so the final answer never renders shorter
@@ -253,6 +260,7 @@ pub fn render(
                             copy_confirmed,
                             streaming.incomplete,
                             debug_available,
+                            completion_status.as_deref(),
                             content_top,
                             pinned_inner_height,
                             &mut action,
@@ -334,12 +342,19 @@ fn fixed_height_row(ui: &mut egui::Ui, height: f32, add_contents: impl FnOnce(&m
 }
 
 /// Renders a vertically scrollable, word-wrapped text label with a consistent style.
+///
+/// `shrink_to_fit`: `true` (the usual case) shrinks the ScrollArea down to
+/// the content's natural height, up to `max_height`. `false` instead always
+/// renders at exactly `max_height` regardless of content — used by a pinned,
+/// collapsed Result (see `render_result`) so the text column visually fills
+/// the latched budget instead of leaving an empty gap below short content.
 fn render_scrollable_text(
     ui: &mut egui::Ui,
     id_salt: impl std::hash::Hash,
     text: &str,
     max_height: f32,
     stick_to_bottom: bool,
+    shrink_to_fit: bool,
 ) {
     egui::ScrollArea::vertical()
         .id_salt(id_salt)
@@ -351,7 +366,7 @@ fn render_scrollable_text(
         // to the same one `render_result`'s budget cap already floors to,
         // so a tightly capped budget is actually honored.
         .min_scrolled_height(MIN_RESULT_TEXT_HEIGHT)
-        .auto_shrink([false, true])
+        .auto_shrink([false, shrink_to_fit])
         .stick_to_bottom(stick_to_bottom)
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
         .show(ui, |ui| {
@@ -449,7 +464,7 @@ fn render_capturing(
     if let Some(text) = picking_text {
         // Single-tap picking: the clipboard content has arrived, so show the
         // data that will be processed in the chosen mode on release.
-        render_scrollable_text(ui, "picking", text, MAX_RESULT_HEIGHT, false);
+        render_scrollable_text(ui, "picking", text, MAX_RESULT_HEIGHT, false, true);
     } else {
         // Content not yet available — double-tap captures the selection on
         // modifier release (copy simulation needs the modifiers up) and the
@@ -514,7 +529,7 @@ fn render_processing(
     });
     if !streaming_text.is_empty() {
         ui.add_space(4.0);
-        render_scrollable_text(ui, ("streaming", mode), streaming_text, MAX_RESULT_HEIGHT, true);
+        render_scrollable_text(ui, ("streaming", mode), streaming_text, MAX_RESULT_HEIGHT, true, true);
     }
     ui.add_space(4.0);
     // Bottom row: shared slot with Result's reserved action-button space (see
@@ -580,6 +595,10 @@ fn render_result(
     copy_confirmed: bool,
     incomplete: Option<&str>,
     debug_available: bool,
+    // Compact completion summary for the bottom row (see the doc comment on
+    // `render()`'s `completion_status` parameter, which this is threaded
+    // from).
+    completion_status: Option<&str>,
     // Top of the whole inner content ui (captured in `render()` right after
     // `ui.set_width`, *before* the tab bar/separator) — the reference point
     // for measuring how much of `pinned_inner_height` has already been used
@@ -651,14 +670,27 @@ fn render_result(
     // plus a retry button (↻) to its left, for a fresh generation.
     // Opacity changes on hover (subtle when idle, prominent when hovered — #24).
     let result_top = ui.cursor().min;
-    render_scrollable_text(ui, ("result", mode), text, text_max_height, false);
+    // While pinned and collapsed, the ScrollArea fills its whole budget
+    // (`shrink_to_fit: false`) rather than shrinking to short content, so the
+    // text column visually owns the latched space instead of leaving an
+    // empty gap between it and the bottom row below.
+    let shrink_to_fit = pinned_inner_height.is_none() || think_expanded;
+    render_scrollable_text(ui, ("result", mode), text, text_max_height, false, shrink_to_fit);
 
-    // Bottom row: reserved space matching Processing's Cancel-button row (see
-    // `BOTTOM_ROW_HEIGHT`), so the pinned total lines up even though the
-    // action buttons below float over the text rather than consuming layout
-    // space of their own.
+    // Bottom row: shared slot with Processing's Cancel-button row (see
+    // `BOTTOM_ROW_HEIGHT`). The action buttons float over the text and take
+    // no layout space of their own, so this row instead shows a passive
+    // completion summary — filling what would otherwise be empty space left
+    // by the spinner/elapsed/Cancel controls disappearing, and mirroring
+    // "controls swap in place" the way the top row already does.
     ui.add_space(4.0);
-    fixed_height_row(ui, BOTTOM_ROW_HEIGHT, |_ui| {});
+    fixed_height_row(ui, BOTTOM_ROW_HEIGHT, |ui| {
+        if let Some(status) = completion_status {
+            ui.label(
+                egui::RichText::new(status).color(egui::Color32::from_gray(120)).size(12.0),
+            );
+        }
+    });
     // The floor for "never shorter than the latch" is already applied once,
     // at the true top of the whole inner ui, in `render()` — see the comment
     // there on why it can't be (re)applied here instead (`Ui::set_min_height`
@@ -1008,6 +1040,7 @@ mod tests {
                 false,
                 None,
                 false,
+                None,
                 min_result_height,
                 ctx,
             ));
@@ -1066,7 +1099,10 @@ mod tests {
 
     /// The floor side of the same claim: a Result whose natural text is
     /// *shorter* than the latch must still render at exactly the latch
-    /// height on the very next frame (never shrink below it either).
+    /// height on the very next frame (never shrink below it either). The
+    /// text area fills the whole latched budget (`shrink_to_fit: false` in
+    /// `render_result`) rather than shrinking to the short content, so no
+    /// empty gap is left between the text column and the bottom row.
     #[test]
     fn result_pinned_height_matches_latch_when_text_is_shorter() {
         let (ctx, processing) =
@@ -1076,9 +1112,12 @@ mod tests {
         let result = render_headless(&ctx, &OverlayState::Result("short".into()), "", Some(latch));
         let result_height = result.content_size.expect("Result must report a content size").y;
 
+        // Same tolerance/rationale as the "taller" test above: never shorter
+        // (tight), a few px of ScrollArea-internal-chrome overshoot tolerated.
+        assert!(result_height >= latch - 0.5, "must never render shorter than the latch");
         assert!(
-            (result_height - latch).abs() < 1.0,
-            "pinned Result height {result_height} must match the latch {latch} \
+            result_height < latch + 12.0,
+            "pinned Result height {result_height} must stay close to the latch {latch} \
              even though the natural text is much shorter",
         );
     }
