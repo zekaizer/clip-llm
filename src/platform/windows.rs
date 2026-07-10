@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -179,7 +180,7 @@ impl Platform for WindowsPlatform {
         // SW_HIDE transfers foreground to the previous app. move_window_offscreen()
         // alone keeps us as foreground, so SendInput would target the overlay.
         // Done synchronously on the calling thread (fast).
-        if let Some(h) = find_clip_llm_hwnd() {
+        if let Some(h) = clip_llm_hwnd() {
             unsafe { ShowWindow(h, SW_HIDE); }
             debug!("yielded focus via ShowWindow(SW_HIDE)");
         } else {
@@ -188,8 +189,10 @@ impl Platform for WindowsPlatform {
 
         // The focus-transfer wait + key simulation + visibility restore (~150ms)
         // run on a short-lived background thread so the egui render loop is not
-        // frozen on every paste. HWND is !Send, so re-find it inside the thread
-        // (FindWindowW is callable from any thread). WindowsPlatform is a ZST.
+        // frozen on every paste. HWND is !Send, so it cannot be captured by the
+        // closure directly; re-resolve it inside the thread via `clip_llm_hwnd()`
+        // (backed by the cross-thread-safe `CACHED_HWND` atomic, so this is cheap
+        // rather than a fresh `FindWindowW`). WindowsPlatform is a ZST.
         thread::spawn(|| {
             use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindowAsync, SW_SHOWNA};
             // Wait for the target app to become foreground and ready for input.
@@ -199,7 +202,7 @@ impl Platform for WindowsPlatform {
             // (egui#5229): SW_HIDE triggers ControlFlow::Poll; SW_SHOWNA at
             // (-32000,-32000) restores Wait. Do NOT use show_no_activate() — it
             // repositions to cursor.
-            if let Some(h) = find_clip_llm_hwnd() {
+            if let Some(h) = clip_llm_hwnd() {
                 unsafe { ShowWindowAsync(h, SW_SHOWNA); }
             }
             if let Err(e) = result {
@@ -210,12 +213,60 @@ impl Platform for WindowsPlatform {
     }
 }
 
-/// Find the clip-llm window handle. Returns `None` when the window does not exist yet.
-fn find_clip_llm_hwnd() -> Option<HWND> {
-    use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
+/// Cached handle to the clip-llm overlay window, stored as a pointer-sized
+/// integer. `HWND` is a raw pointer (`!Send`/`!Sync`), so it cannot be held in
+/// a `static` directly; `isize` can. `0` means "not yet resolved" (Win32 never
+/// hands out a null HWND for a real window).
+static CACHED_HWND: AtomicIsize = AtomicIsize::new(0);
+
+/// Tracks whether the last fallback lookup failed, so the failure is logged
+/// only on the found -> not-found transition instead of every call. Several
+/// call sites (notably `set_window_position`, invoked once per frame via
+/// `reposition_window` while the overlay is visible) would otherwise spam the
+/// log if the window were ever briefly unresolvable.
+static HWND_LOOKUP_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// Resolve the clip-llm overlay `HWND`, preferring a cached handle over the
+/// system-wide `FindWindowW` title lookup.
+///
+/// `FindWindowW` enumerates top-level windows and is too costly to call from
+/// hot paths — several call sites run every frame while the overlay is
+/// visible (`reposition_window` -> `set_window_position`). The window handle
+/// is stable for the lifetime of the overlay window once created, so it is
+/// cached in `CACHED_HWND` and revalidated on each call with `IsWindow`
+/// (a single, cheap kernel call) rather than re-searched. A cache miss (unset
+/// or stale, e.g. the window was destroyed and recreated) falls back to the
+/// original `FindWindowW` lookup, which repopulates the cache on success.
+fn clip_llm_hwnd() -> Option<HWND> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, IsWindow};
+
+    let cached = CACHED_HWND.load(Ordering::Relaxed);
+    if cached != 0 {
+        let hwnd = cached as HWND;
+        if unsafe { IsWindow(hwnd) } != 0 {
+            HWND_LOOKUP_FAILED.store(false, Ordering::Relaxed);
+            return Some(hwnd);
+        }
+        // Stale handle (window destroyed, possibly since recreated) — drop it
+        // and fall through to a fresh lookup below.
+        CACHED_HWND.store(0, Ordering::Relaxed);
+    }
+
     let title: Vec<u16> = "clip-llm\0".encode_utf16().collect();
     let hwnd = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
-    if hwnd.is_null() { None } else { Some(hwnd) }
+    if hwnd.is_null() {
+        // Log only on the found -> not-found transition to avoid spamming
+        // per-frame call sites; this also keeps quiet during the brief
+        // startup window before the overlay is created.
+        if !HWND_LOOKUP_FAILED.swap(true, Ordering::Relaxed) {
+            warn!("clip_llm_hwnd: FindWindowW could not locate the overlay window");
+        }
+        None
+    } else {
+        HWND_LOOKUP_FAILED.store(false, Ordering::Relaxed);
+        CACHED_HWND.store(hwnd as isize, Ordering::Relaxed);
+        Some(hwnd)
+    }
 }
 
 /// Add or remove `WS_EX_NOACTIVATE` on the overlay window.
@@ -269,7 +320,7 @@ fn set_tool_window() {
         GWL_EXSTYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
         SW_HIDE, SW_SHOWNA, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
     };
-    if let Some(hwnd) = find_clip_llm_hwnd() {
+    if let Some(hwnd) = clip_llm_hwnd() {
         unsafe {
             let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
             let new_style = (style | WS_EX_TOOLWINDOW as isize) & !(WS_EX_APPWINDOW as isize);
@@ -374,7 +425,7 @@ pub fn show_no_activate() {
         GetWindowRect, SetWindowPos, ShowWindowAsync, HWND_TOP, SW_SHOWNA,
         SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
     };
-    if let Some(hwnd) = find_clip_llm_hwnd() {
+    if let Some(hwnd) = clip_llm_hwnd() {
         set_no_activate(hwnd, true);
         unsafe {
             // Center window on cursor before showing to prevent flash.
@@ -451,7 +502,7 @@ pub fn show_no_activate_at(position: Option<(f32, f32)>) {
         SetWindowPos, ShowWindowAsync, HWND_TOP, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOSIZE,
         SWP_NOZORDER,
     };
-    if let Some(hwnd) = find_clip_llm_hwnd() {
+    if let Some(hwnd) = clip_llm_hwnd() {
         set_no_activate(hwnd, true);
         unsafe {
             if let Some((x, y)) = position {
@@ -485,7 +536,7 @@ pub fn show_and_focus_window(position: Option<(f32, f32)>) {
         SetForegroundWindow, SetWindowPos, ShowWindowAsync, HWND_TOP, SW_SHOW,
         SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
     };
-    if let Some(hwnd) = find_clip_llm_hwnd() {
+    if let Some(hwnd) = clip_llm_hwnd() {
         // The capture is over once the overlay is shown with focus — restore
         // normal click-to-activate behavior for the Result/Error states.
         set_no_activate(hwnd, false);
@@ -524,7 +575,7 @@ pub fn set_window_position(x: f32, y: f32) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         SetWindowPos, HWND_TOP, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
     };
-    if let Some(hwnd) = find_clip_llm_hwnd() {
+    if let Some(hwnd) = clip_llm_hwnd() {
         let (_, scale) = resolve_logical_point(x as f64, y as f64);
         unsafe {
             SetWindowPos(
@@ -550,7 +601,7 @@ pub fn move_window_offscreen() {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         SetWindowPos, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
     };
-    if let Some(hwnd) = find_clip_llm_hwnd() {
+    if let Some(hwnd) = clip_llm_hwnd() {
         unsafe {
             SetWindowPos(
                 hwnd,
