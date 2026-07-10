@@ -18,9 +18,19 @@ const REQUEST_TIMEOUT_SECS: u64 = 30;
 /// Non-streaming responses arrive only after full generation, so they are
 /// bounded by the regular client's total timeout instead.
 const INITIAL_RESPONSE_TIMEOUT_SECS: u64 = 10;
-/// Transient-failure retries per request (total attempts = MAX_RETRIES + 1).
+/// Transient-failure and rate-limit retries per request (total attempts =
+/// MAX_RETRIES + 1). The same budget covers both: a connect/timeout/5xx
+/// failure retries after `RETRY_DELAY`, an HTTP 429 retries after the
+/// server's `Retry-After` hint (see [`parse_retry_after`]).
 const MAX_RETRIES: u32 = 1;
 const RETRY_DELAY: Duration = Duration::from_millis(500);
+/// Maximum wait honored from a 429 `Retry-After` header before the single
+/// automatic retry of the main completion request.
+const RETRY_AFTER_MAX: Duration = Duration::from_secs(15);
+/// Wait used for the 429 retry when the response has no `Retry-After` header,
+/// or the header isn't in the integer-seconds form this parses (the
+/// HTTP-date form is intentionally not supported).
+const RETRY_AFTER_DEFAULT: Duration = Duration::from_secs(2);
 /// Dynamic-budget mode: floor for the computed output budget (never request
 /// fewer than this many completion tokens, even for a near-full prompt).
 const MIN_OUTPUT_TOKENS: u32 = 512;
@@ -414,6 +424,27 @@ fn is_transient_error(e: &ApiError) -> bool {
         }
         _ => false,
     }
+}
+
+/// Whether a request failure is an HTTP 429 (rate limited) on the main
+/// completion request. Handled separately from `is_transient_error`: its
+/// retry delay honors the server's `Retry-After` header instead of the fixed
+/// `RETRY_DELAY`. Deliberately not applied to the vision/thinking capability
+/// probes (they have their own 429 caching behavior, #63) — those call
+/// `req.send()` directly and never go through `send_request`/`build_and_send`.
+fn is_rate_limited(e: &ApiError) -> bool {
+    matches!(e, ApiError::Http(err) if err.status() == Some(reqwest::StatusCode::TOO_MANY_REQUESTS))
+}
+
+/// Parse a `Retry-After` header value into a wait duration, clamped to
+/// `RETRY_AFTER_MAX`. Only the integer-seconds form (e.g. `"5"`) is
+/// supported; the HTTP-date form and anything unparsable or absent fall back
+/// to `RETRY_AFTER_DEFAULT`.
+fn parse_retry_after(value: Option<&str>) -> Duration {
+    value
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|secs| Duration::from_secs(secs).min(RETRY_AFTER_MAX))
+        .unwrap_or(RETRY_AFTER_DEFAULT)
 }
 
 /// Parses the `CLIP_LLM_CUSTOM_HEADERS` env format: comma-separated `Key:Value`
@@ -936,10 +967,11 @@ impl LlmClient {
         // hang the request forever.
         let headers_timeout = stream.then_some(inner.initial_response_timeout);
 
+        let mut retry_after: Option<Duration> = None;
         for attempt in 1..=MAX_RETRIES {
             // try_clone() fails only for stream bodies; JSON bodies always clone.
             let Some(retry_req) = req.try_clone() else { break };
-            match Self::send_request(req, headers_timeout, capture).await {
+            match Self::send_request(req, headers_timeout, capture, &mut retry_after).await {
                 Err(e) if is_transient_error(&e) => {
                     warn!(
                         "transient request failure (attempt {attempt}/{}): {e}; retrying in {}ms",
@@ -949,22 +981,36 @@ impl LlmClient {
                     tokio::time::sleep(RETRY_DELAY).await;
                     req = retry_req;
                 }
+                Err(e) if is_rate_limited(&e) => {
+                    let delay = retry_after.unwrap_or(RETRY_AFTER_DEFAULT);
+                    warn!(
+                        "rate limited (attempt {attempt}/{}): {e}; retrying in {}ms (Retry-After)",
+                        MAX_RETRIES + 1,
+                        delay.as_millis(),
+                    );
+                    tokio::time::sleep(delay).await;
+                    req = retry_req;
+                }
                 result => return result,
             }
         }
-        Self::send_request(req, headers_timeout, capture).await
+        Self::send_request(req, headers_timeout, capture, &mut retry_after).await
     }
 
     /// Send a single request attempt. When `headers_timeout` is set, the wait
     /// for response headers is bounded. Records the response status into
     /// `capture`, and on a non-2xx rejection reads the server's error body
     /// (which `error_for_status` would otherwise discard) so the debug view can
-    /// show why the request was refused.
+    /// show why the request was refused. On a 429, also parses the
+    /// `Retry-After` header into `retry_after` (overwriting/clearing any stale
+    /// value from a prior attempt) so the caller's retry loop can honor it.
     async fn send_request(
         req: reqwest::RequestBuilder,
         headers_timeout: Option<Duration>,
         capture: &mut DebugCapture,
+        retry_after: &mut Option<Duration>,
     ) -> Result<reqwest::Response, ApiError> {
+        *retry_after = None;
         let resp = match headers_timeout {
             Some(t) => tokio::time::timeout(t, req.send())
                 .await
@@ -973,6 +1019,13 @@ impl LlmClient {
         };
         capture.status = Some(resp.status().as_u16());
         if let Err(status_err) = resp.error_for_status_ref() {
+            if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                let header = resp
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok());
+                *retry_after = Some(parse_retry_after(header));
+            }
             // Consume the body for the error detail before dropping the response.
             capture.response_raw = resp.text().await.ok();
             return Err(ApiError::Http(status_err));
@@ -1137,6 +1190,52 @@ mod tests {
         assert!(!is_transient_error(&ApiError::EmptyResponse));
         assert!(!is_transient_error(&ApiError::NoUsableContent));
         assert!(!is_transient_error(&ApiError::Cancelled));
+    }
+
+    #[test]
+    fn parse_retry_after_integer_seconds() {
+        assert_eq!(parse_retry_after(Some("5")), Duration::from_secs(5));
+        assert_eq!(parse_retry_after(Some("0")), Duration::from_secs(0));
+        // Leading/trailing whitespace is tolerated.
+        assert_eq!(parse_retry_after(Some(" 3 ")), Duration::from_secs(3));
+    }
+
+    #[test]
+    fn parse_retry_after_clamps_to_max() {
+        assert_eq!(parse_retry_after(Some("60")), RETRY_AFTER_MAX);
+        assert_eq!(parse_retry_after(Some("15")), RETRY_AFTER_MAX);
+        // Just under the cap is left unclamped.
+        assert_eq!(parse_retry_after(Some("14")), Duration::from_secs(14));
+    }
+
+    #[test]
+    fn parse_retry_after_missing_defaults() {
+        assert_eq!(parse_retry_after(None), RETRY_AFTER_DEFAULT);
+    }
+
+    #[test]
+    fn parse_retry_after_http_date_form_defaults() {
+        // The HTTP-date form is intentionally not parsed.
+        assert_eq!(
+            parse_retry_after(Some("Wed, 21 Oct 2026 07:28:00 GMT")),
+            RETRY_AFTER_DEFAULT
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_garbage_defaults() {
+        assert_eq!(parse_retry_after(Some("not-a-number")), RETRY_AFTER_DEFAULT);
+        assert_eq!(parse_retry_after(Some("")), RETRY_AFTER_DEFAULT);
+        // Negative numbers are not valid u64 and fall back to the default.
+        assert_eq!(parse_retry_after(Some("-5")), RETRY_AFTER_DEFAULT);
+    }
+
+    #[test]
+    fn is_rate_limited_classification() {
+        // Non-Http errors are never rate-limit errors.
+        assert!(!is_rate_limited(&ApiError::EmptyResponse));
+        assert!(!is_rate_limited(&ApiError::Cancelled));
+        assert!(!is_rate_limited(&ApiError::InitialResponseTimeout(10)));
     }
 
     #[test]
