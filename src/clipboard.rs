@@ -204,14 +204,22 @@ impl ClipboardManager {
     }
 }
 
+/// Serializes tests that touch the real system clipboard, since it's shared
+/// process-wide state. `pub(crate)` so other modules' tests that also open a
+/// real `ClipboardManager` (e.g. `ui::tests`) can serialize against these
+/// instead of racing them.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::PlatformError;
+pub(crate) mod test_support {
     use std::sync::Mutex;
 
-    // Serialize clipboard tests — they share the system clipboard.
-    static CLIPBOARD_LOCK: Mutex<()> = Mutex::new(());
+    pub(crate) static CLIPBOARD_LOCK: Mutex<()> = Mutex::new(());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::CLIPBOARD_LOCK;
+    use super::*;
+    use crate::PlatformError;
 
     struct MockPlatform {
         copy_result: Result<(), PlatformError>,

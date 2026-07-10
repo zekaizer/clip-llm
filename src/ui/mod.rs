@@ -67,6 +67,15 @@ pub struct OverlayApp {
     tap_rx: mpsc::Receiver<TapEvent>,
     /// Cached desired_size to avoid redundant send_viewport_cmd calls.
     last_desired_size: Option<egui::Vec2>,
+    /// The window position last actually applied (native reposition or
+    /// `OuterPosition`), so repeated per-frame repositioning to the same spot
+    /// is skipped. `send_viewport_cmd` internally triggers `request_repaint`,
+    /// so resending an unchanged `OuterPosition` every frame while visible
+    /// defeats the event-driven repaint model for Result/Error (CLAUDE.md
+    /// repaint model). Reset on hide, on a fresh show, and whenever a new
+    /// trigger updates `spawn_position`, so the next display still centers
+    /// correctly.
+    last_sent_pos: Option<egui::Pos2>,
     /// Whether the think block section is expanded in the Result state.
     think_expanded: bool,
     /// request_id whose Processing start time is currently tracked; a change
@@ -175,6 +184,7 @@ impl OverlayApp {
             startup_notice: None,
             tap_rx,
             last_desired_size: None,
+            last_sent_pos: None,
             think_expanded: false,
             processing_request_id: None,
             processing_started_at: None,
@@ -223,6 +233,7 @@ impl OverlayApp {
             startup_notice: None,
             tap_rx,
             last_desired_size: None,
+            last_sent_pos: None,
             think_expanded: false,
             processing_request_id: None,
             processing_started_at: None,
@@ -271,22 +282,13 @@ impl OverlayApp {
                     // (#22) — flushing the stale task later would queue a
                     // wasted LLM round-trip behind this request.
                     self.pending_process = None;
-                    let text_len = content.text.as_ref().map_or(0, |t| t.len());
-                    let img_count = content.images.len();
-                    info!(
-                        request_id,
-                        mode = mode.label(),
-                        text_len,
-                        img_count,
-                        "ui: dispatch request to worker"
-                    );
-                    let _ = self.cmd_tx.send(WorkerCommand::Process(ProcessTask {
+                    self.dispatch_process(ProcessTask {
                         content,
                         mode,
                         rephrase_params,
                         thinking_mode,
                         request_id,
-                    }));
+                    });
                 }
                 UiEffect::SendCancel => {
                     debug!("ui: cancel in-flight request");
@@ -326,8 +328,18 @@ impl OverlayApp {
                         );
                     }
                 }
-                UiEffect::ShowWindow => self.show_window(ctx),
-                UiEffect::ShowWindowNoActivate => self.show_window_no_activate(ctx),
+                UiEffect::ShowWindow => {
+                    // A fresh show applies its own initial position natively
+                    // (below); invalidate the reposition cache so the first
+                    // subsequent per-frame reposition_window call isn't gated
+                    // out by a position left over from a previous display.
+                    self.last_sent_pos = None;
+                    self.show_window(ctx);
+                }
+                UiEffect::ShowWindowNoActivate => {
+                    self.last_sent_pos = None;
+                    self.show_window_no_activate(ctx);
+                }
                 UiEffect::StartCapture => {
                     // Defer the Cmd+C simulation until the cycle modifiers are
                     // released (handled in the CycleCommit tap arm). Copying while
@@ -342,6 +354,7 @@ impl OverlayApp {
                     ctx.memory_mut(|m| m.reset_areas());
                     self.hide_window(ctx);
                     self.spawn_position = None;
+                    self.last_sent_pos = None;
                     // Cancel any in-progress cycling gesture / deferred capture,
                     // and drop a debounce-parked request (overlay is closing).
                     self.preview_mode = None;
@@ -407,6 +420,11 @@ impl OverlayApp {
             // (which skips if already set) preserves the first-press position.
             if let Some((x, y)) = tap_event.mouse_pos {
                 self.spawn_position = Some(egui::pos2(x as f32, y as f32));
+                // A new trigger's spawn point invalidates any cached
+                // reposition target — a re-trigger that skips HideWindow
+                // (e.g. re-double-tap while Result is still shown) must
+                // still reposition to the new cursor location.
+                self.last_sent_pos = None;
             }
 
             match tap_event.action {
@@ -434,6 +452,16 @@ impl OverlayApp {
                     self.preview_mode = None;
                     self.pending_content = None; // selection comes from copy-sim at commit
                     self.single_commit_pending = false;
+                    // Invalidate any capture still in flight from a previous trigger
+                    // (a slow single-tap clipboard read, or a previous double-tap's
+                    // copy simulation) right now. This gesture's own capture is
+                    // deferred to CycleCommit (below), so capture_seq/capture_kind
+                    // would otherwise stay unchanged while CaptureStarted moves the
+                    // state to Capturing — letting the old thread's late result pass
+                    // poll_captures' `seq == capture_seq` gate and land in
+                    // pending_content under this gesture's Selection badge.
+                    self.capture_cancel.store(true, Ordering::SeqCst);
+                    self.capture_seq += 1;
                     // Show the picking overlay (spinner) immediately (non-activating).
                     // The actual copy is deferred (StartCapture -> pending_capture)
                     // until the modifiers are released, then started in CycleCommit.
@@ -621,10 +649,19 @@ impl OverlayApp {
             // execute_effects would wipe it in the same frame, before render —
             // so the copy-debug button would never appear.
             let mut fresh_debug: Option<crate::DebugCapture> = None;
+            // A request cancelled just before it completed can still deliver its
+            // Complete/Error here after a newer request has already started (the
+            // state machine gates the *state* transition on this same check, but
+            // the tally and debug snapshot live outside it, in the adapter). Skip
+            // them so a stale request's outcome/debug data never overwrites the
+            // one for the request currently on screen.
+            let current_request_id = self.sm.current_request_id();
             let event = match response {
                 WorkerResponse::Complete { result, think_content, request_id, incomplete, debug } => {
-                    self.record_request_outcome(true, if incomplete.is_some() { "partial" } else { "ok" });
-                    fresh_debug = Some(debug);
+                    if request_id == current_request_id {
+                        self.record_request_outcome(true, if incomplete.is_some() { "partial" } else { "ok" });
+                        fresh_debug = Some(debug);
+                    }
                     UiEvent::WorkerResult {
                         text: result,
                         think_content,
@@ -633,8 +670,10 @@ impl OverlayApp {
                     }
                 }
                 WorkerResponse::Error { message, request_id, debug } => {
-                    self.record_request_outcome(false, &tray_last_label(&message));
-                    fresh_debug = Some(debug);
+                    if request_id == current_request_id {
+                        self.record_request_outcome(false, &tray_last_label(&message));
+                        fresh_debug = Some(debug);
+                    }
                     UiEvent::WorkerError {
                         message,
                         request_id,
@@ -740,10 +779,19 @@ impl OverlayApp {
     ///
     /// Delegates to the platform for native DPI-safe repositioning (e.g. Windows SetWindowPos
     /// bypasses winit's per-monitor scaling). Falls back to ViewportCommand::OuterPosition.
-    fn reposition_window(&self, ctx: &egui::Context, win_size: egui::Vec2) {
-        if let Some(pos) = self.calculate_centered_position(win_size)
-            && !self.platform.reposition_window(pos.x, pos.y)
-        {
+    ///
+    /// Gated on `last_sent_pos`: this runs every frame while visible, and both the
+    /// native path and `OuterPosition` would otherwise repeat pointlessly each
+    /// frame — on macOS `OuterPosition` also triggers `request_repaint`
+    /// internally, which would defeat the event-driven repaint model for
+    /// Result/Error (CLAUDE.md repaint model) by busy-looping forever.
+    fn reposition_window(&mut self, ctx: &egui::Context, win_size: egui::Vec2) {
+        let Some(pos) = self.calculate_centered_position(win_size) else { return };
+        if self.last_sent_pos == Some(pos) {
+            return;
+        }
+        self.last_sent_pos = Some(pos);
+        if !self.platform.reposition_window(pos.x, pos.y) {
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
         }
     }
@@ -998,11 +1046,28 @@ impl OverlayApp {
         let now = std::time::Instant::now();
         if now >= deadline {
             let (task, _) = self.pending_process.take().expect("checked above");
-            info!("param debounce expired: sending request {}", task.request_id);
-            let _ = self.cmd_tx.send(WorkerCommand::Process(task));
+            self.dispatch_process(task);
         } else {
             ctx.request_repaint_after(deadline - now);
         }
+    }
+
+    /// Dispatch a `ProcessTask` to the worker thread, logging its shape
+    /// (request_id, mode, content size) for observability. Shared by the
+    /// immediate `SendProcess` effect and the parameter-change debounce flush
+    /// (#22), so every worker dispatch is logged the same way regardless of
+    /// which path sent it.
+    fn dispatch_process(&self, task: ProcessTask) {
+        let text_len = task.content.text.as_ref().map_or(0, |t| t.len());
+        let img_count = task.content.images.len();
+        info!(
+            request_id = task.request_id,
+            mode = task.mode.label(),
+            text_len,
+            img_count,
+            "ui: dispatch request to worker"
+        );
+        let _ = self.cmd_tx.send(WorkerCommand::Process(task));
     }
 
     /// Track how long the active Processing request has been running, keyed on its
@@ -1347,5 +1412,149 @@ mod tests {
             None,
         );
         assert_eq!(pos, egui::pos2(-290.0, -190.0));
+    }
+
+    // --- poll_responses: stale worker responses must not pollute adapter state ---
+
+    /// Build a minimal `OverlayApp` for adapter-level tests, returning the app
+    /// plus the sender counterpart of its worker-response channel so tests can
+    /// inject `WorkerResponse`s as if the worker thread had sent them.
+    ///
+    /// Constructing a real `ClipboardManager` opens a handle onto the actual
+    /// system clipboard, shared process-wide with `clipboard::tests` — callers
+    /// must hold `crate::clipboard::test_support::CLIPBOARD_LOCK` for the
+    /// duration of the test to avoid racing those.
+    fn new_test_app() -> (OverlayApp, mpsc::Sender<WorkerResponse>) {
+        let (cmd_tx, _cmd_rx) = tokio_mpsc::unbounded_channel();
+        let (resp_tx, resp_rx) = mpsc::channel();
+        let (_tap_tx, tap_rx) = mpsc::channel();
+        let clipboard = ClipboardManager::new().expect("clipboard manager");
+        #[cfg(feature = "diagnostics")]
+        let app = {
+            let (_diag_action_tx, diag_action_rx) = mpsc::channel();
+            let (diag_state_tx, _diag_state_rx) = mpsc::channel();
+            OverlayApp::new(cmd_tx, resp_rx, clipboard, tap_rx, diag_action_rx, diag_state_tx)
+        };
+        #[cfg(not(feature = "diagnostics"))]
+        let app = OverlayApp::new(cmd_tx, resp_rx, clipboard, tap_rx);
+        (app, resp_tx)
+    }
+
+    /// A request cancelled just before its (late) `Complete` arrives must not
+    /// have that stale outcome tallied into `req_ok`/`req_err`, nor its debug
+    /// snapshot surfaced via `last_debug` — both belong to whichever request
+    /// is current, not to one the state machine has already moved past.
+    #[test]
+    fn poll_responses_ignores_stale_completion_tally_and_debug() {
+        let _lock = crate::clipboard::test_support::CLIPBOARD_LOCK.lock().unwrap();
+        let (mut app, resp_tx) = new_test_app();
+        let ctx = egui::Context::default();
+
+        // Start request 1 (Processing), then cancel it (state machine keeps
+        // current_request_id unchanged — reset_to_hidden does not touch it)
+        // and start request 2, which becomes current.
+        app.sm.handle(UiEvent::ContentReady {
+            content: crate::ClipboardContent::text_only("first".into()),
+            auto_copy: true,
+        });
+        let stale_id = app.sm.current_request_id();
+        app.sm.handle(UiEvent::UserCancel);
+        app.sm.handle(UiEvent::ContentReady {
+            content: crate::ClipboardContent::text_only("second".into()),
+            auto_copy: true,
+        });
+        let current_id = app.sm.current_request_id();
+        assert_ne!(stale_id, current_id, "test setup must produce two distinct request ids");
+
+        // The cancelled request's completion arrives late.
+        resp_tx
+            .send(WorkerResponse::Complete {
+                result: "stale answer".into(),
+                think_content: None,
+                request_id: stale_id,
+                incomplete: None,
+                debug: crate::DebugCapture {
+                    endpoint: Some("http://stale".into()),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        app.poll_responses(&ctx);
+
+        assert_eq!(app.req_ok, 0, "stale completion must not be tallied as a success");
+        assert_eq!(app.req_err, 0);
+        assert!(app.last_debug.is_none(), "stale completion's debug snapshot must not surface");
+    }
+
+    /// Same as above but for `WorkerResponse::Error`: a stale failure must not
+    /// bump `req_err` or surface its debug snapshot either.
+    #[test]
+    fn poll_responses_ignores_stale_error_tally_and_debug() {
+        let _lock = crate::clipboard::test_support::CLIPBOARD_LOCK.lock().unwrap();
+        let (mut app, resp_tx) = new_test_app();
+        let ctx = egui::Context::default();
+
+        app.sm.handle(UiEvent::ContentReady {
+            content: crate::ClipboardContent::text_only("first".into()),
+            auto_copy: true,
+        });
+        let stale_id = app.sm.current_request_id();
+        app.sm.handle(UiEvent::UserCancel);
+        app.sm.handle(UiEvent::ContentReady {
+            content: crate::ClipboardContent::text_only("second".into()),
+            auto_copy: true,
+        });
+        let current_id = app.sm.current_request_id();
+        assert_ne!(stale_id, current_id, "test setup must produce two distinct request ids");
+
+        resp_tx
+            .send(WorkerResponse::Error {
+                message: "stale error".into(),
+                request_id: stale_id,
+                debug: crate::DebugCapture {
+                    endpoint: Some("http://stale".into()),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        app.poll_responses(&ctx);
+
+        assert_eq!(app.req_ok, 0);
+        assert_eq!(app.req_err, 0, "stale error must not be tallied");
+        assert!(app.last_debug.is_none(), "stale error's debug snapshot must not surface");
+    }
+
+    /// Sanity check that the gate is genuinely id-based, not a blanket
+    /// suppression: a `Complete` matching the current request must still be
+    /// tallied and surfaced normally.
+    #[test]
+    fn poll_responses_records_current_completion_tally_and_debug() {
+        let _lock = crate::clipboard::test_support::CLIPBOARD_LOCK.lock().unwrap();
+        let (mut app, resp_tx) = new_test_app();
+        let ctx = egui::Context::default();
+
+        app.sm.handle(UiEvent::ContentReady {
+            content: crate::ClipboardContent::text_only("only".into()),
+            auto_copy: true,
+        });
+        let current_id = app.sm.current_request_id();
+
+        resp_tx
+            .send(WorkerResponse::Complete {
+                result: "fresh answer".into(),
+                think_content: None,
+                request_id: current_id,
+                incomplete: None,
+                debug: crate::DebugCapture {
+                    endpoint: Some("http://fresh".into()),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        app.poll_responses(&ctx);
+
+        assert_eq!(app.req_ok, 1);
+        assert_eq!(app.req_err, 0);
+        assert!(app.last_debug.is_some(), "current completion's debug snapshot must surface");
     }
 }
