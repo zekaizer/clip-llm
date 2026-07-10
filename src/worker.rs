@@ -561,6 +561,11 @@ async fn run_mock_streaming(
     resp_tx: mpsc::Sender<WorkerResponse>,
     mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
+    // Recorded so the mock path exercises the same Result-bottom-row
+    // completion status (`format_completion_status` in `src/ui/mod.rs`) that
+    // a real request does — otherwise `DebugCapture::default()`'s missing
+    // `elapsed_ms` leaves that row visibly blank in diagnostics screenshots.
+    let started = std::time::Instant::now();
     match crate::diagnostics::mock_response(&mock_text) {
         Ok(mock) => {
             let chunks: Vec<&str> = mock.split_inclusive(char::is_whitespace).collect();
@@ -585,7 +590,10 @@ async fn run_mock_streaming(
                 think_content: None,
                 request_id,
                 incomplete: None,
-                debug: DebugCapture::default(),
+                debug: DebugCapture {
+                    elapsed_ms: Some(started.elapsed().as_millis()),
+                    ..Default::default()
+                },
             });
         }
         Err(msg) => {
@@ -593,7 +601,10 @@ async fn run_mock_streaming(
             let _ = resp_tx.send(WorkerResponse::Error {
                 message: msg,
                 request_id,
-                debug: DebugCapture::default(),
+                debug: DebugCapture {
+                    elapsed_ms: Some(started.elapsed().as_millis()),
+                    ..Default::default()
+                },
             });
         }
     }

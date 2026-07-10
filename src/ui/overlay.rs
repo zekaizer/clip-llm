@@ -631,14 +631,16 @@ fn render_result(
     }
 
     // Top row: shared slot with Processing's status/thinking row (see
-    // `TOP_ROW_HEIGHT`) — reserved even with no think content, so the text
-    // block below doesn't shift depending on whether this particular result
-    // has a think section or not (Processing always shows *some* status row).
-    fixed_height_row(ui, TOP_ROW_HEIGHT, |ui| {
-        if think_content.is_some() {
+    // `TOP_ROW_HEIGHT`) — but only when there's an actual think toggle to
+    // show. Reserving this row unconditionally (even blank) read as an empty
+    // hole above the text, which is worse than the row's height differing
+    // from Processing's for the (very common) non-thinking case; a plain
+    // result's text instead starts right under the separator.
+    if think_content.is_some() {
+        fixed_height_row(ui, TOP_ROW_HEIGHT, |ui| {
             render_think_toggle_header(ui, think_expanded, action);
-        }
-    });
+        });
+    }
     // Expanded think content is deliberate, user-triggered growth — kept
     // outside the fixed slot above (unaffected styling/size — #6).
     if think_expanded && let Some(content) = think_content {
