@@ -11,7 +11,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::clipboard::ClipboardManager;
 use crate::hotkey::{TapAction, TapEvent};
-use crate::platform::{NativePlatform, Platform};
+use crate::platform::{ModifierState, NativePlatform, Platform};
 use crate::worker::{ProcessTask, WorkerCommand, WorkerResponse};
 
 pub use state_machine::OverlayState;
@@ -82,6 +82,11 @@ pub struct OverlayApp {
     resp_rx: mpsc::Receiver<WorkerResponse>,
     clipboard: ClipboardManager,
     platform: NativePlatform,
+    /// Live Ctrl+Shift hold state from the process-lifetime OS watcher
+    /// (spawned in `main.rs`), attached to each capture thread's
+    /// `ClipboardManager` so `copy_and_read` can wait for an actual modifier
+    /// release instead of a flat settle delay. See `start_capture`.
+    modifier_state: ModifierState,
     /// Mouse cursor position captured at hotkey trigger time.
     spawn_position: Option<egui::Pos2>,
     /// Whether the startup hide has begun (the initial visibility command was sent).
@@ -220,6 +225,7 @@ impl OverlayApp {
         resp_rx: mpsc::Receiver<WorkerResponse>,
         clipboard: ClipboardManager,
         tap_rx: mpsc::Receiver<TapEvent>,
+        modifier_state: ModifierState,
         diag_action_rx: mpsc::Receiver<crate::diagnostics::ScenarioAction>,
         diag_state_tx: mpsc::Sender<&'static str>,
     ) -> Self {
@@ -230,6 +236,7 @@ impl OverlayApp {
             resp_rx,
             clipboard,
             platform: NativePlatform,
+            modifier_state,
             spawn_position: None,
             initial_hide_done: false,
             pending_taskbar_exclude: false,
@@ -273,6 +280,7 @@ impl OverlayApp {
         resp_rx: mpsc::Receiver<WorkerResponse>,
         clipboard: ClipboardManager,
         tap_rx: mpsc::Receiver<TapEvent>,
+        modifier_state: ModifierState,
     ) -> Self {
         let (capture_tx, capture_rx) = mpsc::channel();
         Self {
@@ -281,6 +289,7 @@ impl OverlayApp {
             resp_rx,
             clipboard,
             platform: NativePlatform,
+            modifier_state,
             spawn_position: None,
             initial_hide_done: false,
             pending_taskbar_exclude: false,
@@ -984,7 +993,7 @@ impl OverlayApp {
     }
 
     /// Spawn a background thread to capture the current selection off the render
-    /// thread (the 200 ms modifier-release wait + copy + clipboard poll would
+    /// thread (the modifier-release wait + copy + clipboard poll would
     /// otherwise freeze the UI). Tagged with the current `capture_seq` so a stale
     /// result is discarded by `poll_captures`.
     fn start_capture(&mut self, ctx: &egui::Context) {
@@ -999,11 +1008,19 @@ impl OverlayApp {
         let tx = self.capture_tx.clone();
         let ctx = ctx.clone();
         let target = self.capture_target_pid;
+        // Cloned into the capture thread so `copy_and_read` can wait for an
+        // actual Ctrl+Shift release instead of a flat settle delay (this path
+        // is only reached via CycleCommit, which the coordinator already gates
+        // on an observed release — see `coordinator::resolve_trigger` — so the
+        // wait is usually near-instant).
+        let modifier_state = self.modifier_state.clone();
         std::thread::spawn(move || {
             // Build a clipboard handle on this thread (avoids sharing the main
             // thread's, and sidesteps Send concerns). NativePlatform is a ZST.
             let result = match ClipboardManager::new() {
-                Ok(mut cm) => cm.copy_and_read(&NativePlatform, &cancel, target),
+                Ok(cm) => cm
+                    .with_modifier_state(modifier_state)
+                    .copy_and_read(&NativePlatform, &cancel, target),
                 Err(e) => Err(e),
             };
             let _ = tx.send((seq, result));
@@ -1735,14 +1752,25 @@ mod tests {
         let (resp_tx, resp_rx) = mpsc::channel();
         let (_tap_tx, tap_rx) = mpsc::channel();
         let clipboard = ClipboardManager::new().expect("clipboard manager");
+        // No real OS watcher in tests — a default ModifierState is permanently
+        // inactive, so `copy_and_read` falls back to the fixed settle delay.
+        let modifier_state = ModifierState::default();
         #[cfg(feature = "diagnostics")]
         let app = {
             let (_diag_action_tx, diag_action_rx) = mpsc::channel();
             let (diag_state_tx, _diag_state_rx) = mpsc::channel();
-            OverlayApp::new(cmd_tx, resp_rx, clipboard, tap_rx, diag_action_rx, diag_state_tx)
+            OverlayApp::new(
+                cmd_tx,
+                resp_rx,
+                clipboard,
+                tap_rx,
+                modifier_state,
+                diag_action_rx,
+                diag_state_tx,
+            )
         };
         #[cfg(not(feature = "diagnostics"))]
-        let app = OverlayApp::new(cmd_tx, resp_rx, clipboard, tap_rx);
+        let app = OverlayApp::new(cmd_tx, resp_rx, clipboard, tap_rx, modifier_state);
         (app, resp_tx)
     }
 

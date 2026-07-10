@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -17,6 +18,122 @@ use crate::PlatformError;
 const KEY_EVENT_DELAY_MS: u64 = 50;
 /// Delay for OS focus transfer after SW_HIDE (ms).
 const FOCUS_TRANSFER_DELAY_MS: u64 = 100;
+
+/// Registry value name under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+/// used to launch clip-llm at login.
+const RUN_VALUE_NAME: &str = "clip-llm";
+/// Subkey (relative to `HKEY_CURRENT_USER`) holding per-user auto-start entries.
+const RUN_SUBKEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+/// `RegDeleteValueW`/`RegQueryValueExW` error code for "value does not exist".
+const ERROR_FILE_NOT_FOUND: u32 = 2;
+
+/// Null-terminated UTF-16 encoding of a Rust string, for `PCWSTR` registry API arguments.
+fn to_wide_null(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Whether the `Run` registry value for clip-llm currently exists. Does not
+/// verify the value's data points at the current executable — a stale entry
+/// still counts as "enabled" here; [`set_launch_at_login`] corrects the path
+/// on the next toggle-on. Returns `false` on any registry access failure
+/// (e.g. the `Run` key itself is missing, which is unusual but not fatal).
+pub fn launch_at_login_enabled() -> bool {
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_CURRENT_USER, KEY_READ,
+    };
+
+    let subkey = to_wide_null(RUN_SUBKEY);
+    let value_name = to_wide_null(RUN_VALUE_NAME);
+
+    unsafe {
+        let mut hkey = std::ptr::null_mut();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_READ, &mut hkey) != 0 {
+            return false;
+        }
+        let mut data_type: u32 = 0;
+        let mut data_len: u32 = 0;
+        let result = RegQueryValueExW(
+            hkey,
+            value_name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut data_type,
+            std::ptr::null_mut(),
+            &mut data_len,
+        );
+        RegCloseKey(hkey);
+        result == 0
+    }
+}
+
+/// Set or remove the `clip-llm` value under the `Run` key.
+///
+/// Enabling writes the quoted, absolute `current_exe()` path as a `REG_SZ`
+/// value, always overwriting any existing entry (so a stale path from a
+/// moved/reinstalled binary is corrected). Disabling deletes the value;
+/// deleting a value that does not already exist is treated as success.
+pub fn set_launch_at_login(enabled: bool) -> Result<(), PlatformError> {
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegSetValueExW, HKEY_CURRENT_USER, KEY_WRITE,
+        REG_SZ,
+    };
+
+    let subkey = to_wide_null(RUN_SUBKEY);
+    let value_name = to_wide_null(RUN_VALUE_NAME);
+
+    let mut hkey = std::ptr::null_mut();
+    let open_result =
+        unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_WRITE, &mut hkey) };
+    if open_result != 0 {
+        return Err(PlatformError::LaunchAtLoginFailed(format!(
+            "failed to open registry Run key (error {open_result})"
+        )));
+    }
+
+    let result = if enabled {
+        let exe = match std::env::current_exe() {
+            Ok(e) => e,
+            Err(e) => {
+                unsafe { RegCloseKey(hkey) };
+                return Err(PlatformError::LaunchAtLoginFailed(format!(
+                    "failed to resolve current executable: {e}"
+                )));
+            }
+        };
+        let data = to_wide_null(&format!("\"{}\"", exe.display()));
+        // REG_SZ data is a raw byte buffer; a UTF-16 slice's bytes are exactly
+        // that (2 bytes per code unit, native endianness matches the API).
+        let data_bytes = unsafe {
+            std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), data.len() * 2)
+        };
+        unsafe {
+            RegSetValueExW(
+                hkey,
+                value_name.as_ptr(),
+                0,
+                REG_SZ,
+                data_bytes.as_ptr(),
+                data_bytes.len() as u32,
+            )
+        }
+    } else {
+        let r = unsafe { RegDeleteValueW(hkey, value_name.as_ptr()) };
+        if r == ERROR_FILE_NOT_FOUND {
+            0
+        } else {
+            r
+        }
+    };
+
+    unsafe { RegCloseKey(hkey) };
+
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(PlatformError::LaunchAtLoginFailed(format!(
+            "registry operation failed (error {result})"
+        )))
+    }
+}
 
 pub struct WindowsPlatform;
 
@@ -179,7 +296,7 @@ impl Platform for WindowsPlatform {
         // SW_HIDE transfers foreground to the previous app. move_window_offscreen()
         // alone keeps us as foreground, so SendInput would target the overlay.
         // Done synchronously on the calling thread (fast).
-        if let Some(h) = find_clip_llm_hwnd() {
+        if let Some(h) = clip_llm_hwnd() {
             unsafe { ShowWindow(h, SW_HIDE); }
             debug!("yielded focus via ShowWindow(SW_HIDE)");
         } else {
@@ -188,8 +305,10 @@ impl Platform for WindowsPlatform {
 
         // The focus-transfer wait + key simulation + visibility restore (~150ms)
         // run on a short-lived background thread so the egui render loop is not
-        // frozen on every paste. HWND is !Send, so re-find it inside the thread
-        // (FindWindowW is callable from any thread). WindowsPlatform is a ZST.
+        // frozen on every paste. HWND is !Send, so it cannot be captured by the
+        // closure directly; re-resolve it inside the thread via `clip_llm_hwnd()`
+        // (backed by the cross-thread-safe `CACHED_HWND` atomic, so this is cheap
+        // rather than a fresh `FindWindowW`). WindowsPlatform is a ZST.
         thread::spawn(|| {
             use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindowAsync, SW_SHOWNA};
             // Wait for the target app to become foreground and ready for input.
@@ -199,7 +318,7 @@ impl Platform for WindowsPlatform {
             // (egui#5229): SW_HIDE triggers ControlFlow::Poll; SW_SHOWNA at
             // (-32000,-32000) restores Wait. Do NOT use show_no_activate() — it
             // repositions to cursor.
-            if let Some(h) = find_clip_llm_hwnd() {
+            if let Some(h) = clip_llm_hwnd() {
                 unsafe { ShowWindowAsync(h, SW_SHOWNA); }
             }
             if let Err(e) = result {
@@ -208,14 +327,70 @@ impl Platform for WindowsPlatform {
         });
         Ok(())
     }
+
+    fn launch_at_login_enabled(&self) -> bool {
+        launch_at_login_enabled()
+    }
+
+    fn set_launch_at_login(&self, enabled: bool) -> Result<(), PlatformError> {
+        set_launch_at_login(enabled)
+    }
 }
 
-/// Find the clip-llm window handle. Returns `None` when the window does not exist yet.
-fn find_clip_llm_hwnd() -> Option<HWND> {
-    use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
+/// Cached handle to the clip-llm overlay window, stored as a pointer-sized
+/// integer. `HWND` is a raw pointer (`!Send`/`!Sync`), so it cannot be held in
+/// a `static` directly; `isize` can. `0` means "not yet resolved" (Win32 never
+/// hands out a null HWND for a real window).
+static CACHED_HWND: AtomicIsize = AtomicIsize::new(0);
+
+/// Tracks whether the last fallback lookup failed, so the failure is logged
+/// only on the found -> not-found transition instead of every call. Several
+/// call sites (notably `set_window_position`, invoked once per frame via
+/// `reposition_window` while the overlay is visible) would otherwise spam the
+/// log if the window were ever briefly unresolvable.
+static HWND_LOOKUP_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// Resolve the clip-llm overlay `HWND`, preferring a cached handle over the
+/// system-wide `FindWindowW` title lookup.
+///
+/// `FindWindowW` enumerates top-level windows and is too costly to call from
+/// hot paths — several call sites run every frame while the overlay is
+/// visible (`reposition_window` -> `set_window_position`). The window handle
+/// is stable for the lifetime of the overlay window once created, so it is
+/// cached in `CACHED_HWND` and revalidated on each call with `IsWindow`
+/// (a single, cheap kernel call) rather than re-searched. A cache miss (unset
+/// or stale, e.g. the window was destroyed and recreated) falls back to the
+/// original `FindWindowW` lookup, which repopulates the cache on success.
+fn clip_llm_hwnd() -> Option<HWND> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, IsWindow};
+
+    let cached = CACHED_HWND.load(Ordering::Relaxed);
+    if cached != 0 {
+        let hwnd = cached as HWND;
+        if unsafe { IsWindow(hwnd) } != 0 {
+            HWND_LOOKUP_FAILED.store(false, Ordering::Relaxed);
+            return Some(hwnd);
+        }
+        // Stale handle (window destroyed, possibly since recreated) — drop it
+        // and fall through to a fresh lookup below.
+        CACHED_HWND.store(0, Ordering::Relaxed);
+    }
+
     let title: Vec<u16> = "clip-llm\0".encode_utf16().collect();
     let hwnd = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
-    if hwnd.is_null() { None } else { Some(hwnd) }
+    if hwnd.is_null() {
+        // Log only on the found -> not-found transition to avoid spamming
+        // per-frame call sites; this also keeps quiet during the brief
+        // startup window before the overlay is created.
+        if !HWND_LOOKUP_FAILED.swap(true, Ordering::Relaxed) {
+            warn!("clip_llm_hwnd: FindWindowW could not locate the overlay window");
+        }
+        None
+    } else {
+        HWND_LOOKUP_FAILED.store(false, Ordering::Relaxed);
+        CACHED_HWND.store(hwnd as isize, Ordering::Relaxed);
+        Some(hwnd)
+    }
 }
 
 /// Add or remove `WS_EX_NOACTIVATE` on the overlay window.
@@ -269,7 +444,7 @@ fn set_tool_window() {
         GWL_EXSTYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
         SW_HIDE, SW_SHOWNA, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
     };
-    if let Some(hwnd) = find_clip_llm_hwnd() {
+    if let Some(hwnd) = clip_llm_hwnd() {
         unsafe {
             let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
             let new_style = (style | WS_EX_TOOLWINDOW as isize) & !(WS_EX_APPWINDOW as isize);
@@ -374,7 +549,7 @@ pub fn show_no_activate() {
         GetWindowRect, SetWindowPos, ShowWindowAsync, HWND_TOP, SW_SHOWNA,
         SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
     };
-    if let Some(hwnd) = find_clip_llm_hwnd() {
+    if let Some(hwnd) = clip_llm_hwnd() {
         set_no_activate(hwnd, true);
         unsafe {
             // Center window on cursor before showing to prevent flash.
@@ -442,6 +617,32 @@ pub fn show_about() {
     });
 }
 
+/// Show a native, modal message box with the given title and message, blocking
+/// the calling thread until the user dismisses it.
+///
+/// Unlike [`show_about`], this runs `MessageBoxW` directly on the calling thread
+/// rather than a dedicated one — safe here because callers use this only for
+/// fatal startup errors, before the winit event loop starts (so the nested
+/// modal loop hazard that `show_about` works around, winit#1698, does not
+/// apply). Blocking is desirable: it keeps the process alive long enough for
+/// the user to read the message before the caller exits.
+pub fn show_alert_blocking(title: &str, message: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        MessageBoxW, MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MB_TOPMOST,
+    };
+
+    let body: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
+    let title: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        let _ = MessageBoxW(
+            std::ptr::null_mut(),
+            body.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND,
+        );
+    }
+}
+
 /// Show the clip-llm window at `position` (logical points) WITHOUT activating it,
 /// so the foreground app stays the same and `SendInput(Ctrl+C)` still targets it.
 /// Like `show_no_activate()` but honors an explicit position (the capture spawn
@@ -451,7 +652,7 @@ pub fn show_no_activate_at(position: Option<(f32, f32)>) {
         SetWindowPos, ShowWindowAsync, HWND_TOP, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOSIZE,
         SWP_NOZORDER,
     };
-    if let Some(hwnd) = find_clip_llm_hwnd() {
+    if let Some(hwnd) = clip_llm_hwnd() {
         set_no_activate(hwnd, true);
         unsafe {
             if let Some((x, y)) = position {
@@ -485,7 +686,7 @@ pub fn show_and_focus_window(position: Option<(f32, f32)>) {
         SetForegroundWindow, SetWindowPos, ShowWindowAsync, HWND_TOP, SW_SHOW,
         SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
     };
-    if let Some(hwnd) = find_clip_llm_hwnd() {
+    if let Some(hwnd) = clip_llm_hwnd() {
         // The capture is over once the overlay is shown with focus — restore
         // normal click-to-activate behavior for the Result/Error states.
         set_no_activate(hwnd, false);
@@ -524,7 +725,7 @@ pub fn set_window_position(x: f32, y: f32) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         SetWindowPos, HWND_TOP, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
     };
-    if let Some(hwnd) = find_clip_llm_hwnd() {
+    if let Some(hwnd) = clip_llm_hwnd() {
         let (_, scale) = resolve_logical_point(x as f64, y as f64);
         unsafe {
             SetWindowPos(
@@ -550,7 +751,7 @@ pub fn move_window_offscreen() {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         SetWindowPos, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
     };
-    if let Some(hwnd) = find_clip_llm_hwnd() {
+    if let Some(hwnd) = clip_llm_hwnd() {
         unsafe {
             SetWindowPos(
                 hwnd,
@@ -577,5 +778,20 @@ fn make_key_input(vk: u16, flags: u32) -> INPUT {
                 dwExtraInfo: 0,
             },
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::to_wide_null;
+
+    #[test]
+    fn to_wide_null_appends_terminator() {
+        let wide = to_wide_null("clip-llm");
+        assert_eq!(wide.last(), Some(&0u16));
+        let decoded: String = char::decode_utf16(wide[..wide.len() - 1].iter().copied())
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(decoded, "clip-llm");
     }
 }
