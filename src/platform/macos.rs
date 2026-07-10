@@ -18,7 +18,12 @@ const KEY_C: CGKeyCode = 0x08;
 const KEY_V: CGKeyCode = 0x09;
 
 // Typed function pointer aliases for `objc_msgSend` transmute casts.
-type MsgSendBool = unsafe extern "C" fn(*mut c_void, *mut c_void, bool);
+//
+// `MsgSendBool` takes an Objective-C `BOOL` argument. On arm64 `BOOL` is `_Bool`
+// (matches Rust `bool`), but on x86_64 it is `signed char` — a plain Rust `bool`
+// parameter is the wrong FFI type there, so this uses `i8` (1 = true, 0 = false)
+// for both architectures.
+type MsgSendBool = unsafe extern "C" fn(*mut c_void, *mut c_void, i8);
 type MsgSendUlong = unsafe extern "C" fn(*mut c_void, *mut c_void, c_ulong);
 type MsgSendPoint = unsafe extern "C" fn(*mut c_void, *mut c_void, CGPoint);
 type MsgSendPtr = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void);
@@ -135,7 +140,7 @@ pub fn configure_window_for_spaces() -> bool {
         // for transparent windows, which creates a visible gray outline around
         // the overlay. The egui Frame renders its own shadow inside the window.
         let sel_shadow = sel_registerName(c"setHasShadow:".as_ptr());
-        msg_send_bool(window, sel_shadow, false);
+        msg_send_bool(window, sel_shadow, 0);
 
         debug!("configured NSWindow for Spaces + disabled native shadow");
         true
@@ -186,7 +191,7 @@ pub fn show_and_focus_window(position: Option<(f32, f32)>) {
         let cls = objc_getClass(c"NSApplication".as_ptr());
         let app = objc_msgSend(cls, sel_registerName(c"sharedApplication".as_ptr()));
         let sel = sel_registerName(c"activateIgnoringOtherApps:".as_ptr());
-        msg_send_bool(app, sel, true);
+        msg_send_bool(app, sel, 1);
     }
 }
 
@@ -212,7 +217,7 @@ pub fn show_about() {
         let app = objc_msgSend(app_cls, sel_registerName(c"sharedApplication".as_ptr()));
         if !app.is_null() {
             let msg_send_bool: MsgSendBool = std::mem::transmute(objc_msgSend as *const ());
-            msg_send_bool(app, sel_registerName(c"activateIgnoringOtherApps:".as_ptr()), true);
+            msg_send_bool(app, sel_registerName(c"activateIgnoringOtherApps:".as_ptr()), 1);
         }
 
         let alert_cls = objc_getClass(c"NSAlert".as_ptr());
