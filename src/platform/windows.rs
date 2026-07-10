@@ -19,6 +19,122 @@ const KEY_EVENT_DELAY_MS: u64 = 50;
 /// Delay for OS focus transfer after SW_HIDE (ms).
 const FOCUS_TRANSFER_DELAY_MS: u64 = 100;
 
+/// Registry value name under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+/// used to launch clip-llm at login.
+const RUN_VALUE_NAME: &str = "clip-llm";
+/// Subkey (relative to `HKEY_CURRENT_USER`) holding per-user auto-start entries.
+const RUN_SUBKEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+/// `RegDeleteValueW`/`RegQueryValueExW` error code for "value does not exist".
+const ERROR_FILE_NOT_FOUND: u32 = 2;
+
+/// Null-terminated UTF-16 encoding of a Rust string, for `PCWSTR` registry API arguments.
+fn to_wide_null(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Whether the `Run` registry value for clip-llm currently exists. Does not
+/// verify the value's data points at the current executable — a stale entry
+/// still counts as "enabled" here; [`set_launch_at_login`] corrects the path
+/// on the next toggle-on. Returns `false` on any registry access failure
+/// (e.g. the `Run` key itself is missing, which is unusual but not fatal).
+pub fn launch_at_login_enabled() -> bool {
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_CURRENT_USER, KEY_READ,
+    };
+
+    let subkey = to_wide_null(RUN_SUBKEY);
+    let value_name = to_wide_null(RUN_VALUE_NAME);
+
+    unsafe {
+        let mut hkey = std::ptr::null_mut();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_READ, &mut hkey) != 0 {
+            return false;
+        }
+        let mut data_type: u32 = 0;
+        let mut data_len: u32 = 0;
+        let result = RegQueryValueExW(
+            hkey,
+            value_name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut data_type,
+            std::ptr::null_mut(),
+            &mut data_len,
+        );
+        RegCloseKey(hkey);
+        result == 0
+    }
+}
+
+/// Set or remove the `clip-llm` value under the `Run` key.
+///
+/// Enabling writes the quoted, absolute `current_exe()` path as a `REG_SZ`
+/// value, always overwriting any existing entry (so a stale path from a
+/// moved/reinstalled binary is corrected). Disabling deletes the value;
+/// deleting a value that does not already exist is treated as success.
+pub fn set_launch_at_login(enabled: bool) -> Result<(), PlatformError> {
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegSetValueExW, HKEY_CURRENT_USER, KEY_WRITE,
+        REG_SZ,
+    };
+
+    let subkey = to_wide_null(RUN_SUBKEY);
+    let value_name = to_wide_null(RUN_VALUE_NAME);
+
+    let mut hkey = std::ptr::null_mut();
+    let open_result =
+        unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_WRITE, &mut hkey) };
+    if open_result != 0 {
+        return Err(PlatformError::LaunchAtLoginFailed(format!(
+            "failed to open registry Run key (error {open_result})"
+        )));
+    }
+
+    let result = if enabled {
+        let exe = match std::env::current_exe() {
+            Ok(e) => e,
+            Err(e) => {
+                unsafe { RegCloseKey(hkey) };
+                return Err(PlatformError::LaunchAtLoginFailed(format!(
+                    "failed to resolve current executable: {e}"
+                )));
+            }
+        };
+        let data = to_wide_null(&format!("\"{}\"", exe.display()));
+        // REG_SZ data is a raw byte buffer; a UTF-16 slice's bytes are exactly
+        // that (2 bytes per code unit, native endianness matches the API).
+        let data_bytes = unsafe {
+            std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), data.len() * 2)
+        };
+        unsafe {
+            RegSetValueExW(
+                hkey,
+                value_name.as_ptr(),
+                0,
+                REG_SZ,
+                data_bytes.as_ptr(),
+                data_bytes.len() as u32,
+            )
+        }
+    } else {
+        let r = unsafe { RegDeleteValueW(hkey, value_name.as_ptr()) };
+        if r == ERROR_FILE_NOT_FOUND {
+            0
+        } else {
+            r
+        }
+    };
+
+    unsafe { RegCloseKey(hkey) };
+
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(PlatformError::LaunchAtLoginFailed(format!(
+            "registry operation failed (error {result})"
+        )))
+    }
+}
+
 pub struct WindowsPlatform;
 
 impl WindowsPlatform {
@@ -210,6 +326,14 @@ impl Platform for WindowsPlatform {
             }
         });
         Ok(())
+    }
+
+    fn launch_at_login_enabled(&self) -> bool {
+        launch_at_login_enabled()
+    }
+
+    fn set_launch_at_login(&self, enabled: bool) -> Result<(), PlatformError> {
+        set_launch_at_login(enabled)
     }
 }
 
@@ -654,5 +778,20 @@ fn make_key_input(vk: u16, flags: u32) -> INPUT {
                 dwExtraInfo: 0,
             },
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::to_wide_null;
+
+    #[test]
+    fn to_wide_null_appends_terminator() {
+        let wide = to_wide_null("clip-llm");
+        assert_eq!(wide.last(), Some(&0u16));
+        let decoded: String = char::decode_utf16(wide[..wide.len() - 1].iter().copied())
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(decoded, "clip-llm");
     }
 }

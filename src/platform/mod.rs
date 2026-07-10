@@ -65,6 +65,20 @@ pub trait Platform {
     /// the startup `VISIBLE` sync (see its docs). No-op on macOS (the Accessory
     /// activation policy already excludes it).
     fn exclude_from_taskbar(&self);
+
+    /// Check whether the app is currently configured to launch automatically at
+    /// login. macOS: whether the LaunchAgent plist exists. Windows: whether the
+    /// `Run` registry value exists. Never panics; returns `false` on any lookup
+    /// failure (treated as "not enabled").
+    fn launch_at_login_enabled(&self) -> bool;
+
+    /// Enable or disable launching the app automatically at login.
+    ///
+    /// Enabling always (re)writes the launch entry to point at the current
+    /// executable, so a stale entry left over from a moved/reinstalled binary
+    /// is corrected rather than left pointing at the old path. Disabling
+    /// removes the entry; it is not an error to disable when already disabled.
+    fn set_launch_at_login(&self, enabled: bool) -> Result<(), crate::PlatformError>;
 }
 
 #[cfg(target_os = "macos")]
@@ -94,6 +108,21 @@ static TRAY_QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "macos")]
 static TRAY_ABOUT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// Mirrors the on-disk/registry launch-at-login state, updated whenever a
+/// toggle attempt (successfully) changes it. Read from the menu event handler
+/// thread to determine what a click intended to switch *to* — the native
+/// checkbox has already auto-toggled its own visual by the time the event
+/// fires (both muda backends flip `checked` before sending `MenuEvent`), so
+/// this is the only way to know the target state without touching the
+/// `Rc`-based menu item off the main thread.
+static TRAY_LAUNCH_AT_LOGIN_STATE: AtomicBool = AtomicBool::new(false);
+
+/// Set when a `set_launch_at_login` call from the menu event handler fails, so
+/// `poll_tray_events` (main thread) can revert the checkbox to match reality.
+/// Needed because the checkbox already shows the attempted (failed) state by
+/// the time the handler runs — see `TRAY_LAUNCH_AT_LOGIN_STATE`.
+static TRAY_LAUNCH_AT_LOGIN_REVERT: AtomicBool = AtomicBool::new(false);
+
 /// Handles to the dynamic rows of the tray "Status" submenu, updated after the
 /// startup probe lands and on every request outcome. `tray-icon` menu items are
 /// `Rc`-based (not `Send`), so they live in a thread-local and may only be
@@ -109,6 +138,10 @@ struct TrayStatusRows {
 
 thread_local! {
     static TRAY_STATUS: RefCell<Option<TrayStatusRows>> = const { RefCell::new(None) };
+    /// Handle to the "Launch at Login" check item, for reverting its checkbox
+    /// on a failed toggle. Main thread only (see [`TrayStatusRows`]).
+    static TRAY_LAUNCH_AT_LOGIN_ITEM: RefCell<Option<tray_icon::menu::CheckMenuItem>> =
+        const { RefCell::new(None) };
 }
 
 /// Update the probe rows of the Status submenu once the startup probe lands.
@@ -165,13 +198,18 @@ fn load_tray_icon() -> tray_icon::Icon {
 /// On macOS this is the only way to quit the app (Accessory policy = no Dock icon).
 /// The `TrayIcon` is intentionally leaked (process-lifetime resource).
 pub fn init_tray(ctx: &eframe::egui::Context) {
-    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
+    use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
     use tray_icon::TrayIconBuilder;
 
     let about_item = MenuItem::new("About clip-llm", true, None);
     let about_id = about_item.id().clone();
     let config_item = MenuItem::new("Open Config", true, None);
     let config_id = config_item.id().clone();
+    let launch_at_login_enabled = NativePlatform.launch_at_login_enabled();
+    TRAY_LAUNCH_AT_LOGIN_STATE.store(launch_at_login_enabled, Ordering::SeqCst);
+    let launch_at_login_item =
+        CheckMenuItem::new("Launch at Login", true, launch_at_login_enabled, None);
+    let launch_at_login_id = launch_at_login_item.id().clone();
     let quit_item = MenuItem::new("Quit", true, None);
     let quit_id = quit_item.id().clone();
 
@@ -228,11 +266,16 @@ pub fn init_tray(ctx: &eframe::egui::Context) {
             telemetry: telemetry_row.clone(),
         });
     });
+    TRAY_LAUNCH_AT_LOGIN_ITEM.with(|c| {
+        *c.borrow_mut() = Some(launch_at_login_item.clone());
+    });
 
     let menu = Menu::with_items(&[
         &about_item,
         &config_item,
         &status_menu,
+        &PredefinedMenuItem::separator(),
+        &launch_at_login_item,
         &PredefinedMenuItem::separator(),
         &quit_item,
     ])
@@ -254,6 +297,7 @@ pub fn init_tray(ctx: &eframe::egui::Context) {
             // poll_tray_events() inside update().
             let quit_id = quit_id.clone();
             let about_id = about_id.clone();
+            let launch_at_login_id = launch_at_login_id.clone();
             let ctx = ctx.clone();
             MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
                 if event.id() == &quit_id {
@@ -281,6 +325,26 @@ pub fn init_tray(ctx: &eframe::egui::Context) {
                 } else if event.id() == &config_id {
                     // Spawning an editor process needs no main-thread round-trip.
                     open_config_file();
+                } else if event.id() == &launch_at_login_id {
+                    // The native checkbox has already auto-toggled its own visual
+                    // by the time this event fires, so the target state is the
+                    // opposite of the last confirmed state (see
+                    // TRAY_LAUNCH_AT_LOGIN_STATE docs). The filesystem/registry
+                    // write is cheap and thread-safe, so no main-thread
+                    // round-trip is needed for the happy path.
+                    let target = !TRAY_LAUNCH_AT_LOGIN_STATE.load(Ordering::SeqCst);
+                    match NativePlatform.set_launch_at_login(target) {
+                        Ok(()) => {
+                            TRAY_LAUNCH_AT_LOGIN_STATE.store(target, Ordering::SeqCst);
+                        }
+                        Err(e) => {
+                            tracing::warn!("failed to set launch-at-login to {target}: {e}");
+                            // The checkbox now shows the wrong (attempted) state;
+                            // ask the main thread to revert it to reality.
+                            TRAY_LAUNCH_AT_LOGIN_REVERT.store(true, Ordering::SeqCst);
+                            ctx.request_repaint();
+                        }
+                    }
                 }
             }));
 
@@ -326,6 +390,18 @@ pub fn poll_tray_events(ctx: &eframe::egui::Context) {
     #[cfg(target_os = "macos")]
     if TRAY_ABOUT_REQUESTED.swap(false, Ordering::SeqCst) {
         macos::show_about();
+    }
+    if TRAY_LAUNCH_AT_LOGIN_REVERT.swap(false, Ordering::SeqCst) {
+        // Re-query reality rather than assuming "not target" — a concurrent
+        // successful toggle could have landed between the failed attempt and
+        // this poll.
+        let actual = NativePlatform.launch_at_login_enabled();
+        TRAY_LAUNCH_AT_LOGIN_STATE.store(actual, Ordering::SeqCst);
+        TRAY_LAUNCH_AT_LOGIN_ITEM.with(|c| {
+            if let Some(item) = c.borrow().as_ref() {
+                item.set_checked(actual);
+            }
+        });
     }
     if TRAY_QUIT_REQUESTED.swap(false, Ordering::SeqCst) {
         tracing::info!("quit requested from tray menu");
