@@ -66,8 +66,9 @@ pub struct OverlayOutput {
     pub action: OverlayAction,
     /// Desired viewport size based on rendered content.
     pub desired_size: Option<egui::Vec2>,
-    /// Raw content size before shadow padding (used by diagnostics).
-    #[cfg_attr(not(feature = "diagnostics"), allow(dead_code))]
+    /// Raw content size before shadow padding. Used by diagnostics, and by
+    /// the adapter to latch the Result/Error minimum height at a
+    /// Processing→Result/Error transition (see `OverlayApp::result_latch`).
     pub content_size: Option<egui::Vec2>,
 }
 
@@ -88,6 +89,14 @@ pub fn render(
     copy_confirmed: bool,
     elapsed: Option<std::time::Duration>,
     debug_available: bool,
+    // Floor for the Result/Error content height, latched by the adapter from
+    // the last Processing frame's rendered content (see
+    // `OverlayApp::result_latch`) so the final answer never renders shorter
+    // than the last streaming frame — the fix for the visible
+    // Processing→Result resize jump. `None` outside Result/Error, or when no
+    // latch is active (falls back to normal auto-sizing). Growth above this
+    // floor (e.g. an expanded Think section) is unrestricted.
+    min_result_height: Option<f32>,
     ctx: &egui::Context,
 ) -> OverlayOutput {
     if matches!(state, OverlayState::Hidden) {
@@ -135,6 +144,19 @@ pub fn render(
         .show(ctx, |ui| {
             frame.show(ui, |ui| {
                 ui.set_width(OVERLAY_WIDTH);
+
+                // Never render the Result/Error content shorter than the
+                // latched floor from the last Processing frame (see
+                // `min_result_height` doc comment) — this is what makes
+                // `desired_size` naturally equal-or-taller than the last
+                // streaming frame's size, so the final answer's window
+                // doesn't visibly shrink relative to it. Growth above the
+                // floor (e.g. an expanded Think section) is unaffected.
+                if let Some(h) = min_result_height
+                    && matches!(state, OverlayState::Result(_) | OverlayState::Error(_))
+                {
+                    ui.set_min_height(h);
+                }
 
                 // Picking overlay (hold-to-cycle, before commit). Show the mode
                 // tabs from the start so the user sees and cycles the mode, and
