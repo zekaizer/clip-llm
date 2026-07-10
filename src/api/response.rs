@@ -65,6 +65,9 @@ pub struct ThinkBlockFilter {
     /// variant terminates the block — a different variant's close tag inside
     /// the content is reasoning text, not a terminator.
     close_tag: &'static str,
+    /// Sticky: set once non-whitespace think content has been seen, so a
+    /// block that opens and closes within a single feed still reports it.
+    think_seen: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,16 +94,20 @@ impl ThinkBlockFilter {
             trim_leading_newlines: false,
             think_content: String::new(),
             close_tag: CLOSE_TAGS[0],
+            think_seen: false,
         }
     }
 
-    /// Returns `true` when inside a think block AND non-whitespace content
-    /// has been accumulated. Use this to delay `ThinkStarted` notifications
-    /// until meaningful content is detected (avoids UI flicker for empty blocks).
+    /// Returns `true` once non-whitespace think content has been seen. Sticky:
+    /// stays `true` after the block closes, so a block that opens and closes
+    /// within a single feed (large batched delta) is still reported. Use this
+    /// to delay `ThinkStarted` notifications until meaningful content is
+    /// detected (avoids UI flicker for empty blocks).
     pub fn has_think_content(&self) -> bool {
-        self.state == ThinkState::InsideThink
-            && (self.think_content.contains(|c: char| !c.is_whitespace())
-                || self.pending.contains(|c: char| !c.is_whitespace()))
+        self.think_seen
+            || (self.state == ThinkState::InsideThink
+                && (self.think_content.contains(|c: char| !c.is_whitespace())
+                    || self.pending.contains(|c: char| !c.is_whitespace())))
     }
 
     /// Take the accumulated think-block content, leaving it empty.
@@ -148,6 +155,9 @@ impl ThinkBlockFilter {
         if let Some(pos) = self.pending.find(self.close_tag) {
             // Save the think content before the close tag.
             self.think_content.push_str(&self.pending[..pos]);
+            if self.think_content.contains(|c: char| !c.is_whitespace()) {
+                self.think_seen = true;
+            }
             let after = &self.pending[pos + self.close_tag.len()..];
             let trimmed = after.trim_start_matches(['\n', '\r']).to_string();
             self.trim_leading_newlines = trimmed.is_empty();
@@ -489,11 +499,31 @@ mod tests {
         assert!(filter.has_think_content());
     }
 
+    // Sticky: a block that opened and closed still reports its content, so a
+    // ThinkStarted checked after the fact (single batched delta) is not lost.
     #[test]
-    fn has_think_content_false_after_close_tag() {
+    fn has_think_content_sticky_after_close_tag() {
         let mut filter = ThinkBlockFilter::new();
         filter.feed("<think>reasoning</think>");
-        // After close tag, no longer inside think block.
+        assert!(filter.has_think_content());
+    }
+
+    // The whole block plus the answer in ONE feed (large batched SSE delta):
+    // the caller checks has_think_content only after feed() returns, so the
+    // sticky flag is what makes the notification possible at all.
+    #[test]
+    fn has_think_content_true_for_single_feed_whole_block() {
+        let mut filter = ThinkBlockFilter::new();
+        assert_eq!(filter.feed("<think>brief thought</think>Answer"), "Answer");
+        assert!(filter.has_think_content());
+    }
+
+    // An empty block that opens and closes in one feed must NOT report
+    // content (no ThinkStarted flicker for empty blocks).
+    #[test]
+    fn has_think_content_false_for_empty_block_single_feed() {
+        let mut filter = ThinkBlockFilter::new();
+        assert_eq!(filter.feed("<think>  \n </think>Answer"), "Answer");
         assert!(!filter.has_think_content());
     }
 }
