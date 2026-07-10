@@ -461,6 +461,16 @@ impl OverlayApp {
                     self.preview_mode = None;
                     self.pending_content = None; // selection comes from copy-sim at commit
                     self.single_commit_pending = false;
+                    // Invalidate any capture still in flight from a previous trigger
+                    // (a slow single-tap clipboard read, or a previous double-tap's
+                    // copy simulation) right now. This gesture's own capture is
+                    // deferred to CycleCommit (below), so capture_seq/capture_kind
+                    // would otherwise stay unchanged while CaptureStarted moves the
+                    // state to Capturing — letting the old thread's late result pass
+                    // poll_captures' `seq == capture_seq` gate and land in
+                    // pending_content under this gesture's Selection badge.
+                    self.capture_cancel.store(true, Ordering::SeqCst);
+                    self.capture_seq += 1;
                     // Show the picking overlay (spinner) immediately (non-activating).
                     // The actual copy is deferred (StartCapture -> pending_capture)
                     // until the modifiers are released, then started in CycleCommit.
