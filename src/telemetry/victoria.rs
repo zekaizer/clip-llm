@@ -14,6 +14,12 @@
 //! - **No extra dependencies.** Time is sent as a Unix-nanosecond number (which
 //!   VictoriaLogs accepts for `_time_field`), avoiding a date-formatting crate;
 //!   the shipper drives async `reqwest` on its own current-thread runtime.
+//! - **Validated once, fails quietly after that.** The composed ingest URL is
+//!   parsed at shipper startup; a malformed `[telemetry].url` disables the
+//!   sink (with a single `eprintln!`) instead of failing on every flush
+//!   forever. Once running, ingest failures are logged with exponential
+//!   backoff (not every flush) so a sustained outage does not spam stderr for
+//!   the life of the process; a "recovered" line marks the end of an outage.
 
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -194,12 +200,34 @@ where
     }
 }
 
+/// Checks that `url` is a well-formed absolute URL. Run once at shipper
+/// startup so a typo'd `[telemetry].url` (missing scheme, empty host, ...) is
+/// caught immediately instead of failing (and re-failing) on every flush.
+fn validate_ingest_url(url: &str) -> Result<(), String> {
+    reqwest::Url::parse(url).map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Whether the Nth consecutive ingest failure should be logged. Every failure
+/// is logged up to the first few, then exponentially less often (failures 1,
+/// 2, 4, 8, 16, ...), so a sustained VictoriaLogs outage does not spam stderr
+/// for the life of the process while still surfacing the problem promptly.
+fn should_log_failure(consecutive_failures: u32) -> bool {
+    consecutive_failures.is_power_of_two()
+}
+
 /// Background thread: batch buffered records and POST them to VictoriaLogs.
 fn spawn_shipper(cfg: VictoriaConfig, rx: Receiver<String>) {
     let url = format!(
         "{}/insert/jsonline?_stream_fields=app,host,session&_msg_field=msg&_time_field=time",
         cfg.url.trim_end_matches('/')
     );
+    if let Err(e) = validate_ingest_url(&url) {
+        eprintln!(
+            "victoria-logs: invalid [telemetry].url {:?}: {e} — sink disabled, no logs will be shipped",
+            cfg.url
+        );
+        return;
+    }
     let builder = std::thread::Builder::new().name("victoria-logs".into());
     let spawned = builder.spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -214,6 +242,7 @@ fn spawn_shipper(cfg: VictoriaConfig, rx: Receiver<String>) {
             .build()
             .unwrap_or_default();
         let mut last_dropped = 0u64;
+        let mut consecutive_failures = 0u32;
 
         // Block until at least one record is ready; the loop ends when the
         // channel is dropped (process shutdown). The layer's sender is
@@ -250,9 +279,33 @@ fn spawn_shipper(cfg: VictoriaConfig, rx: Receiver<String>) {
             match result {
                 Ok(resp) if resp.status().is_success() => {
                     SHIPPED.fetch_add(count as u64, Ordering::Relaxed);
+                    if consecutive_failures > 0 {
+                        eprintln!(
+                            "victoria-logs: ingest recovered after {consecutive_failures} \
+                             consecutive failure(s)"
+                        );
+                        consecutive_failures = 0;
+                    }
                 }
-                Ok(resp) => eprintln!("victoria-logs: ingest rejected (HTTP {})", resp.status().as_u16()),
-                Err(e) => eprintln!("victoria-logs: ingest failed: {e}"),
+                Ok(resp) => {
+                    consecutive_failures += 1;
+                    if should_log_failure(consecutive_failures) {
+                        eprintln!(
+                            "victoria-logs: ingest rejected (HTTP {}) [{consecutive_failures} \
+                             consecutive failure(s)]",
+                            resp.status().as_u16()
+                        );
+                    }
+                }
+                Err(e) => {
+                    consecutive_failures += 1;
+                    if should_log_failure(consecutive_failures) {
+                        eprintln!(
+                            "victoria-logs: ingest failed: {e} [{consecutive_failures} \
+                             consecutive failure(s)]"
+                        );
+                    }
+                }
             }
 
             // Surface newly-dropped records (channel was full) once per flush.
@@ -299,4 +352,37 @@ fn gen_session() -> String {
         .unwrap_or(0);
     let mixed = nanos ^ ((std::process::id() as u64) << 32);
     format!("{:08x}", mixed as u32 ^ (mixed >> 32) as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_ingest_url_accepts_well_formed_urls() {
+        assert!(validate_ingest_url("http://192.168.1.15:9428/insert/jsonline").is_ok());
+        assert!(validate_ingest_url("https://logs.example.com/insert/jsonline").is_ok());
+    }
+
+    #[test]
+    fn validate_ingest_url_rejects_malformed_urls() {
+        // Missing scheme (the most likely real-world typo, e.g. dropping "http://").
+        assert!(validate_ingest_url("192.168.1.15:9428/insert/jsonline").is_err());
+        assert!(validate_ingest_url("not a url at all").is_err());
+        assert!(validate_ingest_url("").is_err());
+    }
+
+    #[test]
+    fn should_log_failure_is_true_for_first_few_then_powers_of_two() {
+        assert!(should_log_failure(1));
+        assert!(should_log_failure(2));
+        assert!(!should_log_failure(3));
+        assert!(should_log_failure(4));
+        assert!(!should_log_failure(5));
+        assert!(!should_log_failure(6));
+        assert!(!should_log_failure(7));
+        assert!(should_log_failure(8));
+        assert!(should_log_failure(16));
+        assert!(!should_log_failure(17));
+    }
 }
