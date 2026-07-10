@@ -648,10 +648,19 @@ impl OverlayApp {
             // execute_effects would wipe it in the same frame, before render —
             // so the copy-debug button would never appear.
             let mut fresh_debug: Option<crate::DebugCapture> = None;
+            // A request cancelled just before it completed can still deliver its
+            // Complete/Error here after a newer request has already started (the
+            // state machine gates the *state* transition on this same check, but
+            // the tally and debug snapshot live outside it, in the adapter). Skip
+            // them so a stale request's outcome/debug data never overwrites the
+            // one for the request currently on screen.
+            let current_request_id = self.sm.current_request_id();
             let event = match response {
                 WorkerResponse::Complete { result, think_content, request_id, incomplete, debug } => {
-                    self.record_request_outcome(true, if incomplete.is_some() { "partial" } else { "ok" });
-                    fresh_debug = Some(debug);
+                    if request_id == current_request_id {
+                        self.record_request_outcome(true, if incomplete.is_some() { "partial" } else { "ok" });
+                        fresh_debug = Some(debug);
+                    }
                     UiEvent::WorkerResult {
                         text: result,
                         think_content,
@@ -660,8 +669,10 @@ impl OverlayApp {
                     }
                 }
                 WorkerResponse::Error { message, request_id, debug } => {
-                    self.record_request_outcome(false, &tray_last_label(&message));
-                    fresh_debug = Some(debug);
+                    if request_id == current_request_id {
+                        self.record_request_outcome(false, &tray_last_label(&message));
+                        fresh_debug = Some(debug);
+                    }
                     UiEvent::WorkerError {
                         message,
                         request_id,
@@ -1383,5 +1394,149 @@ mod tests {
             None,
         );
         assert_eq!(pos, egui::pos2(-290.0, -190.0));
+    }
+
+    // --- poll_responses: stale worker responses must not pollute adapter state ---
+
+    /// Build a minimal `OverlayApp` for adapter-level tests, returning the app
+    /// plus the sender counterpart of its worker-response channel so tests can
+    /// inject `WorkerResponse`s as if the worker thread had sent them.
+    ///
+    /// Constructing a real `ClipboardManager` opens a handle onto the actual
+    /// system clipboard, shared process-wide with `clipboard::tests` — callers
+    /// must hold `crate::clipboard::test_support::CLIPBOARD_LOCK` for the
+    /// duration of the test to avoid racing those.
+    fn new_test_app() -> (OverlayApp, mpsc::Sender<WorkerResponse>) {
+        let (cmd_tx, _cmd_rx) = tokio_mpsc::unbounded_channel();
+        let (resp_tx, resp_rx) = mpsc::channel();
+        let (_tap_tx, tap_rx) = mpsc::channel();
+        let clipboard = ClipboardManager::new().expect("clipboard manager");
+        #[cfg(feature = "diagnostics")]
+        let app = {
+            let (_diag_action_tx, diag_action_rx) = mpsc::channel();
+            let (diag_state_tx, _diag_state_rx) = mpsc::channel();
+            OverlayApp::new(cmd_tx, resp_rx, clipboard, tap_rx, diag_action_rx, diag_state_tx)
+        };
+        #[cfg(not(feature = "diagnostics"))]
+        let app = OverlayApp::new(cmd_tx, resp_rx, clipboard, tap_rx);
+        (app, resp_tx)
+    }
+
+    /// A request cancelled just before its (late) `Complete` arrives must not
+    /// have that stale outcome tallied into `req_ok`/`req_err`, nor its debug
+    /// snapshot surfaced via `last_debug` — both belong to whichever request
+    /// is current, not to one the state machine has already moved past.
+    #[test]
+    fn poll_responses_ignores_stale_completion_tally_and_debug() {
+        let _lock = crate::clipboard::test_support::CLIPBOARD_LOCK.lock().unwrap();
+        let (mut app, resp_tx) = new_test_app();
+        let ctx = egui::Context::default();
+
+        // Start request 1 (Processing), then cancel it (state machine keeps
+        // current_request_id unchanged — reset_to_hidden does not touch it)
+        // and start request 2, which becomes current.
+        app.sm.handle(UiEvent::ContentReady {
+            content: crate::ClipboardContent::text_only("first".into()),
+            auto_copy: true,
+        });
+        let stale_id = app.sm.current_request_id();
+        app.sm.handle(UiEvent::UserCancel);
+        app.sm.handle(UiEvent::ContentReady {
+            content: crate::ClipboardContent::text_only("second".into()),
+            auto_copy: true,
+        });
+        let current_id = app.sm.current_request_id();
+        assert_ne!(stale_id, current_id, "test setup must produce two distinct request ids");
+
+        // The cancelled request's completion arrives late.
+        resp_tx
+            .send(WorkerResponse::Complete {
+                result: "stale answer".into(),
+                think_content: None,
+                request_id: stale_id,
+                incomplete: None,
+                debug: crate::DebugCapture {
+                    endpoint: Some("http://stale".into()),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        app.poll_responses(&ctx);
+
+        assert_eq!(app.req_ok, 0, "stale completion must not be tallied as a success");
+        assert_eq!(app.req_err, 0);
+        assert!(app.last_debug.is_none(), "stale completion's debug snapshot must not surface");
+    }
+
+    /// Same as above but for `WorkerResponse::Error`: a stale failure must not
+    /// bump `req_err` or surface its debug snapshot either.
+    #[test]
+    fn poll_responses_ignores_stale_error_tally_and_debug() {
+        let _lock = crate::clipboard::test_support::CLIPBOARD_LOCK.lock().unwrap();
+        let (mut app, resp_tx) = new_test_app();
+        let ctx = egui::Context::default();
+
+        app.sm.handle(UiEvent::ContentReady {
+            content: crate::ClipboardContent::text_only("first".into()),
+            auto_copy: true,
+        });
+        let stale_id = app.sm.current_request_id();
+        app.sm.handle(UiEvent::UserCancel);
+        app.sm.handle(UiEvent::ContentReady {
+            content: crate::ClipboardContent::text_only("second".into()),
+            auto_copy: true,
+        });
+        let current_id = app.sm.current_request_id();
+        assert_ne!(stale_id, current_id, "test setup must produce two distinct request ids");
+
+        resp_tx
+            .send(WorkerResponse::Error {
+                message: "stale error".into(),
+                request_id: stale_id,
+                debug: crate::DebugCapture {
+                    endpoint: Some("http://stale".into()),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        app.poll_responses(&ctx);
+
+        assert_eq!(app.req_ok, 0);
+        assert_eq!(app.req_err, 0, "stale error must not be tallied");
+        assert!(app.last_debug.is_none(), "stale error's debug snapshot must not surface");
+    }
+
+    /// Sanity check that the gate is genuinely id-based, not a blanket
+    /// suppression: a `Complete` matching the current request must still be
+    /// tallied and surfaced normally.
+    #[test]
+    fn poll_responses_records_current_completion_tally_and_debug() {
+        let _lock = crate::clipboard::test_support::CLIPBOARD_LOCK.lock().unwrap();
+        let (mut app, resp_tx) = new_test_app();
+        let ctx = egui::Context::default();
+
+        app.sm.handle(UiEvent::ContentReady {
+            content: crate::ClipboardContent::text_only("only".into()),
+            auto_copy: true,
+        });
+        let current_id = app.sm.current_request_id();
+
+        resp_tx
+            .send(WorkerResponse::Complete {
+                result: "fresh answer".into(),
+                think_content: None,
+                request_id: current_id,
+                incomplete: None,
+                debug: crate::DebugCapture {
+                    endpoint: Some("http://fresh".into()),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        app.poll_responses(&ctx);
+
+        assert_eq!(app.req_ok, 1);
+        assert_eq!(app.req_err, 0);
+        assert!(app.last_debug.is_some(), "current completion's debug snapshot must surface");
     }
 }
