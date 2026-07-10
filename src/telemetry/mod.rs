@@ -58,13 +58,51 @@ pub fn init() {
     }
 }
 
-/// Parse a `[telemetry].level` string into a `LevelFilter`; unknown → `info`.
+/// Parses a `[telemetry].level` string into a `LevelFilter`.
+///
+/// An unrecognized value falls back to `info`, but — unlike a silent
+/// fallback — prints a warning naming both the offending value and the
+/// fallback level: a typo here (e.g. `"eror"` instead of `"error"`) would
+/// otherwise ship far more verbose logs than the user intended, with no
+/// indication why. `eprintln!` is used because tracing is not yet
+/// initialized when this runs (this function feeds `init()` itself).
 fn parse_level(s: &str) -> LevelFilter {
     match s.to_ascii_lowercase().as_str() {
         "trace" => LevelFilter::TRACE,
         "debug" => LevelFilter::DEBUG,
+        "info" => LevelFilter::INFO,
         "warn" => LevelFilter::WARN,
         "error" => LevelFilter::ERROR,
-        _ => LevelFilter::INFO,
+        _ => {
+            eprintln!(
+                "clip-llm: [telemetry].level: unrecognized value {s:?} — falling back to \"info\""
+            );
+            LevelFilter::INFO
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_level_recognizes_all_known_levels() {
+        assert_eq!(parse_level("trace"), LevelFilter::TRACE);
+        assert_eq!(parse_level("debug"), LevelFilter::DEBUG);
+        assert_eq!(parse_level("info"), LevelFilter::INFO);
+        assert_eq!(parse_level("warn"), LevelFilter::WARN);
+        assert_eq!(parse_level("error"), LevelFilter::ERROR);
+        // Case-insensitive.
+        assert_eq!(parse_level("ERROR"), LevelFilter::ERROR);
+    }
+
+    #[test]
+    fn parse_level_falls_back_to_info_on_typo() {
+        // A typo (e.g. "eror" for "error") must not silently become the far
+        // more verbose default; it still falls back to info (the warning
+        // itself goes to stderr, which this test does not capture).
+        assert_eq!(parse_level("eror"), LevelFilter::INFO);
+        assert_eq!(parse_level(""), LevelFilter::INFO);
     }
 }

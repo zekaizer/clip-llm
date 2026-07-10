@@ -781,11 +781,78 @@ fn resolve_path() -> Option<PathBuf> {
         .map(|_| candidate)
 }
 
+/// Replaces `[generation]` fields set to a meaningless `0` with `None` (so the
+/// built-in default applies), warning once per corrected field.
+///
+/// A `0` timeout would make `reqwest` apply `Duration::ZERO`, so every
+/// request times out instantly; a `0` `max_tokens`/`token_budget` leaves no
+/// room to generate (or even receive) a response. All four are easy to
+/// mistake for "unlimited" — which none of them mean — so they are corrected
+/// here rather than passed through to the client. `temperature` is
+/// deliberately left untouched: `0.0` is a legitimate (fully deterministic)
+/// sampling value.
+fn sanitize_generation(mut generation: GenerationConfig) -> GenerationConfig {
+    if generation.max_tokens == Some(0) {
+        eprintln!(
+            "clip-llm: [generation].max_tokens = 0 would cap every response at zero output \
+             tokens — ignoring, built-in default applies"
+        );
+        generation.max_tokens = None;
+    }
+    if generation.token_budget == Some(0) {
+        eprintln!(
+            "clip-llm: [generation].token_budget = 0 leaves no room for prompt or completion \
+             tokens — ignoring, built-in default applies"
+        );
+        generation.token_budget = None;
+    }
+    if generation.request_timeout_secs == Some(0) {
+        eprintln!(
+            "clip-llm: [generation].request_timeout_secs = 0 would time out every request \
+             instantly — ignoring, built-in default applies"
+        );
+        generation.request_timeout_secs = None;
+    }
+    if generation.initial_response_timeout_secs == Some(0) {
+        eprintln!(
+            "clip-llm: [generation].initial_response_timeout_secs = 0 would time out every \
+             request instantly — ignoring, built-in default applies"
+        );
+        generation.initial_response_timeout_secs = None;
+    }
+    generation
+}
+
+/// Converts a byte offset into `contents` to a 1-based `(line, column)` pair.
+///
+/// This is used to point at *where* a TOML parse error occurred without
+/// echoing any of the surrounding file content (which, for `config.toml`,
+/// could be an `api_key` line) — unlike `toml::de::Error`'s `Display` impl,
+/// which renders a source snippet alongside the message.
+fn line_col_at(contents: &str, byte_offset: usize) -> (usize, usize) {
+    let mut line = 1usize;
+    let mut column = 1usize;
+    for (idx, ch) in contents.char_indices() {
+        if idx >= byte_offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    (line, column)
+}
+
 /// Reads and parses the config file, falling back to defaults on any failure.
 ///
-/// Full error details (which for a TOML error can echo a line of file content)
-/// go to `debug!` only; the `warn!` lines stay generic so a misdirected
-/// `CLIP_LLM_CONFIG` cannot leak file contents into ordinary logs.
+/// A TOML parse error is reported via `message()` + a computed line/column
+/// only — never via the error's full `Display` impl, which would render a
+/// snippet of the offending source line (potentially an `api_key` line) — so
+/// the location can safely reach `warn!`/`eprintln!` instead of being
+/// confined to `debug!`.
 fn load_or_default() -> Config {
     let Some(path) = resolve_path() else {
         record_outcome(LoadOutcome::NoFile);
@@ -838,14 +905,31 @@ fn load_or_default() -> Config {
 
     match std::fs::read_to_string(&path) {
         Ok(contents) => match toml::from_str::<Config>(&contents) {
-            Ok(config) => {
+            Ok(mut config) => {
+                config.generation = sanitize_generation(config.generation);
                 info!("config: loaded from {}", path.display());
                 eprintln!("clip-llm: config loaded from {}", path.display());
                 record_outcome(LoadOutcome::Loaded(path));
                 config
             }
             Err(e) => {
-                warn!("config: {}: invalid TOML — using built-in defaults", path.display());
+                let location = e
+                    .span()
+                    .map(|span| {
+                        let (line, column) = line_col_at(&contents, span.start);
+                        format!(" at line {line}, column {column}")
+                    })
+                    .unwrap_or_default();
+                warn!(
+                    "config: {}: invalid TOML{location}: {} — using built-in defaults",
+                    path.display(),
+                    e.message()
+                );
+                eprintln!(
+                    "clip-llm: {}: invalid TOML{location}: {} — using built-in defaults",
+                    path.display(),
+                    e.message()
+                );
                 debug!("config parse error: {e}");
                 record_outcome(LoadOutcome::Failed { path, reason: "invalid TOML" });
                 Config::default()
@@ -1115,6 +1199,44 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_generation_rejects_meaningless_zeros() {
+        let config: Config = toml::from_str(
+            "[generation]\n\
+             temperature = 0.0\n\
+             max_tokens = 0\n\
+             token_budget = 0\n\
+             request_timeout_secs = 0\n\
+             initial_response_timeout_secs = 0\n",
+        )
+        .unwrap();
+        let sanitized = sanitize_generation(config.generation);
+        // Zero timeouts/token caps are meaningless (an instant timeout, or no
+        // room to generate/receive a response) — cleared so the built-in
+        // default applies.
+        assert_eq!(sanitized.max_tokens, None);
+        assert_eq!(sanitized.token_budget, None);
+        assert_eq!(sanitized.request_timeout_secs, None);
+        assert_eq!(sanitized.initial_response_timeout_secs, None);
+        // temperature = 0.0 is a legitimate (fully deterministic) value and
+        // must pass through untouched.
+        assert_eq!(sanitized.temperature, Some(0.0));
+    }
+
+    #[test]
+    fn sanitize_generation_leaves_nonzero_values_untouched() {
+        let config: Config = toml::from_str(
+            "[generation]\nmax_tokens = 2048\ntoken_budget = 6000\n\
+             request_timeout_secs = 30\ninitial_response_timeout_secs = 10\n",
+        )
+        .unwrap();
+        let sanitized = sanitize_generation(config.generation);
+        assert_eq!(sanitized.max_tokens, Some(2048));
+        assert_eq!(sanitized.token_budget, Some(6000));
+        assert_eq!(sanitized.request_timeout_secs, Some(30));
+        assert_eq!(sanitized.initial_response_timeout_secs, Some(10));
+    }
+
+    #[test]
     fn hotkey_section_parses() {
         let config: Config =
             toml::from_str("[hotkey]\ndouble_tap_timeout_ms = 300\n").unwrap();
@@ -1181,5 +1303,35 @@ mod tests {
         // load_or_default() turns this into a defaults fallback; here we assert the
         // parser itself errors so that fallback path is exercised.
         assert!(toml::from_str::<Config>("not = = valid").is_err());
+    }
+
+    #[test]
+    fn line_col_at_locates_offsets() {
+        let text = "abc\ndef\nghi";
+        assert_eq!(line_col_at(text, 0), (1, 1));
+        assert_eq!(line_col_at(text, 2), (1, 3));
+        // Offset 4 is right after the first '\n', i.e. the start of line 2.
+        assert_eq!(line_col_at(text, 4), (2, 1));
+        assert_eq!(line_col_at(text, 6), (2, 3));
+        // An offset past the end of the string does not panic; it reports the
+        // position at the end of the last line.
+        assert_eq!(line_col_at(text, 1000), (3, 4));
+    }
+
+    #[test]
+    fn toml_parse_error_reports_message_and_span_without_snippet() {
+        // A malformed value on line 2 — the error's span should point there, and
+        // `message()` alone (as opposed to the error's `Display` impl) must not
+        // echo the offending source line.
+        let contents = "[api]\nendpoint = not-a-string\n";
+        let err = toml::from_str::<Config>(contents).unwrap_err();
+        let span = err.span().expect("parse error carries a span");
+        let (line, _column) = line_col_at(contents, span.start);
+        assert_eq!(line, 2);
+        assert!(
+            !err.message().contains("not-a-string"),
+            "message() unexpectedly echoed source content: {}",
+            err.message()
+        );
     }
 }
