@@ -117,23 +117,17 @@ impl Platform for WindowsPlatform {
         if unsafe { GetCursorPos(&mut pt) } == 0 {
             return None;
         }
-        // GetCursorPos returns physical pixels in DPI-aware processes.
-        // Convert to logical points for egui OuterPosition.
-        let scale = system_dpi_scale();
+        // GetCursorPos returns physical pixels in DPI-aware processes. Convert
+        // to logical points using the DPI of the monitor the cursor is
+        // actually on (not the primary monitor's system DPI), so multi-monitor
+        // setups with mixed DPI (e.g. primary 100% + secondary 150%) stay correct.
+        let scale = dpi_scale_at_physical_point(pt);
         Some((pt.x as f64 / scale, pt.y as f64 / scale))
     }
 
     fn display_bounds_at_point(&self, x: f64, y: f64) -> Option<(f64, f64, f64, f64)> {
-        use windows_sys::Win32::Graphics::Gdi::{
-            GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-        };
-        let scale = system_dpi_scale();
-        // Convert logical points to physical pixels for MonitorFromPoint.
-        let pt = POINT {
-            x: (x * scale) as i32,
-            y: (y * scale) as i32,
-        };
-        let hmon = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
+        use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITORINFO};
+        let (hmon, scale) = resolve_logical_point(x, y);
         if hmon.is_null() {
             return None;
         }
@@ -142,7 +136,8 @@ impl Platform for WindowsPlatform {
         if unsafe { GetMonitorInfoW(hmon, &mut info) } == 0 {
             return None;
         }
-        // rcWork = work area (excludes taskbar). Convert back to logical points.
+        // rcWork = work area (excludes taskbar). Convert back to logical points
+        // using the same monitor's DPI.
         let rc = info.rcWork;
         Some((
             rc.left as f64 / scale,
@@ -308,9 +303,62 @@ fn set_tool_window() {
 }
 
 /// DPI scale factor derived from the system primary DPI setting (physical pixels / logical points).
+///
+/// Only used as an initial guess before a monitor is resolved (see `resolve_logical_point`)
+/// and as a fallback when a per-monitor DPI query fails. Do NOT use this directly for
+/// coordinate conversion on multi-monitor setups — the primary monitor's DPI does not apply
+/// to secondary monitors with a different scale factor.
 fn system_dpi_scale() -> f64 {
     let dpi = unsafe { GetDpiForSystem() } as f64;
     dpi / 96.0
+}
+
+/// DPI scale (physical pixels / logical points) for a specific monitor, via `GetDpiForMonitor`.
+/// Falls back to `system_dpi_scale()` if the handle is null or the query fails.
+fn monitor_dpi_scale(hmon: windows_sys::Win32::Graphics::Gdi::HMONITOR) -> f64 {
+    use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+    if hmon.is_null() {
+        return system_dpi_scale();
+    }
+    let mut dpi_x = 0u32;
+    let mut dpi_y = 0u32;
+    if unsafe { GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) } == 0 {
+        dpi_x as f64 / 96.0
+    } else {
+        system_dpi_scale()
+    }
+}
+
+/// DPI scale for the monitor containing an unambiguous physical-pixel point
+/// (e.g. straight from `GetCursorPos`).
+fn dpi_scale_at_physical_point(pt: POINT) -> f64 {
+    use windows_sys::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONEAREST};
+    monitor_dpi_scale(unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) })
+}
+
+/// Resolve the monitor and DPI scale for a logical point `(x, y)` whose originating scale is
+/// not known ahead of time (e.g. a cursor position or window-target position computed
+/// elsewhere, which may have used a different monitor's DPI than the one it actually falls
+/// on near a monitor boundary).
+///
+/// Two-pass: the system DPI converts the logical point to an approximate physical point to
+/// locate a candidate monitor, then that monitor's real DPI re-derives the physical point and
+/// re-resolves the monitor. This is exact except in the rare case where the refined point
+/// crosses onto yet another monitor, which is not worth chasing further here.
+fn resolve_logical_point(x: f64, y: f64) -> (windows_sys::Win32::Graphics::Gdi::HMONITOR, f64) {
+    use windows_sys::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONEAREST};
+    let approx_scale = system_dpi_scale();
+    let approx_pt = POINT {
+        x: (x * approx_scale) as i32,
+        y: (y * approx_scale) as i32,
+    };
+    let candidate_scale = dpi_scale_at_physical_point(approx_pt);
+    let pt = POINT {
+        x: (x * candidate_scale) as i32,
+        y: (y * candidate_scale) as i32,
+    };
+    let hmon = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
+    (hmon, monitor_dpi_scale(hmon))
 }
 
 /// Show the clip-llm window without activating or stealing focus.
@@ -407,7 +455,8 @@ pub fn show_no_activate_at(position: Option<(f32, f32)>) {
         set_no_activate(hwnd, true);
         unsafe {
             if let Some((x, y)) = position {
-                let scale = system_dpi_scale();
+                // Target monitor for this position, not the primary monitor.
+                let (_, scale) = resolve_logical_point(x as f64, y as f64);
                 SetWindowPos(
                     hwnd,
                     HWND_TOP,
@@ -442,7 +491,8 @@ pub fn show_and_focus_window(position: Option<(f32, f32)>) {
         set_no_activate(hwnd, false);
         unsafe {
             if let Some((x, y)) = position {
-                let scale = system_dpi_scale();
+                // Target monitor for this position, not the primary monitor.
+                let (_, scale) = resolve_logical_point(x as f64, y as f64);
                 SetWindowPos(
                     hwnd,
                     HWND_TOP,
@@ -461,19 +511,21 @@ pub fn show_and_focus_window(position: Option<(f32, f32)>) {
 
 /// Move the clip-llm window to the given position without showing or focusing it.
 ///
-/// Coordinates are in the same "system DPI logical" space used by `show_and_focus_window()`:
-/// physical pixels divided by `GetDpiForSystem()/96`. On a 100% DPI primary monitor this
-/// equals physical pixels, so the round-trip through `GetDpiForSystem` is always consistent.
+/// Coordinates are logical points in the space produced by `mouse_position()` /
+/// `display_bounds_at_point()`: physical pixels divided by the DPI of whichever monitor the
+/// point actually falls on (see `resolve_logical_point`), not a single global system DPI —
+/// mixed-DPI multi-monitor setups (e.g. primary 100% + secondary 150%) need the target
+/// monitor's own scale to land in the right place.
 ///
 /// Uses `SetWindowPos` directly to bypass winit's per-monitor DPI scaling, which would
 /// otherwise mis-scale the coordinates when the window is on a secondary monitor with a
-/// different DPI (e.g. primary 100% + secondary 150%).
+/// different DPI.
 pub fn set_window_position(x: f32, y: f32) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         SetWindowPos, HWND_TOP, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
     };
     if let Some(hwnd) = find_clip_llm_hwnd() {
-        let scale = system_dpi_scale();
+        let (_, scale) = resolve_logical_point(x as f64, y as f64);
         unsafe {
             SetWindowPos(
                 hwnd,
