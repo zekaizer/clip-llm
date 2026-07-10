@@ -470,8 +470,11 @@ impl LlmClient {
                 .unwrap_or(INITIAL_RESPONSE_TIMEOUT_SECS),
         );
 
+        // The endpoint URL stays at debug: it may carry embedded credentials in
+        // some gateway setups, and info-level records ship to remote telemetry.
+        debug!("endpoint={endpoint}");
         info!(
-            "endpoint={endpoint}, model={model}, api_key={}, custom_headers={}, temperature={temperature}, max_tokens={max_tokens}, timeout={}s, initial_response_timeout={}s",
+            "model={model}, api_key={}, custom_headers={}, temperature={temperature}, max_tokens={max_tokens}, timeout={}s, initial_response_timeout={}s",
             if api_key.is_some() { "set" } else { "unset" },
             if custom_headers.is_empty() {
                 "none".to_string()
@@ -964,7 +967,9 @@ impl LlmClient {
         capture: &mut DebugCapture,
     ) -> Result<String, ApiError> {
         let inner = &self.0;
-        info!("sending request to {}", inner.endpoint);
+        // Debug, not info: the endpoint URL may carry embedded credentials in
+        // some gateway setups, and info-level records ship to remote telemetry.
+        debug!("sending request to {}", inner.endpoint);
         debug!("model={}, temperature={}, max_tokens={}", inner.model, inner.temperature, inner.max_tokens);
 
         let resp = self
@@ -1019,7 +1024,8 @@ impl LlmClient {
         capture: &mut DebugCapture,
     ) -> Result<reqwest::Response, ApiError> {
         let inner = &self.0;
-        info!("sending streaming request to {}", inner.endpoint);
+        // Debug, not info — see `complete` for the endpoint-in-telemetry rationale.
+        debug!("sending streaming request to {}", inner.endpoint);
         self.build_and_send(content, mode, rephrase_params, thinking_mode, true, capture)
             .await
     }
