@@ -238,6 +238,10 @@ pub fn show_about() {
 
         // [alert runModal] — modal until the user dismisses it.
         objc_msgSend(alert, sel_registerName(c"runModal".as_ptr()));
+
+        // We own `alert` (alloc+init), so it must be released — otherwise
+        // every About click leaks one NSAlert.
+        objc_msgSend(alert, sel_registerName(c"release".as_ptr()));
     }
 }
 
