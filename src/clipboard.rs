@@ -6,11 +6,26 @@ use std::time::{Duration, Instant};
 use arboard::Clipboard;
 use tracing::{debug, info, warn};
 
-use crate::platform::Platform;
+use crate::platform::{ModifierState, Platform};
 use crate::ClipboardError;
 
 const CLIPBOARD_POLL_INTERVAL_MS: u64 = 50;
 const CLIPBOARD_POLL_TIMEOUT_MS: u64 = 500;
+
+/// Hard cap on how long `copy_and_read` waits for the user's Ctrl+Shift
+/// hotkey modifiers to release before simulating the copy chord. Bounds the
+/// wait so a stuck or unavailable watcher can never stall a capture.
+const MODIFIER_RELEASE_TIMEOUT_MS: u64 = 300;
+/// Poll resolution while waiting for modifier release.
+const MODIFIER_RELEASE_POLL_INTERVAL_MS: u64 = 10;
+/// Short settle delay applied after modifiers are confirmed released (or the
+/// watcher is unavailable), giving the OS event queue a moment to flush
+/// before the synthetic copy chord is posted.
+const MODIFIER_RELEASE_GRACE_MS: u64 = 40;
+/// Fallback flat settle delay used when no live modifier watcher is wired in
+/// (e.g. a platform build with no watcher, or one that failed to install).
+/// This is the pre-#watcher behavior, kept as a safety net.
+const FALLBACK_MODIFIER_SETTLE_MS: u64 = 200;
 
 /// Clipboard content: text, images, or both.
 #[derive(Debug, Clone, PartialEq)]
@@ -172,15 +187,68 @@ fn rgba_to_png(bytes: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Clipboa
     Ok(out)
 }
 
+/// Wait for the user's Ctrl+Shift hotkey modifiers to release before a copy
+/// simulation is posted, so the synthetic chord isn't contaminated by keys
+/// the user is still physically holding down. Polls `is_held` at
+/// `MODIFIER_RELEASE_POLL_INTERVAL_MS` resolution up to a
+/// `MODIFIER_RELEASE_TIMEOUT_MS` hard cap — bounding the wait so a
+/// stuck/unavailable watcher can never stall a capture — then applies a short
+/// grace sleep for OS event-queue settling. `cancel` is checked on every poll
+/// tick (and once more after the loop) so an aborted capture returns promptly
+/// instead of riding out the full wait.
+///
+/// `is_held` is injected (rather than taking `&ModifierState` directly) so
+/// this is unit-testable without a real OS hook.
+fn wait_for_modifier_release(
+    is_held: impl Fn() -> bool,
+    cancel: &AtomicBool,
+) -> Result<(), ClipboardError> {
+    let deadline = Instant::now() + Duration::from_millis(MODIFIER_RELEASE_TIMEOUT_MS);
+    while is_held() {
+        if cancel.load(Ordering::SeqCst) {
+            debug!("capture cancelled while waiting for modifier release");
+            return Err(ClipboardError::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            debug!("modifier release wait timed out after {MODIFIER_RELEASE_TIMEOUT_MS}ms");
+            break;
+        }
+        thread::sleep(Duration::from_millis(MODIFIER_RELEASE_POLL_INTERVAL_MS));
+    }
+    if cancel.load(Ordering::SeqCst) {
+        debug!("capture cancelled before copy simulation");
+        return Err(ClipboardError::Cancelled);
+    }
+    thread::sleep(Duration::from_millis(MODIFIER_RELEASE_GRACE_MS));
+    Ok(())
+}
+
 pub struct ClipboardManager {
     board: Clipboard,
+    /// Live Ctrl+Shift hold state, consulted by `copy_and_read` to wait for an
+    /// actual modifier release instead of a flat settle delay. `None` when no
+    /// watcher handle has been attached (e.g. callers that never simulate a
+    /// copy) — `copy_and_read` falls back to the pre-watcher fixed delay in
+    /// that case, and also whenever the attached watcher never came up
+    /// (`ModifierState::is_active() == false`).
+    modifier_state: Option<ModifierState>,
 }
 
 impl ClipboardManager {
     pub fn new() -> Result<Self, ClipboardError> {
         let board =
             Clipboard::new().map_err(|e| ClipboardError::AccessFailed(e.to_string()))?;
-        Ok(Self { board })
+        Ok(Self { board, modifier_state: None })
+    }
+
+    /// Attach a live modifier-state handle so `copy_and_read` can wait for an
+    /// actual Ctrl+Shift release instead of sleeping a flat delay. Wire this
+    /// in wherever the manager used for selection capture is constructed
+    /// (currently `ui::OverlayApp::start_capture`, sourced from the
+    /// process-lifetime watcher spawned in `main.rs`).
+    pub fn with_modifier_state(mut self, modifier_state: ModifierState) -> Self {
+        self.modifier_state = Some(modifier_state);
+        self
     }
 
     /// Read current clipboard text directly. Returns error if clipboard is empty.
@@ -207,15 +275,24 @@ impl ClipboardManager {
         target: Option<i32>,
     ) -> Result<ClipboardContent, ClipboardError> {
         info!("simulating copy to capture selection");
-        // Wait for user to release modifier keys (Ctrl+Shift) after double-tap,
-        // otherwise simulate_copy sends Cmd+Ctrl+Shift+C instead of Cmd+C.
-        thread::sleep(Duration::from_millis(200));
-        // Bail out before simulating if this capture was cancelled or superseded
-        // during the release wait — otherwise Cmd+C would overwrite whatever the
-        // user has copied since with stale selection.
-        if cancel.load(Ordering::SeqCst) {
-            debug!("capture cancelled before copy simulation");
-            return Err(ClipboardError::Cancelled);
+        // Wait for the user to release the hotkey modifiers (Ctrl+Shift) before
+        // simulating the copy, otherwise simulate_copy sends Cmd+Ctrl+Shift+C
+        // instead of Cmd+C. With a live watcher this is usually near-instant:
+        // capture only reaches here via CycleCommit, which the coordinator
+        // already gates on an observed release (see coordinator::resolve_trigger),
+        // so most of the time modifiers are already up and only the short grace
+        // sleep applies. The bounded poll below is a safety net for the rare
+        // case they are still coming up, and the flat fallback below covers
+        // platform builds with no watcher.
+        match self.modifier_state.as_ref().filter(|m| m.is_active()) {
+            Some(state) => wait_for_modifier_release(|| state.combo_held(), cancel)?,
+            None => {
+                thread::sleep(Duration::from_millis(FALLBACK_MODIFIER_SETTLE_MS));
+                if cancel.load(Ordering::SeqCst) {
+                    debug!("capture cancelled before copy simulation");
+                    return Err(ClipboardError::Cancelled);
+                }
+            }
         }
         let baseline = platform.clipboard_change_count();
         platform.simulate_copy(target)?;
@@ -649,5 +726,128 @@ mod tests {
         // Degenerate zero-sized image must not panic or divide by zero.
         assert!(downscale_rgba(&[], 0, 0).is_none());
         assert!(downscale_rgba(&[], 0, 100).is_none());
+    }
+
+    // -- wait_for_modifier_release tests --
+
+    #[test]
+    fn wait_for_modifier_release_fast_path_when_not_held() {
+        // Modifiers already released: no poll loop, just the grace sleep.
+        let cancel = AtomicBool::new(false);
+        let start = Instant::now();
+        let result = wait_for_modifier_release(|| false, &cancel);
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        assert!(elapsed < Duration::from_millis(MODIFIER_RELEASE_TIMEOUT_MS));
+    }
+
+    #[test]
+    fn wait_for_modifier_release_waits_until_released() {
+        // Reports held for the first couple of polls, then released.
+        let calls = std::cell::Cell::new(0u32);
+        let is_held = || {
+            let c = calls.get();
+            calls.set(c + 1);
+            c < 2
+        };
+        let cancel = AtomicBool::new(false);
+        let start = Instant::now();
+        let result = wait_for_modifier_release(is_held, &cancel);
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        // At least 2 poll intervals elapsed, but well short of the hard timeout.
+        assert!(elapsed >= Duration::from_millis(MODIFIER_RELEASE_POLL_INTERVAL_MS * 2));
+        assert!(elapsed < Duration::from_millis(MODIFIER_RELEASE_TIMEOUT_MS));
+    }
+
+    #[test]
+    fn wait_for_modifier_release_times_out_when_stuck_held() {
+        // Never releases: the hard timeout must still bound the wait.
+        let cancel = AtomicBool::new(false);
+        let start = Instant::now();
+        let result = wait_for_modifier_release(|| true, &cancel);
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        assert!(elapsed >= Duration::from_millis(MODIFIER_RELEASE_TIMEOUT_MS));
+        // Bounded: timeout + one poll interval slack + the grace sleep, not
+        // indefinitely longer.
+        assert!(
+            elapsed
+                < Duration::from_millis(
+                    MODIFIER_RELEASE_TIMEOUT_MS
+                        + MODIFIER_RELEASE_POLL_INTERVAL_MS
+                        + MODIFIER_RELEASE_GRACE_MS
+                        + 200
+                )
+        );
+    }
+
+    #[test]
+    fn wait_for_modifier_release_cancelled_during_poll_returns_promptly() {
+        // Stuck held, but cancelled immediately: must not ride out the full
+        // timeout — this is the cancellation-responsiveness guarantee.
+        let cancel = AtomicBool::new(true);
+        let start = Instant::now();
+        let result = wait_for_modifier_release(|| true, &cancel);
+        let elapsed = start.elapsed();
+
+        assert!(matches!(result, Err(ClipboardError::Cancelled)));
+        assert!(elapsed < Duration::from_millis(MODIFIER_RELEASE_TIMEOUT_MS));
+    }
+
+    #[test]
+    fn wait_for_modifier_release_cancelled_after_release_before_grace() {
+        // Released immediately, but cancelled: the post-loop cancel check
+        // must still catch it before the grace sleep.
+        let cancel = AtomicBool::new(true);
+        let result = wait_for_modifier_release(|| false, &cancel);
+        assert!(matches!(result, Err(ClipboardError::Cancelled)));
+    }
+
+    // -- copy_and_read modifier-wait integration tests --
+
+    #[test]
+    fn copy_and_read_fast_path_when_modifiers_already_released() {
+        let _lock = CLIPBOARD_LOCK.lock().unwrap();
+        let mgr = ClipboardManager::new().unwrap();
+        let mock = MockPlatform {
+            copy_result: Ok(()),
+            copy_text: Some("fast selection".into()),
+        };
+
+        let modifier_state = ModifierState::default();
+        modifier_state.set_active_for_test(true);
+        modifier_state.set_combo_held(false);
+        let mut mgr = mgr.with_modifier_state(modifier_state);
+
+        let start = Instant::now();
+        let content = mgr.copy_and_read(&mock, &AtomicBool::new(false), None).unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(content.text.as_deref(), Some("fast selection"));
+        // Fast path: grace sleep + one clipboard poll tick, well under the
+        // old flat 200ms settle delay this replaces.
+        assert!(elapsed < Duration::from_millis(150), "elapsed = {elapsed:?}");
+    }
+
+    #[test]
+    fn copy_and_read_falls_back_to_flat_delay_when_watcher_inactive() {
+        let _lock = CLIPBOARD_LOCK.lock().unwrap();
+        let mgr = ClipboardManager::new().unwrap();
+        let mock = MockPlatform {
+            copy_result: Ok(()),
+            copy_text: Some("selection".into()),
+        };
+
+        // Attached but never marked active (simulates a watcher that failed
+        // to install, or a build with no watcher at all).
+        let modifier_state = ModifierState::default();
+        let mut mgr = mgr.with_modifier_state(modifier_state);
+
+        let content = mgr.copy_and_read(&mock, &AtomicBool::new(false), None).unwrap();
+        assert_eq!(content.text.as_deref(), Some("selection"));
     }
 }

@@ -22,10 +22,14 @@ use std::sync::Arc;
 ///
 /// A watcher that fails to install (e.g. missing permission, unsupported OS)
 /// leaves this permanently `false`, so mode cycling simply stays unavailable
-/// while the existing hotkey trigger keeps working.
+/// while the existing hotkey trigger keeps working. `is_active()` lets other
+/// consumers (e.g. `ClipboardManager::copy_and_read`'s modifier-release wait)
+/// distinguish that degraded "always false" state from a genuine observed
+/// release, since both otherwise look identical through `combo_held()` alone.
 #[derive(Clone, Default)]
 pub struct ModifierState {
     held: Arc<AtomicBool>,
+    active: Arc<AtomicBool>,
 }
 
 impl ModifierState {
@@ -38,15 +42,34 @@ impl ModifierState {
         self.held.load(Ordering::Acquire)
     }
 
+    /// Whether a real OS watcher is installed and feeding this state. `false`
+    /// means `combo_held()` is a permanently-unset default (failed install or
+    /// unsupported platform), not a live signal.
+    pub fn is_active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
+
     /// Update from the raw modifier flags (called by the watcher thread).
     fn set(&self, ctrl: bool, shift: bool) {
         self.held.store(ctrl && shift, Ordering::Release);
+    }
+
+    /// Mark the watcher as successfully installed and live (called once by
+    /// the watcher thread right after it starts receiving real OS events).
+    fn set_active(&self) {
+        self.active.store(true, Ordering::Release);
     }
 
     /// Test-only: directly drive the combo-held state to simulate the OS watcher.
     #[cfg(test)]
     pub(crate) fn set_combo_held(&self, held: bool) {
         self.held.store(held, Ordering::Release);
+    }
+
+    /// Test-only: directly drive the active flag to simulate a live watcher.
+    #[cfg(test)]
+    pub(crate) fn set_active_for_test(&self, active: bool) {
+        self.active.store(active, Ordering::Release);
     }
 }
 
@@ -111,6 +134,7 @@ mod mac {
         // user-input timeout); the loop below re-enables it.
         let re_enable = Arc::new(AtomicBool::new(false));
         let re_enable_cb = re_enable.clone();
+        let state_cb = state.clone();
 
         let tap = match CGEventTap::new(
             CGEventTapLocation::HID,
@@ -121,7 +145,7 @@ mod mac {
                 match etype {
                     CGEventType::FlagsChanged => {
                         let flags = event.get_flags();
-                        state.set(
+                        state_cb.set(
                             flags.contains(CGEventFlags::CGEventFlagControl),
                             flags.contains(CGEventFlags::CGEventFlagShift),
                         );
@@ -153,6 +177,7 @@ mod mac {
         let runloop = CFRunLoop::get_current();
         runloop.add_source(&source, unsafe { kCFRunLoopCommonModes });
         tap.enable();
+        state.set_active();
         info!("modifier watcher active (CGEventTap, FlagsChanged, listen-only)");
 
         // `tap` and `source` must stay alive for the run loop's lifetime — the
@@ -225,7 +250,7 @@ mod win {
     }
 
     pub(super) fn run(state: ModifierState) {
-        STATE.with(|s| *s.borrow_mut() = Some(state));
+        STATE.with(|s| *s.borrow_mut() = Some(state.clone()));
 
         // hmod = null is valid for WH_KEYBOARD_LL on modern Windows; dwthreadid
         // = 0 installs a global (all-threads) hook.
@@ -236,6 +261,7 @@ mod win {
             STATE.with(|s| *s.borrow_mut() = None);
             return;
         }
+        state.set_active();
         info!("modifier watcher active (WH_KEYBOARD_LL, listen-only)");
 
         // The LL hook is delivered through this thread's message queue, so the
