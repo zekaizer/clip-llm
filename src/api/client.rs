@@ -115,6 +115,22 @@ struct ImageUrl {
 #[derive(Deserialize)]
 pub(crate) struct ChatResponse {
     pub choices: Vec<Choice>,
+    /// Token accounting for the request, when the server includes it. Present
+    /// on essentially all OpenAI-compatible non-streaming responses.
+    pub usage: Option<Usage>,
+}
+
+/// Token usage reported by the server for a completed request:
+/// `prompt_tokens` / `completion_tokens` / `total_tokens`. Parsed
+/// opportunistically wherever a server includes it — we do not send
+/// `stream_options: { include_usage: true }` on streaming requests (compat
+/// risk with some servers), so streaming usage is only available when a
+/// server attaches it unprompted, typically on the final chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub(crate) struct Usage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
 }
 
 #[derive(Deserialize)]
@@ -134,7 +150,11 @@ pub(crate) struct ResponseMessage {
 
 #[derive(Deserialize)]
 struct StreamChunk {
+    /// Some servers send a final usage-only chunk with an empty or absent
+    /// `choices` array, so this must not be required.
+    #[serde(default)]
     choices: Vec<StreamChoice>,
+    usage: Option<Usage>,
 }
 
 #[derive(Deserialize)]
@@ -166,6 +186,9 @@ pub(crate) enum SseEvent {
     Reasoning(String),
     /// The server reported why generation stopped (e.g. "stop", "length").
     Finish(String),
+    /// Token usage, when a chunk carries it (some servers attach it to the
+    /// final chunk even without `stream_options.include_usage`).
+    Usage(Usage),
     Done,
 }
 
@@ -258,23 +281,28 @@ impl SseParser {
                 continue;
             }
 
-            if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data)
-                && let Some(choice) = chunk.choices.first()
-            {
-                // Reasoning tokens arrive before the answer; emit first so they
-                // wrap correctly as a leading think block downstream.
-                if let Some(reasoning) = &choice.delta.reasoning_content
-                    && !reasoning.is_empty()
-                {
-                    events.push(SseEvent::Reasoning(reasoning.clone()));
+            if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) {
+                if let Some(choice) = chunk.choices.first() {
+                    // Reasoning tokens arrive before the answer; emit first so
+                    // they wrap correctly as a leading think block downstream.
+                    if let Some(reasoning) = &choice.delta.reasoning_content
+                        && !reasoning.is_empty()
+                    {
+                        events.push(SseEvent::Reasoning(reasoning.clone()));
+                    }
+                    if let Some(content) = &choice.delta.content
+                        && !content.is_empty()
+                    {
+                        events.push(SseEvent::Content(content.clone()));
+                    }
+                    if let Some(reason) = &choice.finish_reason {
+                        events.push(SseEvent::Finish(reason.clone()));
+                    }
                 }
-                if let Some(content) = &choice.delta.content
-                    && !content.is_empty()
-                {
-                    events.push(SseEvent::Content(content.clone()));
-                }
-                if let Some(reason) = &choice.finish_reason {
-                    events.push(SseEvent::Finish(reason.clone()));
+                // Usage may arrive on a chunk with empty/no choices (a
+                // dedicated final usage chunk) as well as alongside content.
+                if let Some(usage) = chunk.usage {
+                    events.push(SseEvent::Usage(usage));
                 }
             }
         }
@@ -994,6 +1022,19 @@ impl LlmClient {
         let chat: ChatResponse =
             serde_json::from_str(&text).map_err(|e| ApiError::MalformedResponse(e.to_string()))?;
 
+        if let Some(usage) = chat.usage {
+            capture.prompt_tokens = Some(usage.prompt_tokens);
+            capture.completion_tokens = Some(usage.completion_tokens);
+            capture.total_tokens = Some(usage.total_tokens);
+            info!(
+                prompt_tokens = usage.prompt_tokens,
+                completion_tokens = usage.completion_tokens,
+                total_tokens = usage.total_tokens,
+                mode = mode.label(),
+                "token usage"
+            );
+        }
+
         let choice = chat
             .choices
             .into_iter()
@@ -1140,6 +1181,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_response_usage_present() {
+        let json = r#"{"choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#;
+        let resp: ChatResponse = serde_json::from_str(json).unwrap();
+        let usage = resp.usage.expect("usage must be parsed");
+        assert_eq!(usage.prompt_tokens, 10);
+        assert_eq!(usage.completion_tokens, 5);
+        assert_eq!(usage.total_tokens, 15);
+    }
+
+    #[test]
+    fn parse_response_usage_absent() {
+        let json = r#"{"choices":[{"message":{"content":"hi"}}]}"#;
+        let resp: ChatResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.usage.is_none());
+    }
+
+    #[test]
     fn classify_vision_status_caches_429() {
         // #63: 429 must be a cacheable `false` so the hot path stops re-probing
         // a rate-limited endpoint instead of re-firing the probe burst.
@@ -1220,6 +1278,48 @@ mod tests {
         let events = p.feed(b"\n");
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], SseEvent::Finish(r) if r == "length"));
+    }
+
+    #[test]
+    fn sse_usage_only_chunk_with_no_choices() {
+        // Some servers send a dedicated final chunk carrying only `usage`,
+        // with an empty (or absent) `choices` array.
+        let mut p = SseParser::new();
+        let events = p.feed(
+            b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n",
+        );
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            SseEvent::Usage(usage) => {
+                assert_eq!(usage.prompt_tokens, 10);
+                assert_eq!(usage.completion_tokens, 5);
+                assert_eq!(usage.total_tokens, 15);
+            }
+            other => panic!("expected Usage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sse_usage_alongside_content_and_finish() {
+        // Some servers attach usage to the same chunk as the final content
+        // and finish_reason instead of a separate trailing chunk.
+        let mut p = SseParser::new();
+        let events = p.feed(
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"end\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}\n",
+        );
+        assert_eq!(events.len(), 3);
+        assert!(matches!(&events[0], SseEvent::Content(s) if s == "end"));
+        assert!(matches!(&events[1], SseEvent::Finish(r) if r == "stop"));
+        assert!(matches!(&events[2], SseEvent::Usage(u) if u.total_tokens == 3));
+    }
+
+    #[test]
+    fn sse_chunk_without_usage_field_emits_no_usage_event() {
+        let mut p = SseParser::new();
+        let events =
+            p.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n");
+        assert_eq!(events.len(), 1);
+        assert!(!events.iter().any(|e| matches!(e, SseEvent::Usage(_))));
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::time::{Instant, SystemTime};
 use tokio::sync::mpsc as tokio_mpsc;
 use tracing::{debug, error, info, trace, warn, Instrument};
 
-use crate::api::client::{LlmClient, SseEvent, SseParser};
+use crate::api::client::{LlmClient, SseEvent, SseParser, Usage};
 use crate::api::response::{extract_first_think_content, strip_think_blocks, ThinkBlockFilter};
 use crate::{ApiError, ClipboardContent, DebugCapture, ProcessMode, RephraseParams, ThinkingMode};
 
@@ -219,6 +219,8 @@ struct StreamState {
     think_notified: bool,
     /// The server's reported stop reason (e.g. `"stop"`, `"length"`), if any.
     finish_reason: Option<String>,
+    /// Token usage, when a chunk carried it (see [`SseEvent::Usage`]).
+    usage: Option<Usage>,
 }
 
 /// Process one parsed SSE event into streaming state, emitting `ThinkStarted`
@@ -273,6 +275,9 @@ fn handle_stream_event(
         SseEvent::Finish(reason) => {
             state.finish_reason = Some(reason);
         }
+        SseEvent::Usage(usage) => {
+            state.usage = Some(usage);
+        }
         SseEvent::Done => return true,
     }
     false
@@ -305,6 +310,18 @@ fn finalize_stream(
     if state.reasoning_open {
         state.full_content.push_str("</think>");
         state.reasoning_open = false;
+    }
+    if let Some(usage) = state.usage {
+        capture.prompt_tokens = Some(usage.prompt_tokens);
+        capture.completion_tokens = Some(usage.completion_tokens);
+        capture.total_tokens = Some(usage.total_tokens);
+        info!(
+            prompt_tokens = usage.prompt_tokens,
+            completion_tokens = usage.completion_tokens,
+            total_tokens = usage.total_tokens,
+            mode = mode.label(),
+            "token usage"
+        );
     }
     finalize_stream_capture(&mut capture, started, raw_sse, debug_error);
     let r = make_complete_response(&state.full_content, mode, request_id, label, incomplete, capture);
@@ -876,6 +893,22 @@ mod tests {
         let mut state = StreamState::default();
         handle_stream_event(SseEvent::Finish("length".into()), &mut state, &tx, 1);
         assert_eq!(state.finish_reason.as_deref(), Some("length"));
+    }
+
+    #[test]
+    fn handle_stream_event_usage_recorded_without_side_effects() {
+        // A usage chunk carries no visible content and must not send anything.
+        let (tx, rx) = mpsc::channel();
+        let mut state = StreamState::default();
+        let usage = Usage {
+            prompt_tokens: 10,
+            completion_tokens: 20,
+            total_tokens: 30,
+        };
+        let done = handle_stream_event(SseEvent::Usage(usage), &mut state, &tx, 1);
+        assert!(!done);
+        assert_eq!(state.usage, Some(usage));
+        assert!(rx.try_recv().is_err(), "usage event must not emit a WorkerResponse");
     }
 
     // -- friendly_status_message tests --

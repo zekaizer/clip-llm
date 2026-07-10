@@ -44,6 +44,13 @@ pub struct DebugCapture {
     /// reason a stream ended early). Present only when something went wrong;
     /// the short user-facing message is shown separately in the overlay.
     pub error: Option<String>,
+    /// Token usage reported by the server, when present. Not every server
+    /// includes this (streaming responses in particular, since we do not
+    /// request `stream_options.include_usage`), so it is `None` more often
+    /// than not.
+    pub prompt_tokens: Option<u32>,
+    pub completion_tokens: Option<u32>,
+    pub total_tokens: Option<u32>,
 }
 
 impl DebugCapture {
@@ -66,6 +73,13 @@ impl DebugCapture {
              endpoint:    POST {endpoint}\n\
              HTTP status: {status}\n"
         );
+        if let (Some(p), Some(c), Some(t)) =
+            (self.prompt_tokens, self.completion_tokens, self.total_tokens)
+        {
+            out.push_str(&format!(
+                "tokens:      prompt={p} completion={c} total={t}\n"
+            ));
+        }
         if let Some(err) = &self.error {
             out.push_str(&format!("\n--- ERROR ---\n{err}\n"));
         }
@@ -117,6 +131,7 @@ mod debug_capture_tests {
             timestamp: Some("2026-06-25T01:02:03.123Z".into()),
             elapsed_ms: Some(1234),
             error: None,
+            ..Default::default()
         };
         let text = cap.to_clipboard_text();
         assert!(text.contains("time:        2026-06-25T01:02:03.123Z"));
@@ -129,6 +144,20 @@ mod debug_capture_tests {
         assert!(text.contains("\"choices\":[]"));
         // No error section when the call succeeded.
         assert!(!text.contains("--- ERROR ---"));
+        // No token-usage line when usage was not captured.
+        assert!(!text.contains("tokens:"));
+    }
+
+    #[test]
+    fn to_clipboard_text_shows_token_usage_when_present() {
+        let cap = DebugCapture {
+            prompt_tokens: Some(120),
+            completion_tokens: Some(45),
+            total_tokens: Some(165),
+            ..Default::default()
+        };
+        let text = cap.to_clipboard_text();
+        assert!(text.contains("tokens:      prompt=120 completion=45 total=165"));
     }
 
     #[test]
