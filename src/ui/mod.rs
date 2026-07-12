@@ -1764,7 +1764,7 @@ mod tests {
     ///
     /// Constructing a real `ClipboardManager` opens a handle onto the actual
     /// system clipboard, shared process-wide with `clipboard::tests` — callers
-    /// must hold `crate::clipboard::test_support::CLIPBOARD_LOCK` for the
+    /// must hold `crate::clipboard::test_support::lock_clipboard()` for the
     /// duration of the test to avoid racing those.
     fn new_test_app() -> (OverlayApp, mpsc::Sender<WorkerResponse>) {
         let (cmd_tx, _cmd_rx) = tokio_mpsc::unbounded_channel();
@@ -1799,7 +1799,7 @@ mod tests {
     /// is current, not to one the state machine has already moved past.
     #[test]
     fn poll_responses_ignores_stale_completion_tally_and_debug() {
-        let _lock = crate::clipboard::test_support::CLIPBOARD_LOCK.lock().unwrap();
+        let _lock = crate::clipboard::test_support::lock_clipboard();
         let (mut app, resp_tx) = new_test_app();
         let ctx = egui::Context::default();
 
@@ -1843,7 +1843,7 @@ mod tests {
     /// bump `req_err` or surface its debug snapshot either.
     #[test]
     fn poll_responses_ignores_stale_error_tally_and_debug() {
-        let _lock = crate::clipboard::test_support::CLIPBOARD_LOCK.lock().unwrap();
+        let _lock = crate::clipboard::test_support::lock_clipboard();
         let (mut app, resp_tx) = new_test_app();
         let ctx = egui::Context::default();
 
@@ -1882,7 +1882,7 @@ mod tests {
     /// tallied and surfaced normally.
     #[test]
     fn poll_responses_records_current_completion_tally_and_debug() {
-        let _lock = crate::clipboard::test_support::CLIPBOARD_LOCK.lock().unwrap();
+        let _lock = crate::clipboard::test_support::lock_clipboard();
         let (mut app, resp_tx) = new_test_app();
         let ctx = egui::Context::default();
 
@@ -1984,7 +1984,7 @@ mod tests {
     /// simulating that a Processing frame's `update_viewport` had already run.
     #[test]
     fn poll_responses_latches_result_geometry_from_last_processing_frame() {
-        let _lock = crate::clipboard::test_support::CLIPBOARD_LOCK.lock().unwrap();
+        let _lock = crate::clipboard::test_support::lock_clipboard();
         let (mut app, resp_tx) = new_test_app();
         let ctx = egui::Context::default();
 
@@ -2021,7 +2021,7 @@ mod tests {
     /// latch a bogus value — it falls back to normal auto-sizing/centering.
     #[test]
     fn poll_responses_no_latch_without_known_processing_geometry() {
-        let _lock = crate::clipboard::test_support::CLIPBOARD_LOCK.lock().unwrap();
+        let _lock = crate::clipboard::test_support::lock_clipboard();
         let (mut app, resp_tx) = new_test_app();
         let ctx = egui::Context::default();
 
@@ -2054,7 +2054,7 @@ mod tests {
     /// comes next.
     #[test]
     fn retry_from_result_clears_stale_latch() {
-        let _lock = crate::clipboard::test_support::CLIPBOARD_LOCK.lock().unwrap();
+        let _lock = crate::clipboard::test_support::lock_clipboard();
         let (mut app, resp_tx) = new_test_app();
         let ctx = egui::Context::default();
 
