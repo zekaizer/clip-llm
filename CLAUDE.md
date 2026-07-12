@@ -58,8 +58,9 @@ The project follows a 7-phase incremental plan defined in [docs/REQUIREMENTS.md]
 - `src/hotkey.rs` — `HotkeyDetector` state machine, `TapAction`, `TapEvent`
 - `src/clipboard.rs` — `ClipboardManager` (read/write, copy simulation + poll)
 - `src/worker.rs` — async LLM request worker thread
-- `src/api/client.rs` — `LlmClient`, `SseParser`, vision probe
+- `src/api/client.rs` — `LlmClient` (`ApiFlavor`: OpenAI chat vs xAI Responses), `SseParser`, vision probe
 - `src/api/response.rs` — `strip_think_blocks`, `ThinkBlockFilter` (streaming)
+- `src/api/auth/` — `TokenProvider` (static key vs OAuth); `oauth.rs` generic refresh grant, `grok.rs` Grok CLI credential-store adapter (`~/.grok/auth.json` read/refresh/write-back)
 - `src/ui/mod.rs` — `OverlayApp` (eframe::App adapter, effect execution, window management)
 - `src/ui/state_machine.rs` — pure state machine (`OverlayState`, `UiEvent`, `UiEffect`), unit-testable
 - `src/ui/overlay.rs` — egui rendering (`render()`, `render_tab_bar()`)
@@ -119,7 +120,19 @@ The UI uses an **event-driven** repaint model to minimize idle CPU/GPU usage:
 
 ## API Integration
 
+Two provider flavors, selected by `[api].provider` (`CLIP_LLM_PROVIDER`):
+
+### `openai` (default)
+
 - Endpoint: OpenAI-compatible `/v1/chat/completions`
 - Response parsing: extract `choices[0].message.content`
 - Think-block stripping: regex `(?s)<think>.*?</think>`, trim whitespace after
 - SSE (Phase 2+): parse `data: {...}` lines, accumulate `choices[0].delta.content`, finalize on `[DONE]`
+
+### `grok-oauth`
+
+- Endpoint: xAI Responses API `https://api.x.ai/v1/responses` (the OAuth surface rejects `/chat/completions`)
+- Auth: piggybacks the official Grok CLI's OAuth session (`~/.grok/auth.json`); tokens auto-refresh via `https://auth.x.ai/oauth2/token` and rotated tokens are written back to the store (xAI rotates the refresh token on every use, so write-back is required to keep the CLI session alive)
+- Request shape: system prompt goes in top-level `instructions` (system items inside `input` are rejected); `store: false`; never request `reasoning.encrypted_content`
+- SSE: typed events, no `[DONE]` — `response.output_text.delta` (content), `response.reasoning_*_text.delta` (reasoning), terminal `response.completed`/`response.incomplete` (mapped in `SseParser` onto the same `SseEvent` vocabulary, token cap → `"length"`)
+- Text-only for now: vision/thinking probes are skipped for this flavor

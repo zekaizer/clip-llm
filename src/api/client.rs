@@ -182,7 +182,7 @@ pub(crate) struct ChatResponse {
 /// The Responses API reports the same accounting as `input_tokens` /
 /// `output_tokens`; the aliases fold both schemas into one struct.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-pub(crate) struct Usage {
+pub struct Usage {
     #[serde(alias = "input_tokens")]
     pub prompt_tokens: u32,
     #[serde(alias = "output_tokens")]
@@ -323,7 +323,7 @@ struct Delta {
 
 /// Parsed SSE event from a streaming response.
 #[derive(Debug, PartialEq)]
-pub(crate) enum SseEvent {
+pub enum SseEvent {
     Content(String),
     /// A reasoning/thinking token from a server-side reasoning parser
     /// (separate `reasoning_content` field). Precedes the answer's `Content`.
@@ -393,7 +393,7 @@ fn handle_responses_stream_event(
 }
 
 /// Line-based SSE parser that buffers incomplete lines across chunks.
-pub(crate) struct SseParser {
+pub struct SseParser {
     /// Accumulates complete UTF-8 text lines waiting for newline processing.
     buffer: String,
     /// Carry-over bytes for incomplete multi-byte UTF-8 sequences at chunk boundaries.

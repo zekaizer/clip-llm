@@ -17,10 +17,23 @@
 # Connection settings. Each mirrors a CLIP_LLM_* environment variable; when both
 # are present the environment variable wins (env var > config > built-in default).
 [api]
+# provider = "openai"                     # CLIP_LLM_PROVIDER — which API the endpoint speaks:
+                                          #   "openai"     (default) any OpenAI-compatible /chat/completions
+                                          #                server (vLLM, Groq, Google, ...); needs endpoint,
+                                          #                model, api_key below.
+                                          #   "grok-oauth" xAI's Responses API using the Grok CLI's OAuth
+                                          #                sign-in: run `grok` once and log in, then only
+                                          #                `model` is needed (e.g. "grok-4.5"); endpoint
+                                          #                defaults to https://api.x.ai/v1 and api_key is
+                                          #                ignored. Tokens are read from ~/.grok/auth.json
+                                          #                and auto-refreshed (rotated tokens are written
+                                          #                back, so the CLI session keeps working).
 endpoint  = "http://localhost:8000/v1"   # CLIP_LLM_API_ENDPOINT
 model     = "MiniMaxAI/MiniMax-M2.5"      # CLIP_LLM_MODEL
 streaming = true                          # set false to disable SSE (like CLIP_LLM_NO_STREAM)
 # api_key = "..."                         # CLIP_LLM_API_KEY (plain text — keep the file private; omit if unused)
+# auth_file = "~/.grok/auth.json"         # grok-oauth only: override the credential-store path (no ~ expansion;
+                                          # use an absolute path)
 
 # Custom HTTP headers (like CLIP_LLM_CUSTOM_HEADERS). One key = value per line.
 [api.headers]
