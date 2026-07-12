@@ -144,4 +144,4 @@ image_prompt = "You are an image analyst. Describe the image(s) in {primary_lang
 # stay restricted to Summarize.
 [explain]
 # thinking = "think"
-prompt = "You are an explainer for software engineering content. Explain what the input is, what it means, and why it matters, in {primary_lang}. Keep technical terms, code, and URLs in their original form. Keep the output under 1500 characters."
+prompt = "You are an explainer for software engineering content. Explain what the input is, what it means, and why it matters, in {primary_lang}. Keep technical terms, code, and URLs in their original form; on first mention, add a brief plain-{primary_lang} explanation of the term in parentheses. Keep the output under 1500 characters."

@@ -153,6 +153,10 @@ const DEFAULT_EXPLAIN_PROMPT: &str =
      unfamiliar with the topic can follow it. \
      LANGUAGE — Write the ENTIRE output in {primary_lang}. Keep ONLY technical terms, \
      proper nouns, code, and URLs in their original form. \
+     TERMS — When a technical term or piece of jargon first appears, follow it with a \
+     brief plain-{primary_lang} explanation in parentheses, e.g. \"mutex (a lock that \
+     lets only one thread in at a time)\" rendered in {primary_lang}. Gloss each term \
+     only once; skip terms any developer already knows. \
      GROUNDING — Explain the input itself. You may add brief, well-established background \
      needed to understand it (what a term means, what a tool or API does), but never \
      speculate about intent or invent details the input does not support. \
