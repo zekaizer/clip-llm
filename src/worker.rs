@@ -140,6 +140,12 @@ fn friendly_api_error(e: &ApiError) -> String {
                 .to_string()
         }
         ApiError::Cancelled => "Request cancelled.".to_string(),
+        // Auth messages are written user-facing at the source (they name the
+        // recovery step, e.g. re-running the provider's CLI login).
+        ApiError::Auth(message) => message.clone(),
+        ApiError::InvalidConfig(message) => {
+            format!("Configuration error: {message}. Fix it in config.toml.")
+        }
     }
 }
 

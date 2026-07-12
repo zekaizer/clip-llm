@@ -448,6 +448,18 @@ pub enum ApiError {
 
     #[error("request cancelled")]
     Cancelled,
+
+    /// Authentication could not produce a usable bearer token (e.g. an OAuth
+    /// refresh was rejected, or the provider's credential file is missing or
+    /// unreadable). The message is user-facing and names the recovery step.
+    #[error("authentication failed: {0}")]
+    Auth(String),
+
+    /// A configured setting has an unusable value (e.g. an unknown
+    /// `[api].provider` name). Unlike [`ApiError::MissingConfig`], the setting
+    /// is present but wrong.
+    #[error("invalid setting: {0}")]
+    InvalidConfig(String),
 }
 
 #[derive(Debug, Error)]
