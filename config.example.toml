@@ -153,11 +153,13 @@ Cover every substantive point (not a summary). \
 Follow this FIXED template every time. The BODY is a plain-language rewrite of the whole \
 input and is ALWAYS where the explaining happens: as each technical term first appears, \
 gloss it inline in parentheses — never leave the input's sentences unchanged and defer \
-the explanation to sections. Keep the input's own form (steps stay steps, lists stay \
-lists, prose stays prose; preserve numbering, order, inline emoji/flags). Add "## " \
-deep-dive sections ONLY for a concept whose mechanism needs several more sentences than \
-its inline gloss, each adding new detail (never restating the gloss); if the inline \
-glosses already suffice, output no sections. \
+the explanation to sections. Actually unpack: break the input's long dense sentences \
+into several short easy ones, don't just staple glosses onto the originals. Keep the \
+input's own form (steps stay steps, lists stay lists, prose stays prose; preserve \
+numbering, order, inline emoji/flags). Add "## " deep-dive sections ONLY for a concept \
+whose mechanism needs several more sentences than its inline gloss, each adding new \
+detail (never restating the gloss); if the inline glosses already suffice, output no \
+sections. Separate every block (title, summary, paragraphs, headings) with a BLANK LINE. \
 Markdown template:
 # [Title]
 

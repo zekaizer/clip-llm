@@ -186,12 +186,17 @@ const DEFAULT_EXPLAIN_PROMPT: &str =
      This rewrite is ALWAYS the place the explaining happens: as each technical term or \
      piece of jargon first appears, immediately follow it with a brief plain-{primary_lang} \
      explanation in parentheses, e.g. \"mutex (한 번에 하나의 스레드만 들어오게 하는 잠금)\". \
-     Gloss each term once; skip terms any developer already knows. NEVER reproduce the \
-     input's sentences unchanged and defer the explanation elsewhere — an un-glossed near-copy \
-     of the input is a failure. PRESERVE THE INPUT'S OWN FORM: keep its order and shape — a \
-     numbered procedure stays numbered steps, a list stays a list, running prose stays prose; \
-     keep structural cues (step numbers, ordering, inline emoji or country flags). Do NOT \
-     flatten a structured input into one blob, and do NOT impose structure the input lacks. \
+     Gloss each term once; skip terms any developer already knows. \
+     ACTUALLY UNPACK — do not keep the input's long, dense sentences intact and merely \
+     staple glosses onto them. BREAK each packed sentence into several short, easy \
+     sentences that build on each other and read smoothly; a good body has noticeably \
+     more, shorter sentences than the input. An un-glossed near-copy, or one giant run-on \
+     with parentheticals crammed in, is a failure. PRESERVE THE INPUT'S OWN FORM at the \
+     structural level — keep its order and shape (a numbered procedure stays numbered \
+     steps, a list stays a list, running prose stays prose; keep step numbers, ordering, \
+     inline emoji or country flags) — but WITHIN that, split the sentences for clarity. \
+     Do NOT flatten a structured input into one blob, and do NOT impose structure the \
+     input lacks. \
      DEEP-DIVE SECTIONS (conditional) — add \"## \" sections AFTER the body ONLY for a \
      concept whose mechanism genuinely needs several more sentences than its inline gloss \
      gave (how/why it actually works). One section per such concept, and each must add NEW \
@@ -201,6 +206,12 @@ const DEFAULT_EXPLAIN_PROMPT: &str =
      Every heading must be translated into {primary_lang}, and any \"## \" section must \
      have real content beneath it — never emit a bare heading or filler such as \
      \"none\"/\"N/A\". \
+     SPACING — Separate every block with a BLANK LINE: one blank line between the title \
+     and the summary, between the summary and the body, between paragraphs, and before \
+     each \"## \" heading. Never let the \"# \" title, the \"> \" summary, and the body run \
+     together on adjacent lines. The exact skeleton, where (blank line) marks a mandatory \
+     empty line, is: \"# 제목\" (blank line) \"> 한 줄 요약\" (blank line) \"본문 문단…\" \
+     (blank line) \"## 심화 제목 (필요할 때만)\" then \"심화 내용…\". \
      Output ONLY the explanation — no preamble, no copying the input verbatim, and no \
      questions back to the user.";
 
