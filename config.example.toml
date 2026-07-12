@@ -28,7 +28,9 @@
                                           #                ignored. Tokens are read from ~/.grok/auth.json
                                           #                and auto-refreshed (rotated tokens are written
                                           #                back, so the CLI session keeps working).
-endpoint  = "http://localhost:8000/v1"   # CLIP_LLM_API_ENDPOINT
+endpoint  = "http://localhost:8000/v1"   # CLIP_LLM_API_ENDPOINT — "openai" provider only. For
+                                          # grok-oauth REMOVE/comment out this line (a set value
+                                          # overrides the https://api.x.ai/v1 default).
 model     = "MiniMaxAI/MiniMax-M2.5"      # CLIP_LLM_MODEL
 streaming = true                          # set false to disable SSE (like CLIP_LLM_NO_STREAM)
 # api_key = "..."                         # CLIP_LLM_API_KEY (plain text — keep the file private; omit if unused)

@@ -104,10 +104,22 @@ fn parse_expires_at(v: &Value) -> Option<SystemTime> {
 /// Extract tokens from one candidate object, if it holds an access token.
 fn parse_entry(obj: &Value) -> Option<TokenState> {
     let access_token = first_string(obj, &["key", "access_token", "token"])?;
+    // Absent expiry = a long-lived legacy token (never refresh). An expiry
+    // that is PRESENT but unreadable must not degrade into that same "never
+    // refresh" — treat it as already expired so the token is refreshed (or
+    // re-read from disk) up front instead of silently 401ing forever once it
+    // really lapses.
+    let expires_at = obj.get("expires_at").map(|v| match parse_expires_at(v) {
+        Some(t) => t,
+        None => {
+            warn!("unreadable expires_at in Grok credential store ({v}); treating the token as already expired");
+            UNIX_EPOCH
+        }
+    });
     Some(TokenState {
         access_token,
         refresh_token: first_string(obj, &["refresh_token", "refresh"]),
-        expires_at: obj.get("expires_at").and_then(parse_expires_at),
+        expires_at,
     })
 }
 
@@ -466,6 +478,26 @@ mod tests {
             store.tokens.expires_at,
             Some(UNIX_EPOCH + Duration::from_secs(1_752_345_600))
         );
+    }
+
+    #[test]
+    fn parse_unreadable_expiry_means_already_expired() {
+        // "Present but unparseable" must trigger an up-front refresh, not
+        // degrade into the legacy "no expiry = never refresh" behavior.
+        for bad in [
+            serde_json::json!("2026-07-12T15:19:19+00:00"), // offset form, not Z
+            serde_json::json!(1_752_345_600.5),             // float unix time
+            serde_json::json!(true),
+        ] {
+            let doc = serde_json::json!({
+                "token": "a", "client_id": "cid", "expires_at": bad
+            });
+            let store = parse_store(&doc).unwrap();
+            assert_eq!(store.tokens.expires_at, Some(UNIX_EPOCH), "value: {bad}");
+        }
+        // Genuinely absent stays None (long-lived legacy token).
+        let doc = serde_json::json!({"token": "a", "client_id": "cid"});
+        assert_eq!(parse_store(&doc).unwrap().tokens.expires_at, None);
     }
 
     #[test]

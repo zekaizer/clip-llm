@@ -148,6 +148,16 @@ struct ResponsesRequest<'a> {
     store: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+    /// Thinking control. Omitted for the server default (full reasoning);
+    /// `effort: "none"` disables thinking on models that allow it (probed:
+    /// grok-4.3 accepts it, grok-4.5 rejects it with HTTP 400).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<ResponsesReasoning>,
+}
+
+#[derive(Serialize)]
+struct ResponsesReasoning {
+    effort: &'static str,
 }
 
 #[derive(Serialize)]
@@ -307,6 +317,8 @@ struct ResponsesStreamEvent {
     delta: Option<String>,
     /// The final response object on terminal events.
     response: Option<ResponsesResponse>,
+    /// Error detail on top-level `error` events.
+    message: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -333,6 +345,10 @@ pub enum SseEvent {
     /// Token usage, when a chunk carries it (some servers attach it to the
     /// final chunk even without `stream_options.include_usage`).
     Usage(Usage),
+    /// The server reported the request failed mid-stream (Responses-API
+    /// `response.failed` / `error` events), with its stated reason. Terminal:
+    /// any partial text should be presented with this reason as the banner.
+    Fatal(String),
     Done,
 }
 
@@ -343,9 +359,9 @@ pub enum SseEvent {
 ///   `Done` (the Responses stream has no `[DONE]` sentinel — the terminal
 ///   event IS the end of the stream, with `incomplete`'s token-cap reason
 ///   translated to the chat-style `"length"`);
-/// - `response.failed` / `error` deliberately emit nothing: without a `Done`,
-///   the worker's end-of-stream path reports the reply as cut short and keeps
-///   any partial text.
+/// - `response.failed` / `error` -> `Fatal` carrying the server's stated
+///   reason, so the worker can surface the real cause (matching what the
+///   non-streaming path reports for the identical failure).
 fn handle_responses_stream_event(
     event: ResponsesStreamEvent,
     raw_data: &str,
@@ -385,6 +401,14 @@ fn handle_responses_stream_event(
         }
         "response.failed" | "error" => {
             warn!("responses stream reported failure: {raw_data}");
+            let reason = event
+                .response
+                .as_ref()
+                .and_then(|r| r.error.as_ref())
+                .and_then(|e| e.message.clone())
+                .or(event.message)
+                .unwrap_or_else(|| "unspecified server error".to_owned());
+            events.push(SseEvent::Fatal(reason));
         }
         // Structural events (response.created, output_item.added, ...) carry
         // no text; ignore them.
@@ -548,6 +572,10 @@ pub enum ThinkingControlMethod {
     ChatTemplateKwargs,
     /// Model supports `/think` and `/no_think` tags in the system prompt.
     SystemPromptTag,
+    /// Model accepts the Responses-API `reasoning.effort` parameter with
+    /// `"none"`, so thinking can be disabled per request (grok-oauth flavor;
+    /// grok-4.3 accepts it, grok-4.5 rejects it).
+    ReasoningEffort,
     /// Model does not support controllable thinking.
     Unsupported,
 }
@@ -735,6 +763,15 @@ impl LlmClient {
                 RESPONSES_PATH,
             ),
         };
+        // A leftover [api].endpoint (e.g. a vLLM URL from a previous provider)
+        // silently overrides the xAI default and every request then fails
+        // against the wrong server — make that visible at startup.
+        if flavor == ApiFlavor::GrokResponses && base != GROK_DEFAULT_ENDPOINT {
+            warn!(
+                "grok-oauth: using custom endpoint {base} instead of {GROK_DEFAULT_ENDPOINT} — \
+                 remove [api].endpoint from config.toml unless this is intentional"
+            );
+        }
         let endpoint = format!("{}{}", base.trim_end_matches('/'), path);
         let model = require_setting(
             env::var("CLIP_LLM_MODEL").ok(),
@@ -943,19 +980,18 @@ impl LlmClient {
             return cached;
         }
 
-        // Grok models reason server-side unconditionally (deltas arrive as
-        // reasoning events); the chat-completions thinking toggles probed
-        // below do not exist on the Responses surface.
-        if inner.flavor != ApiFlavor::OpenAiChat {
-            info!("thinking probe skipped for {:?}: no client-side thinking control", inner.flavor);
-            let _ = inner.thinking_control.set(ThinkingControlMethod::Unsupported);
-            return ThinkingControlMethod::Unsupported;
-        }
-
         info!("probing model thinking support...");
 
-        // Step 1: try chat_template_kwargs with enable_thinking=true
-        let method = match self.probe_thinking_kwargs(inner).await {
+        // The chat-completions toggles below do not exist on the Responses
+        // surface; there the lever is `reasoning.effort = "none"`, accepted
+        // model-dependently, so it gets its own probe.
+        let probe = if inner.flavor == ApiFlavor::GrokResponses {
+            self.probe_reasoning_effort(inner).await
+        } else {
+            // Step 1: try chat_template_kwargs with enable_thinking=true
+            self.probe_thinking_kwargs(inner).await
+        };
+        let method = match probe {
             Some(method) => method,
             None => return ThinkingControlMethod::Unsupported, // network error, don't cache
         };
@@ -963,6 +999,74 @@ impl LlmClient {
         info!("thinking control method: {method:?}");
         let _ = inner.thinking_control.set(method);
         method
+    }
+
+    /// Responses-API flavor: probe whether the model accepts
+    /// `reasoning: { effort: "none" }` (the only thinking control that
+    /// surface offers). Returns `None` on network error or an inconclusive
+    /// status (caller should not cache).
+    async fn probe_reasoning_effort(
+        &self,
+        inner: &LlmClientInner,
+    ) -> Option<ThinkingControlMethod> {
+        let body = ResponsesRequest {
+            model: &inner.model,
+            instructions: "Reply with the single word: hi",
+            input: vec![ResponsesInputItem {
+                role: "user",
+                content: vec![ResponsesContentPart::Text { text: "hi" }],
+            }],
+            temperature: 0.0,
+            // The Responses API rejects values below 16.
+            max_output_tokens: 16,
+            store: false,
+            stream: None,
+            reasoning: Some(ResponsesReasoning { effort: "none" }),
+        };
+
+        if tracing::enabled!(tracing::Level::TRACE)
+            && let Ok(json) = serde_json::to_string_pretty(&body)
+        {
+            trace!("reasoning effort probe request:\n{json}");
+        }
+        let req = match inner.apply_auth(inner.client.post(&inner.endpoint).json(&body)).await {
+            Ok(req) => req,
+            Err(e) => {
+                warn!("reasoning effort probe auth failed (will retry): {e}");
+                return None;
+            }
+        };
+
+        match req.send().await {
+            Ok(resp) if resp.status().is_success() => {
+                trace!("reasoning effort probe response: HTTP {}", resp.status().as_u16());
+                Some(ThinkingControlMethod::ReasoningEffort)
+            }
+            Ok(resp) if resp.status().as_u16() == 400 || resp.status().as_u16() == 422 => {
+                // The server understood and rejected effort "none" — thinking
+                // is always-on for this model (e.g. grok-4.5). Worth caching.
+                trace!("reasoning effort probe rejected: HTTP {}", resp.status().as_u16());
+                Some(ThinkingControlMethod::Unsupported)
+            }
+            Ok(resp) if resp.status().as_u16() == 429 => {
+                // Rate limited: cache the conservative default for the session
+                // rather than re-probing on every request (#63).
+                warn!("reasoning effort probe rate limited (HTTP 429); assuming no thinking control for this session");
+                Some(ThinkingControlMethod::Unsupported)
+            }
+            Ok(resp) => {
+                // Other transient or ambiguous (401/403/404/5xx): don't cache, retry.
+                warn!(
+                    "reasoning effort probe inconclusive (HTTP {}); will retry",
+                    resp.status().as_u16()
+                );
+                None
+            }
+            Err(e) => {
+                warn!("reasoning effort probe failed (will retry): {e}");
+                None
+            }
+        }
     }
 
     /// Try `chat_template_kwargs: { enable_thinking: true }`.
@@ -1162,6 +1266,25 @@ impl LlmClient {
             (ThinkingMode::NoThink, ThinkingControlMethod::SystemPromptTag) => {
                 (Some("/no_think\n"), None)
             }
+            // Responses-API control; expressed via resolve_reasoning instead
+            // of the chat-completions knobs this function returns.
+            (_, ThinkingControlMethod::ReasoningEffort) => (None, None),
+        }
+    }
+
+    /// Resolve thinking mode into the Responses-API `reasoning` parameter.
+    /// Only `NoThink` on a model that accepts `effort: "none"` produces a
+    /// value; `Think` omits the field so the server default (full reasoning)
+    /// applies.
+    fn resolve_reasoning(
+        thinking_mode: ThinkingMode,
+        control: ThinkingControlMethod,
+    ) -> Option<ResponsesReasoning> {
+        match (thinking_mode, control) {
+            (ThinkingMode::NoThink, ThinkingControlMethod::ReasoningEffort) => {
+                Some(ResponsesReasoning { effort: "none" })
+            }
+            _ => None,
         }
     }
 
@@ -1257,6 +1380,7 @@ impl LlmClient {
                     max_output_tokens: max_tokens,
                     store: false,
                     stream: if stream { Some(true) } else { None },
+                    reasoning: Self::resolve_reasoning(thinking_mode, thinking_control),
                 };
                 (
                     client.post(&inner.endpoint).json(&body),
@@ -1370,7 +1494,8 @@ impl LlmClient {
 
         let resp = self
             .build_and_send(content, mode, rephrase_params, thinking_mode, false, capture)
-            .await?;
+            .await
+            .map_err(|e| self.map_grok_rejection(e))?;
         let text = resp.text().await?;
         // Record the raw body before parsing, so even a parse failure exposes it.
         capture.response_raw = Some(text.clone());
@@ -1484,6 +1609,31 @@ impl LlmClient {
         debug!("sending streaming request to {}", inner.endpoint);
         self.build_and_send(content, mode, rephrase_params, thinking_mode, true, capture)
             .await
+            .map_err(|e| self.map_grok_rejection(e))
+    }
+
+    /// For the grok-oauth flavor, a 401/403 rejection means the OAuth session
+    /// or the xAI subscription is the problem — there is no api_key to check,
+    /// so the generic HTTP-status guidance would mislead. Other flavors and
+    /// errors pass through unchanged.
+    fn map_grok_rejection(&self, e: ApiError) -> ApiError {
+        if self.0.flavor != ApiFlavor::GrokResponses {
+            return e;
+        }
+        if let ApiError::Http(err) = &e
+            && let Some(status) = err.status()
+            && matches!(
+                status,
+                reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+            )
+        {
+            return ApiError::Auth(format!(
+                "xAI rejected the Grok sign-in (HTTP {}). Run `grok` in a terminal to sign in \
+                 again, or check your xAI subscription.",
+                status.as_u16()
+            ));
+        }
+        e
     }
 }
 
@@ -2013,6 +2163,7 @@ mod tests {
             max_output_tokens: 1024,
             store: false,
             stream: Some(true),
+            reasoning: None,
         };
         let json = serde_json::to_value(&body).unwrap();
         // The system prompt must be TOP-LEVEL `instructions` (xAI rejects
@@ -2026,10 +2177,73 @@ mod tests {
         assert_eq!(json["stream"], true);
         // Never request encrypted-reasoning replay (xAI OAuth rejects it).
         assert!(json.get("include").is_none());
+        // Default thinking (reasoning: None) omits the field entirely.
+        assert!(json.get("reasoning").is_none());
         // Non-streaming requests omit the stream field entirely.
-        let body = ResponsesRequest { stream: None, ..body };
+        let body = ResponsesRequest {
+            stream: None,
+            reasoning: Some(ResponsesReasoning { effort: "none" }),
+            ..body
+        };
         let json = serde_json::to_value(&body).unwrap();
         assert!(json.get("stream").is_none());
+        assert_eq!(json["reasoning"]["effort"], "none");
+    }
+
+    #[test]
+    fn resolve_reasoning_mapping() {
+        // NoThink on a model that accepts effort "none" -> send it.
+        assert!(matches!(
+            LlmClient::resolve_reasoning(
+                ThinkingMode::NoThink,
+                ThinkingControlMethod::ReasoningEffort,
+            ),
+            Some(ResponsesReasoning { effort: "none" })
+        ));
+        // Think -> omit the field so the server default (full reasoning) applies.
+        assert!(LlmClient::resolve_reasoning(
+            ThinkingMode::Think,
+            ThinkingControlMethod::ReasoningEffort,
+        )
+        .is_none());
+        // A model without the control never gets the field (grok-4.5 400s on it).
+        assert!(LlmClient::resolve_reasoning(
+            ThinkingMode::NoThink,
+            ThinkingControlMethod::Unsupported,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn resolve_thinking_reasoning_effort_returns_chat_noops() {
+        // The Responses-API control must not leak chat-completions knobs.
+        let (prefix, kwargs) = LlmClient::resolve_thinking(
+            ThinkingMode::NoThink,
+            ThinkingControlMethod::ReasoningEffort,
+        );
+        assert!(prefix.is_none());
+        assert!(kwargs.is_none());
+    }
+
+    #[test]
+    fn sse_responses_failed_emits_fatal_with_reason() {
+        // response.failed carries the reason in response.error.message.
+        let mut p = SseParser::new();
+        let events = p.feed(
+            b"data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"quota exceeded\"}}}\n",
+        );
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Fatal(r) if r == "quota exceeded"));
+
+        // A top-level error event carries it in `message`.
+        let events = p.feed(b"data: {\"type\":\"error\",\"message\":\"boom\"}\n");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Fatal(r) if r == "boom"));
+
+        // No detail anywhere still yields a terminal Fatal.
+        let events = p.feed(b"data: {\"type\":\"response.failed\"}\n");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Fatal(r) if r == "unspecified server error"));
     }
 
     #[test]
@@ -2076,18 +2290,6 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert!(matches!(&events[0], SseEvent::Finish(r) if r == "length"));
         assert!(matches!(&events[1], SseEvent::Done));
-    }
-
-    #[test]
-    fn sse_responses_failed_emits_nothing() {
-        // No Done: the worker's EOF path then reports the stream as cut short
-        // instead of presenting a failure as a clean completion.
-        let mut p = SseParser::new();
-        let events = p.feed(
-            b"data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\"}}\n\
-              data: {\"type\":\"error\",\"message\":\"boom\"}\n",
-        );
-        assert!(events.is_empty());
     }
 
     #[test]
