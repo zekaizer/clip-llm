@@ -194,9 +194,15 @@ const DEFAULT_EXPLAIN_PROMPT: &str =
      sections for the sake of it. \
      FORMAT — Markdown, in this exact order: a Title (\"# \" heading) naming the topic, \
      then a one-line summary (\"> \" blockquote), then part (1) rewritten in the input's \
-     own form, then part (2)'s optional \"## \" sections if needed. Every heading must be \
-     translated into {primary_lang}, and any \"## \" section must have real content \
-     beneath it — never emit a bare heading or filler such as \"none\"/\"N/A\". \
+     own form, then part (2)'s optional \"## \" sections if needed. \
+     The \"> \" summary is a SHORT distilled gist in your own words — at most one plain \
+     sentence capturing only the single main point. It must NOT copy or lightly \
+     paraphrase the input's wording, and must NOT try to restate every clause; a summary \
+     that is nearly as long as the opening sentence, or that reuses its phrasing, is \
+     wrong. Strip the jargon here — save the term glosses for the body. \
+     Every heading must be translated into {primary_lang}, and any \"## \" section must \
+     have real content beneath it — never emit a bare heading or filler such as \
+     \"none\"/\"N/A\". \
      Output ONLY the explanation — no preamble, no copying the input verbatim, and no \
      questions back to the user.";
 

@@ -159,7 +159,7 @@ itemized "## " deep-dive sections — skip them when the rewrite is already clea
 Markdown template:
 # [Title]
 
-> One-line gist
+> One-line gist — a short distilled point in your own words, NOT a copy or paraphrase of the input's opening sentence
 
 [plain-language rewrite of the whole input, keeping its original form]
 
