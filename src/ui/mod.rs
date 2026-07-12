@@ -847,6 +847,7 @@ impl OverlayApp {
                     let thinking_label = match thinking_method {
                         Tcm::ChatTemplateKwargs => "kwargs",
                         Tcm::SystemPromptTag => "prompt tag",
+                        Tcm::ReasoningEffort => "reasoning effort",
                         Tcm::Unsupported => "unsupported",
                     };
                     crate::platform::update_tray_probe(vision_supported, thinking_label);

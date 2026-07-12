@@ -140,6 +140,12 @@ fn friendly_api_error(e: &ApiError) -> String {
                 .to_string()
         }
         ApiError::Cancelled => "Request cancelled.".to_string(),
+        // Auth messages are written user-facing at the source (they name the
+        // recovery step, e.g. re-running the provider's CLI login).
+        ApiError::Auth(message) => message.clone(),
+        ApiError::InvalidConfig(message) => {
+            format!("Configuration error: {message}. Fix it in config.toml.")
+        }
     }
 }
 
@@ -221,6 +227,18 @@ struct StreamState {
     finish_reason: Option<String>,
     /// Token usage, when a chunk carried it (see [`SseEvent::Usage`]).
     usage: Option<Usage>,
+    /// Server-reported mid-stream failure reason (see [`SseEvent::Fatal`]).
+    fatal: Option<String>,
+}
+
+/// Reason a finished stream should be presented as incomplete: a server-
+/// reported failure wins, then a token-limit stop reason. `None` = clean.
+fn stream_incomplete_reason(state: &StreamState) -> Option<String> {
+    if let Some(reason) = &state.fatal {
+        return Some(format!("The server reported an error: {reason}"));
+    }
+    (state.finish_reason.as_deref() == Some("length"))
+        .then(|| friendly_api_error(&ApiError::Truncated))
 }
 
 /// Process one parsed SSE event into streaming state, emitting `ThinkStarted`
@@ -277,6 +295,14 @@ fn handle_stream_event(
         }
         SseEvent::Usage(usage) => {
             state.usage = Some(usage);
+        }
+        SseEvent::Fatal(reason) => {
+            // Terminal like Done, but the completion must carry the server's
+            // stated reason (partial text shows with it as the banner; no
+            // text at all becomes an error with it as the message).
+            warn!("worker: server reported stream failure: {reason}");
+            state.fatal = Some(reason);
+            return true;
         }
         SseEvent::Done => return true,
     }
@@ -465,15 +491,15 @@ async fn run_streaming(
                 for event in parser.feed(&bytes) {
                     let done = handle_stream_event(event, &mut state, &resp_tx, request_id);
                     if done {
-                        // [DONE] received. "length" means generation hit
-                        // max_tokens — show the partial with a truncation banner
-                        // instead of dropping it (#60, #65).
+                        // Terminal event received. "length" means generation
+                        // hit max_tokens, a Fatal carries a server-reported
+                        // failure — show the partial with the reason as a
+                        // banner instead of dropping it (#60, #65).
                         debug!(
                             "SSE stream done, full content ({} chars):\n{}",
                             state.full_content.len(), state.full_content
                         );
-                        let incomplete = (state.finish_reason.as_deref() == Some("length"))
-                            .then(|| friendly_api_error(&ApiError::Truncated));
+                        let incomplete = stream_incomplete_reason(&state);
                         finalize_stream(
                             &mut state, mode, request_id, "stream complete",
                             incomplete.clone(), incomplete.as_deref(),
@@ -489,8 +515,7 @@ async fn run_streaming(
                 // parse). A flushed [DONE] finalizes exactly like the inline arm.
                 for event in parser.flush() {
                     if handle_stream_event(event, &mut state, &resp_tx, request_id) {
-                        let incomplete = (state.finish_reason.as_deref() == Some("length"))
-                            .then(|| friendly_api_error(&ApiError::Truncated));
+                        let incomplete = stream_incomplete_reason(&state);
                         finalize_stream(
                             &mut state, mode, request_id, "stream complete (flushed)",
                             incomplete.clone(), incomplete.as_deref(),
@@ -888,6 +913,37 @@ mod tests {
             rx.try_recv().unwrap(),
             WorkerResponse::StreamDelta { text, .. } if text == "answer"
         ));
+    }
+
+    #[test]
+    fn handle_stream_event_fatal_terminates_with_reason() {
+        let (tx, rx) = mpsc::channel();
+        let mut state = StreamState::default();
+        state.full_content.push_str("partial");
+        let done =
+            handle_stream_event(SseEvent::Fatal("quota exceeded".into()), &mut state, &tx, 1);
+        assert!(done, "Fatal must terminate the stream like Done");
+        assert!(rx.try_recv().is_err(), "Fatal itself must not emit a WorkerResponse");
+        // The failure reason wins over any finish_reason for the banner.
+        state.finish_reason = Some("stop".into());
+        let reason = stream_incomplete_reason(&state).expect("must be incomplete");
+        assert!(reason.contains("quota exceeded"), "{reason}");
+    }
+
+    #[test]
+    fn stream_incomplete_reason_priorities() {
+        // Clean stop -> None.
+        let mut state = StreamState {
+            finish_reason: Some("stop".into()),
+            ..Default::default()
+        };
+        assert!(stream_incomplete_reason(&state).is_none());
+        // Token cap -> truncation message.
+        state.finish_reason = Some("length".into());
+        assert!(stream_incomplete_reason(&state).is_some());
+        // Server failure outranks the token cap.
+        state.fatal = Some("boom".into());
+        assert!(stream_incomplete_reason(&state).unwrap().contains("boom"));
     }
 
     #[test]

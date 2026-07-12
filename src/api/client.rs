@@ -7,10 +7,17 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 use tracing::{debug, info, trace, warn};
 
+use crate::api::auth::{grok::GrokCliAuth, TokenProvider};
 use crate::{ApiError, ClipboardContent, DebugCapture, ProcessMode, RephraseParams, ThinkingMode};
 
 // Defaults — overridable via environment variables.
 const CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
+/// Request path for the Responses-API flavor (`grok-oauth` provider).
+const RESPONSES_PATH: &str = "/responses";
+/// Default base URL for the `grok-oauth` provider. Unlike the OpenAI-chat
+/// flavor (whose endpoint is deployment-specific and therefore required),
+/// Grok subscription OAuth always talks to xAI's public API.
+const GROK_DEFAULT_ENDPOINT: &str = "https://api.x.ai/v1";
 const TEMPERATURE: f64 = 0.1;
 const MAX_TOKENS: u32 = 16384;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
@@ -120,6 +127,52 @@ struct ImageUrl {
     url: String,
 }
 
+// -- Request types (Responses API schema, used by the grok-oauth provider) --
+//
+// The xAI OAuth surface accepts only the Responses API (`/v1/responses`), not
+// chat/completions. Two xAI-specific constraints shape this: the system
+// prompt must be the TOP-LEVEL `instructions` field (system/developer items
+// inside `input` are rejected), and encrypted-reasoning replay must not be
+// requested (no `include`) — irrelevant here anyway since every request is a
+// stateless one-shot (`store: false`).
+
+#[derive(Serialize)]
+struct ResponsesRequest<'a> {
+    model: &'a str,
+    /// System prompt (top-level, not an `input` item — see module note).
+    instructions: &'a str,
+    input: Vec<ResponsesInputItem<'a>>,
+    temperature: f64,
+    max_output_tokens: u32,
+    /// Never persist conversation state server-side.
+    store: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
+    /// Thinking control. Omitted for the server default (full reasoning);
+    /// `effort: "none"` disables thinking on models that allow it (probed:
+    /// grok-4.3 accepts it, grok-4.5 rejects it with HTTP 400).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<ResponsesReasoning>,
+}
+
+#[derive(Serialize)]
+struct ResponsesReasoning {
+    effort: &'static str,
+}
+
+#[derive(Serialize)]
+struct ResponsesInputItem<'a> {
+    role: &'a str,
+    content: Vec<ResponsesContentPart<'a>>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type")]
+enum ResponsesContentPart<'a> {
+    #[serde(rename = "input_text")]
+    Text { text: &'a str },
+}
+
 // -- Response types --
 
 #[derive(Deserialize)]
@@ -136,9 +189,13 @@ pub(crate) struct ChatResponse {
 /// `stream_options: { include_usage: true }` on streaming requests (compat
 /// risk with some servers), so streaming usage is only available when a
 /// server attaches it unprompted, typically on the final chunk.
+/// The Responses API reports the same accounting as `input_tokens` /
+/// `output_tokens`; the aliases fold both schemas into one struct.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-pub(crate) struct Usage {
+pub struct Usage {
+    #[serde(alias = "input_tokens")]
     pub prompt_tokens: u32,
+    #[serde(alias = "output_tokens")]
     pub completion_tokens: u32,
     pub total_tokens: u32,
 }
@@ -154,6 +211,78 @@ pub(crate) struct Choice {
 #[derive(Deserialize)]
 pub(crate) struct ResponseMessage {
     pub content: String,
+}
+
+// Responses-API result body (non-streaming, and embedded in the terminal
+// streaming events `response.completed` / `response.incomplete`).
+
+#[derive(Deserialize)]
+struct ResponsesResponse {
+    /// `"completed"`, `"incomplete"`, or `"failed"`.
+    status: Option<String>,
+    #[serde(default)]
+    output: Vec<ResponsesOutputItem>,
+    usage: Option<Usage>,
+    incomplete_details: Option<IncompleteDetails>,
+    error: Option<ResponsesError>,
+}
+
+#[derive(Deserialize)]
+struct IncompleteDetails {
+    /// `"max_output_tokens"` when generation hit the output-token cap.
+    reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ResponsesError {
+    message: Option<String>,
+}
+
+/// One item of `output`: `"message"` items carry the visible text;
+/// `"reasoning"` items carry chain-of-thought summaries and are skipped.
+#[derive(Deserialize)]
+struct ResponsesOutputItem {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    content: Vec<ResponsesOutputPart>,
+}
+
+#[derive(Deserialize)]
+struct ResponsesOutputPart {
+    #[serde(rename = "type")]
+    kind: String,
+    text: Option<String>,
+}
+
+impl ResponsesResponse {
+    /// Concatenated visible text across all `message` items.
+    fn visible_text(&self) -> String {
+        let mut out = String::new();
+        for item in self.output.iter().filter(|i| i.kind == "message") {
+            for part in item.content.iter().filter(|p| p.kind == "output_text") {
+                if let Some(text) = &part.text {
+                    out.push_str(text);
+                }
+            }
+        }
+        out
+    }
+
+    /// Stop reason in chat-completions vocabulary: `"stop"` on completion,
+    /// `"length"` for the output-token cap, otherwise the raw reason.
+    fn finish_reason(&self) -> String {
+        match self.status.as_deref() {
+            Some("incomplete") => {
+                match self.incomplete_details.as_ref().and_then(|d| d.reason.as_deref()) {
+                    Some("max_output_tokens") => "length".to_owned(),
+                    Some(other) => other.to_owned(),
+                    None => "incomplete".to_owned(),
+                }
+            }
+            _ => "stop".to_owned(),
+        }
+    }
 }
 
 // -- SSE streaming types (used by worker in streaming loop) --
@@ -175,6 +304,23 @@ struct StreamChoice {
     finish_reason: Option<String>,
 }
 
+/// A Responses-API streaming event. Unlike chat-completions SSE (untyped
+/// `data:` chunks terminated by `data: [DONE]`), the Responses stream is a
+/// typed event sequence — each `data:` payload carries a `type` discriminator
+/// and the stream ends structurally with a `response.completed` /
+/// `response.incomplete` / `response.failed` event, never a `[DONE]` sentinel.
+#[derive(Deserialize)]
+struct ResponsesStreamEvent {
+    #[serde(rename = "type")]
+    kind: String,
+    /// Incremental text for `*.delta` events.
+    delta: Option<String>,
+    /// The final response object on terminal events.
+    response: Option<ResponsesResponse>,
+    /// Error detail on top-level `error` events.
+    message: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct Delta {
     content: Option<String>,
@@ -189,7 +335,7 @@ struct Delta {
 
 /// Parsed SSE event from a streaming response.
 #[derive(Debug, PartialEq)]
-pub(crate) enum SseEvent {
+pub enum SseEvent {
     Content(String),
     /// A reasoning/thinking token from a server-side reasoning parser
     /// (separate `reasoning_content` field). Precedes the answer's `Content`.
@@ -199,11 +345,79 @@ pub(crate) enum SseEvent {
     /// Token usage, when a chunk carries it (some servers attach it to the
     /// final chunk even without `stream_options.include_usage`).
     Usage(Usage),
+    /// The server reported the request failed mid-stream (Responses-API
+    /// `response.failed` / `error` events), with its stated reason. Terminal:
+    /// any partial text should be presented with this reason as the banner.
+    Fatal(String),
     Done,
 }
 
+/// Map one Responses-API stream event onto the [`SseEvent`] vocabulary the
+/// worker already speaks, so the streaming loop is flavor-agnostic:
+/// - text deltas -> `Content`, reasoning deltas -> `Reasoning`;
+/// - `response.completed` / `response.incomplete` -> `Usage?` + `Finish` +
+///   `Done` (the Responses stream has no `[DONE]` sentinel — the terminal
+///   event IS the end of the stream, with `incomplete`'s token-cap reason
+///   translated to the chat-style `"length"`);
+/// - `response.failed` / `error` -> `Fatal` carrying the server's stated
+///   reason, so the worker can surface the real cause (matching what the
+///   non-streaming path reports for the identical failure).
+fn handle_responses_stream_event(
+    event: ResponsesStreamEvent,
+    raw_data: &str,
+    events: &mut Vec<SseEvent>,
+) {
+    match event.kind.as_str() {
+        "response.output_text.delta" => {
+            if let Some(delta) = event.delta
+                && !delta.is_empty()
+            {
+                events.push(SseEvent::Content(delta));
+            }
+        }
+        "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
+            if let Some(delta) = event.delta
+                && !delta.is_empty()
+            {
+                events.push(SseEvent::Reasoning(delta));
+            }
+        }
+        "response.completed" | "response.incomplete" => {
+            match event.response {
+                Some(resp) => {
+                    if let Some(usage) = resp.usage {
+                        events.push(SseEvent::Usage(usage));
+                    }
+                    events.push(SseEvent::Finish(resp.finish_reason()));
+                }
+                // A terminal event without its response object should not
+                // occur; still close out the stream rather than stalling.
+                None => events.push(SseEvent::Finish(
+                    if event.kind == "response.completed" { "stop" } else { "incomplete" }
+                        .to_owned(),
+                )),
+            }
+            events.push(SseEvent::Done);
+        }
+        "response.failed" | "error" => {
+            warn!("responses stream reported failure: {raw_data}");
+            let reason = event
+                .response
+                .as_ref()
+                .and_then(|r| r.error.as_ref())
+                .and_then(|e| e.message.clone())
+                .or(event.message)
+                .unwrap_or_else(|| "unspecified server error".to_owned());
+            events.push(SseEvent::Fatal(reason));
+        }
+        // Structural events (response.created, output_item.added, ...) carry
+        // no text; ignore them.
+        _ => {}
+    }
+}
+
 /// Line-based SSE parser that buffers incomplete lines across chunks.
-pub(crate) struct SseParser {
+pub struct SseParser {
     /// Accumulates complete UTF-8 text lines waiting for newline processing.
     buffer: String,
     /// Carry-over bytes for incomplete multi-byte UTF-8 sequences at chunk boundaries.
@@ -291,6 +505,16 @@ impl SseParser {
                 continue;
             }
 
+            // Responses-API typed events first: they carry a `type` field that
+            // chat-completions chunks never have, so a failed parse (or an
+            // unrelated `type` value) falls through to the chat schema below.
+            if let Ok(event) = serde_json::from_str::<ResponsesStreamEvent>(data)
+                && (event.kind.starts_with("response.") || event.kind == "error")
+            {
+                handle_responses_stream_event(event, data, &mut events);
+                continue;
+            }
+
             if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) {
                 if let Some(choice) = chunk.choices.first() {
                     // Reasoning tokens arrive before the answer; emit first so
@@ -348,16 +572,32 @@ pub enum ThinkingControlMethod {
     ChatTemplateKwargs,
     /// Model supports `/think` and `/no_think` tags in the system prompt.
     SystemPromptTag,
+    /// Model accepts the Responses-API `reasoning.effort` parameter with
+    /// `"none"`, so thinking can be disabled per request (grok-oauth flavor;
+    /// grok-4.3 accepts it, grok-4.5 rejects it).
+    ReasoningEffort,
     /// Model does not support controllable thinking.
     Unsupported,
+}
+
+/// Which request/response protocol the endpoint speaks. Selected by
+/// `[api].provider`; every protocol-dependent branch in the client keys off
+/// this, and the streaming worker stays flavor-agnostic behind [`SseEvent`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApiFlavor {
+    /// OpenAI-compatible `/chat/completions` (vLLM, Groq, Google, ...).
+    OpenAiChat,
+    /// Responses API via Grok CLI OAuth (`https://api.x.ai/v1/responses`).
+    GrokResponses,
 }
 
 struct LlmClientInner {
     client: Client,
     streaming_client: Client,
+    flavor: ApiFlavor,
     endpoint: String,
     model: String,
-    api_key: Option<String>,
+    auth: TokenProvider,
     custom_headers: Vec<(String, String)>,
     temperature: f64,
     max_tokens: u32,
@@ -387,15 +627,20 @@ fn classify_vision_status(status: u16) -> Option<bool> {
 pub struct LlmClient(Arc<LlmClientInner>);
 
 impl LlmClientInner {
-    /// Apply authentication headers (Bearer token and custom headers) to a request.
-    fn apply_auth(&self, mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        if let Some(key) = &self.api_key {
-            req = req.bearer_auth(key);
+    /// Apply authentication headers (Bearer token and custom headers) to a
+    /// request. Async because an OAuth-backed [`TokenProvider`] may need to
+    /// refresh its token first.
+    async fn apply_auth(
+        &self,
+        mut req: reqwest::RequestBuilder,
+    ) -> Result<reqwest::RequestBuilder, ApiError> {
+        if let Some(token) = self.auth.bearer().await? {
+            req = req.bearer_auth(token);
         }
         for (name, value) in &self.custom_headers {
             req = req.header(name, value);
         }
-        req
+        Ok(req)
     }
 }
 
@@ -482,27 +727,69 @@ impl LlmClient {
         // Precedence for every setting: env var > config file > built-in default.
         let config = crate::config::get();
 
-        // endpoint, model, and api_key are REQUIRED with no built-in default:
-        // each is deployment-specific (an internal vLLM server, its model name,
-        // and its access token), so a guessed fallback would silently mislead.
-        // When any is unset, fail fast so the app logs a clear error at startup
-        // and exits instead of talking to the wrong server.
-        let base = require_setting(
-            env::var("CLIP_LLM_API_ENDPOINT").ok(),
-            config.api_endpoint(),
-            "api.endpoint",
-        )?;
-        let endpoint = format!("{}{}", base.trim_end_matches('/'), CHAT_COMPLETIONS_PATH);
+        // Provider selects the protocol flavor and the auth source.
+        let provider = env::var("CLIP_LLM_PROVIDER")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| config.api_provider().map(str::to_owned))
+            .unwrap_or_else(|| "openai".to_owned());
+        let flavor = match provider.as_str() {
+            "openai" => ApiFlavor::OpenAiChat,
+            "grok-oauth" => ApiFlavor::GrokResponses,
+            other => {
+                return Err(ApiError::InvalidConfig(format!(
+                    "unknown [api].provider {other:?} (expected \"openai\" or \"grok-oauth\")"
+                )))
+            }
+        };
+
+        // For the OpenAI flavor, endpoint, model, and api_key are REQUIRED with
+        // no built-in default: each is deployment-specific (an internal vLLM
+        // server, its model name, and its access token), so a guessed fallback
+        // would silently mislead. When any is unset, fail fast so the app logs
+        // a clear error at startup and exits instead of talking to the wrong
+        // server. The grok-oauth flavor differs: the endpoint is xAI's public
+        // API (overridable), and auth comes from the Grok CLI's credential
+        // store instead of an api_key.
+        let env_endpoint = env::var("CLIP_LLM_API_ENDPOINT").ok();
+        let (base, path) = match flavor {
+            ApiFlavor::OpenAiChat => (
+                require_setting(env_endpoint, config.api_endpoint(), "api.endpoint")?,
+                CHAT_COMPLETIONS_PATH,
+            ),
+            ApiFlavor::GrokResponses => (
+                require_setting(env_endpoint, config.api_endpoint(), "api.endpoint")
+                    .unwrap_or_else(|_| GROK_DEFAULT_ENDPOINT.to_owned()),
+                RESPONSES_PATH,
+            ),
+        };
+        // A leftover [api].endpoint (e.g. a vLLM URL from a previous provider)
+        // silently overrides the xAI default and every request then fails
+        // against the wrong server — make that visible at startup.
+        if flavor == ApiFlavor::GrokResponses && base != GROK_DEFAULT_ENDPOINT {
+            warn!(
+                "grok-oauth: using custom endpoint {base} instead of {GROK_DEFAULT_ENDPOINT} — \
+                 remove [api].endpoint from config.toml unless this is intentional"
+            );
+        }
+        let endpoint = format!("{}{}", base.trim_end_matches('/'), path);
         let model = require_setting(
             env::var("CLIP_LLM_MODEL").ok(),
             config.api_model(),
             "api.model",
         )?;
-        let api_key = Some(require_setting(
-            env::var("CLIP_LLM_API_KEY").ok(),
-            config.api_key(),
-            "api.api_key",
-        )?);
+        let auth = match flavor {
+            ApiFlavor::OpenAiChat => TokenProvider::Static(Some(require_setting(
+                env::var("CLIP_LLM_API_KEY").ok(),
+                config.api_key(),
+                "api.api_key",
+            )?)),
+            // Any configured api_key is ignored: the OAuth surface only
+            // accepts the CLI session's bearer tokens.
+            ApiFlavor::GrokResponses => TokenProvider::GrokCli(GrokCliAuth::load(
+                config.api_auth_file().map(std::path::PathBuf::from),
+            )?),
+        };
         // Empty env var = unset, so it does not silently suppress configured headers.
         let custom_headers: Vec<(String, String)> =
             match env::var("CLIP_LLM_CUSTOM_HEADERS").ok().filter(|s| !s.is_empty()) {
@@ -533,8 +820,8 @@ impl LlmClient {
         // some gateway setups, and info-level records ship to remote telemetry.
         debug!("endpoint={endpoint}");
         info!(
-            "model={model}, api_key={}, custom_headers={}, temperature={temperature}, max_tokens={max_tokens}, timeout={}s, initial_response_timeout={}s",
-            if api_key.is_some() { "set" } else { "unset" },
+            "provider={provider}, model={model}, auth={}, custom_headers={}, temperature={temperature}, max_tokens={max_tokens}, timeout={}s, initial_response_timeout={}s",
+            auth.describe(),
             if custom_headers.is_empty() {
                 "none".to_string()
             } else {
@@ -568,9 +855,10 @@ impl LlmClient {
         Ok(Self(Arc::new(LlmClientInner {
             client,
             streaming_client,
+            flavor,
             endpoint,
             model,
-            api_key,
+            auth,
             custom_headers,
             temperature,
             max_tokens,
@@ -593,6 +881,15 @@ impl LlmClient {
         let inner = &self.0;
         if let Some(&cached) = inner.supports_vision.get() {
             return cached;
+        }
+
+        // The Responses flavor is text-only for now: its image input shape
+        // differs (`input_image` items) and is not implemented, so don't
+        // spend a probe request to learn what is already decided.
+        if inner.flavor != ApiFlavor::OpenAiChat {
+            info!("vision probe skipped for {:?}: flavor is text-only", inner.flavor);
+            let _ = inner.supports_vision.set(false);
+            return false;
         }
 
         let data_uri = format!("data:image/png;base64,{PROBE_PNG_BASE64}");
@@ -621,7 +918,13 @@ impl LlmClient {
         {
             trace!("vision probe request:\n{json}");
         }
-        let req = inner.apply_auth(inner.client.post(&inner.endpoint).json(&body));
+        let req = match inner.apply_auth(inner.client.post(&inner.endpoint).json(&body)).await {
+            Ok(req) => req,
+            Err(e) => {
+                warn!("vision probe auth failed (will retry): {e}");
+                return false;
+            }
+        };
 
         match req.send().await {
             Ok(resp) => {
@@ -679,8 +982,16 @@ impl LlmClient {
 
         info!("probing model thinking support...");
 
-        // Step 1: try chat_template_kwargs with enable_thinking=true
-        let method = match self.probe_thinking_kwargs(inner).await {
+        // The chat-completions toggles below do not exist on the Responses
+        // surface; there the lever is `reasoning.effort = "none"`, accepted
+        // model-dependently, so it gets its own probe.
+        let probe = if inner.flavor == ApiFlavor::GrokResponses {
+            self.probe_reasoning_effort(inner).await
+        } else {
+            // Step 1: try chat_template_kwargs with enable_thinking=true
+            self.probe_thinking_kwargs(inner).await
+        };
+        let method = match probe {
             Some(method) => method,
             None => return ThinkingControlMethod::Unsupported, // network error, don't cache
         };
@@ -688,6 +999,74 @@ impl LlmClient {
         info!("thinking control method: {method:?}");
         let _ = inner.thinking_control.set(method);
         method
+    }
+
+    /// Responses-API flavor: probe whether the model accepts
+    /// `reasoning: { effort: "none" }` (the only thinking control that
+    /// surface offers). Returns `None` on network error or an inconclusive
+    /// status (caller should not cache).
+    async fn probe_reasoning_effort(
+        &self,
+        inner: &LlmClientInner,
+    ) -> Option<ThinkingControlMethod> {
+        let body = ResponsesRequest {
+            model: &inner.model,
+            instructions: "Reply with the single word: hi",
+            input: vec![ResponsesInputItem {
+                role: "user",
+                content: vec![ResponsesContentPart::Text { text: "hi" }],
+            }],
+            temperature: 0.0,
+            // The Responses API rejects values below 16.
+            max_output_tokens: 16,
+            store: false,
+            stream: None,
+            reasoning: Some(ResponsesReasoning { effort: "none" }),
+        };
+
+        if tracing::enabled!(tracing::Level::TRACE)
+            && let Ok(json) = serde_json::to_string_pretty(&body)
+        {
+            trace!("reasoning effort probe request:\n{json}");
+        }
+        let req = match inner.apply_auth(inner.client.post(&inner.endpoint).json(&body)).await {
+            Ok(req) => req,
+            Err(e) => {
+                warn!("reasoning effort probe auth failed (will retry): {e}");
+                return None;
+            }
+        };
+
+        match req.send().await {
+            Ok(resp) if resp.status().is_success() => {
+                trace!("reasoning effort probe response: HTTP {}", resp.status().as_u16());
+                Some(ThinkingControlMethod::ReasoningEffort)
+            }
+            Ok(resp) if resp.status().as_u16() == 400 || resp.status().as_u16() == 422 => {
+                // The server understood and rejected effort "none" — thinking
+                // is always-on for this model (e.g. grok-4.5). Worth caching.
+                trace!("reasoning effort probe rejected: HTTP {}", resp.status().as_u16());
+                Some(ThinkingControlMethod::Unsupported)
+            }
+            Ok(resp) if resp.status().as_u16() == 429 => {
+                // Rate limited: cache the conservative default for the session
+                // rather than re-probing on every request (#63).
+                warn!("reasoning effort probe rate limited (HTTP 429); assuming no thinking control for this session");
+                Some(ThinkingControlMethod::Unsupported)
+            }
+            Ok(resp) => {
+                // Other transient or ambiguous (401/403/404/5xx): don't cache, retry.
+                warn!(
+                    "reasoning effort probe inconclusive (HTTP {}); will retry",
+                    resp.status().as_u16()
+                );
+                None
+            }
+            Err(e) => {
+                warn!("reasoning effort probe failed (will retry): {e}");
+                None
+            }
+        }
     }
 
     /// Try `chat_template_kwargs: { enable_thinking: true }`.
@@ -710,7 +1089,13 @@ impl LlmClient {
         {
             trace!("thinking kwargs probe request:\n{json}");
         }
-        let req = inner.apply_auth(inner.client.post(&inner.endpoint).json(&body));
+        let req = match inner.apply_auth(inner.client.post(&inner.endpoint).json(&body)).await {
+            Ok(req) => req,
+            Err(e) => {
+                warn!("thinking kwargs probe auth failed (will retry): {e}");
+                return None;
+            }
+        };
 
         match req.send().await {
             Ok(resp) if resp.status().is_success() => {
@@ -779,7 +1164,13 @@ impl LlmClient {
         {
             trace!("thinking prompt-tag probe request:\n{json}");
         }
-        let req = inner.apply_auth(inner.client.post(&inner.endpoint).json(&body));
+        let req = match inner.apply_auth(inner.client.post(&inner.endpoint).json(&body)).await {
+            Ok(req) => req,
+            Err(e) => {
+                warn!("thinking prompt-tag probe auth failed (will retry): {e}");
+                return None;
+            }
+        };
 
         match req.send().await {
             Ok(resp) if resp.status().is_success() => {
@@ -875,6 +1266,25 @@ impl LlmClient {
             (ThinkingMode::NoThink, ThinkingControlMethod::SystemPromptTag) => {
                 (Some("/no_think\n"), None)
             }
+            // Responses-API control; expressed via resolve_reasoning instead
+            // of the chat-completions knobs this function returns.
+            (_, ThinkingControlMethod::ReasoningEffort) => (None, None),
+        }
+    }
+
+    /// Resolve thinking mode into the Responses-API `reasoning` parameter.
+    /// Only `NoThink` on a model that accepts `effort: "none"` produces a
+    /// value; `Think` omits the field so the server default (full reasoning)
+    /// applies.
+    fn resolve_reasoning(
+        thinking_mode: ThinkingMode,
+        control: ThinkingControlMethod,
+    ) -> Option<ResponsesReasoning> {
+        match (thinking_mode, control) {
+            (ThinkingMode::NoThink, ThinkingControlMethod::ReasoningEffort) => {
+                Some(ResponsesReasoning { effort: "none" })
+            }
+            _ => None,
         }
     }
 
@@ -931,37 +1341,66 @@ impl LlmClient {
             );
         }
 
-        let body = ChatRequest {
-            model: &inner.model,
-            messages: vec![
-                Message {
-                    role: "system",
-                    content: MessageContent::Text(&sys_prompt),
-                },
-                Message {
-                    role: "user",
-                    content: Self::build_user_content(content, use_images),
-                },
-            ],
-            temperature: inner.temperature,
-            max_tokens,
-            stream: if stream { Some(true) } else { None },
-            chat_template_kwargs: template_kwargs,
+        let client = if stream { &inner.streaming_client } else { &inner.client };
+        let (req, body_value) = match inner.flavor {
+            ApiFlavor::OpenAiChat => {
+                let body = ChatRequest {
+                    model: &inner.model,
+                    messages: vec![
+                        Message {
+                            role: "system",
+                            content: MessageContent::Text(&sys_prompt),
+                        },
+                        Message {
+                            role: "user",
+                            content: Self::build_user_content(content, use_images),
+                        },
+                    ],
+                    temperature: inner.temperature,
+                    max_tokens,
+                    stream: if stream { Some(true) } else { None },
+                    chat_template_kwargs: template_kwargs,
+                };
+                (
+                    client.post(&inner.endpoint).json(&body),
+                    serde_json::to_value(&body).ok(),
+                )
+            }
+            ApiFlavor::GrokResponses => {
+                let body = ResponsesRequest {
+                    model: &inner.model,
+                    instructions: &sys_prompt,
+                    input: vec![ResponsesInputItem {
+                        role: "user",
+                        content: vec![ResponsesContentPart::Text {
+                            text: content.text.as_deref().unwrap_or(""),
+                        }],
+                    }],
+                    temperature: inner.temperature,
+                    max_output_tokens: max_tokens,
+                    store: false,
+                    stream: if stream { Some(true) } else { None },
+                    reasoning: Self::resolve_reasoning(thinking_mode, thinking_control),
+                };
+                (
+                    client.post(&inner.endpoint).json(&body),
+                    serde_json::to_value(&body).ok(),
+                )
+            }
         };
 
         // Capture the final request for the debug view: serialize, then elide
         // base64 image payloads so the snapshot (and the DEBUG log below) stay
         // readable. Auth lives in headers, not the body, so no secret is stored.
         capture.endpoint = Some(inner.endpoint.clone());
-        if let Ok(mut value) = serde_json::to_value(&body) {
+        if let Some(mut value) = body_value {
             sanitize_debug_json(&mut value);
             capture.request = serde_json::to_string_pretty(&value).ok();
         }
         if let Some(req_json) = &capture.request {
             debug!("LLM request body:\n{req_json}");
         }
-        let client = if stream { &inner.streaming_client } else { &inner.client };
-        let mut req = inner.apply_auth(client.post(&inner.endpoint).json(&body));
+        let mut req = inner.apply_auth(req).await?;
         // The streaming client has no total timeout, so without this bound a
         // server that accepts the connection but never sends headers would
         // hang the request forever.
@@ -1055,7 +1494,8 @@ impl LlmClient {
 
         let resp = self
             .build_and_send(content, mode, rephrase_params, thinking_mode, false, capture)
-            .await?;
+            .await
+            .map_err(|e| self.map_grok_rejection(e))?;
         let text = resp.text().await?;
         // Record the raw body before parsing, so even a parse failure exposes it.
         capture.response_raw = Some(text.clone());
@@ -1072,20 +1512,45 @@ impl LlmClient {
         // A 200 with a non-completion body (proxy error page, truncated body)
         // is not "the model returned nothing" — surface the parse failure so
         // the real cause isn't masked. The raw body is already in `capture`.
+        let resp_content = match inner.flavor {
+            ApiFlavor::OpenAiChat => Self::parse_chat_body(&text, mode, capture)?,
+            ApiFlavor::GrokResponses => Self::parse_responses_body(&text, mode, capture)?,
+        };
+
+        if resp_content.is_empty() {
+            return Err(ApiError::EmptyResponse);
+        }
+
+        info!("received response ({} chars)", resp_content.len());
+        debug!("response content: {resp_content}");
+        Ok(resp_content)
+    }
+
+    /// Record parsed usage into the capture and the logs.
+    fn record_usage(usage: Usage, mode: ProcessMode, capture: &mut DebugCapture) {
+        capture.prompt_tokens = Some(usage.prompt_tokens);
+        capture.completion_tokens = Some(usage.completion_tokens);
+        capture.total_tokens = Some(usage.total_tokens);
+        info!(
+            prompt_tokens = usage.prompt_tokens,
+            completion_tokens = usage.completion_tokens,
+            total_tokens = usage.total_tokens,
+            mode = mode.label(),
+            "token usage"
+        );
+    }
+
+    /// Parse a non-streaming chat-completions body into its visible content.
+    fn parse_chat_body(
+        text: &str,
+        mode: ProcessMode,
+        capture: &mut DebugCapture,
+    ) -> Result<String, ApiError> {
         let chat: ChatResponse =
-            serde_json::from_str(&text).map_err(|e| ApiError::MalformedResponse(e.to_string()))?;
+            serde_json::from_str(text).map_err(|e| ApiError::MalformedResponse(e.to_string()))?;
 
         if let Some(usage) = chat.usage {
-            capture.prompt_tokens = Some(usage.prompt_tokens);
-            capture.completion_tokens = Some(usage.completion_tokens);
-            capture.total_tokens = Some(usage.total_tokens);
-            info!(
-                prompt_tokens = usage.prompt_tokens,
-                completion_tokens = usage.completion_tokens,
-                total_tokens = usage.total_tokens,
-                mode = mode.label(),
-                "token usage"
-            );
+            Self::record_usage(usage, mode, capture);
         }
 
         let choice = chat
@@ -1096,15 +1561,37 @@ impl LlmClient {
         if choice.finish_reason.as_deref() == Some("length") {
             return Err(ApiError::Truncated);
         }
-        let resp_content = choice.message.content;
+        Ok(choice.message.content)
+    }
 
-        if resp_content.is_empty() {
-            return Err(ApiError::EmptyResponse);
+    /// Parse a non-streaming Responses-API body into its visible content.
+    fn parse_responses_body(
+        text: &str,
+        mode: ProcessMode,
+        capture: &mut DebugCapture,
+    ) -> Result<String, ApiError> {
+        let resp: ResponsesResponse =
+            serde_json::from_str(text).map_err(|e| ApiError::MalformedResponse(e.to_string()))?;
+
+        if let Some(usage) = resp.usage {
+            Self::record_usage(usage, mode, capture);
         }
 
-        info!("received response ({} chars)", resp_content.len());
-        debug!("response content: {resp_content}");
-        Ok(resp_content)
+        if resp.status.as_deref() == Some("failed") {
+            let message = resp
+                .error
+                .as_ref()
+                .and_then(|e| e.message.as_deref())
+                .unwrap_or("no error detail");
+            return Err(ApiError::MalformedResponse(format!(
+                "server reported failure: {message}"
+            )));
+        }
+        // Mirror the chat path: a token-cap cutoff is Truncated, not success.
+        if resp.finish_reason() == "length" {
+            return Err(ApiError::Truncated);
+        }
+        Ok(resp.visible_text())
     }
 
     /// Start a streaming request. Returns the raw `reqwest::Response` whose body
@@ -1122,6 +1609,31 @@ impl LlmClient {
         debug!("sending streaming request to {}", inner.endpoint);
         self.build_and_send(content, mode, rephrase_params, thinking_mode, true, capture)
             .await
+            .map_err(|e| self.map_grok_rejection(e))
+    }
+
+    /// For the grok-oauth flavor, a 401/403 rejection means the OAuth session
+    /// or the xAI subscription is the problem — there is no api_key to check,
+    /// so the generic HTTP-status guidance would mislead. Other flavors and
+    /// errors pass through unchanged.
+    fn map_grok_rejection(&self, e: ApiError) -> ApiError {
+        if self.0.flavor != ApiFlavor::GrokResponses {
+            return e;
+        }
+        if let ApiError::Http(err) = &e
+            && let Some(status) = err.status()
+            && matches!(
+                status,
+                reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+            )
+        {
+            return ApiError::Auth(format!(
+                "xAI rejected the Grok sign-in (HTTP {}). Run `grok` in a terminal to sign in \
+                 again, or check your xAI subscription.",
+                status.as_u16()
+            ));
+        }
+        e
     }
 }
 
@@ -1634,6 +2146,261 @@ mod tests {
         // After a clean newline-terminated feed, nothing is left to flush.
         let _ = p.feed(b"data: [DONE]\n");
         assert!(p.flush().is_empty());
+    }
+
+    // --- Responses-API (grok-oauth flavor) tests ---
+
+    #[test]
+    fn responses_request_shape() {
+        let body = ResponsesRequest {
+            model: "grok-4.5",
+            instructions: "sys prompt",
+            input: vec![ResponsesInputItem {
+                role: "user",
+                content: vec![ResponsesContentPart::Text { text: "hello" }],
+            }],
+            temperature: 0.1,
+            max_output_tokens: 1024,
+            store: false,
+            stream: Some(true),
+            reasoning: None,
+        };
+        let json = serde_json::to_value(&body).unwrap();
+        // The system prompt must be TOP-LEVEL `instructions` (xAI rejects
+        // system/developer items inside `input`).
+        assert_eq!(json["instructions"], "sys prompt");
+        assert_eq!(json["input"][0]["role"], "user");
+        assert_eq!(json["input"][0]["content"][0]["type"], "input_text");
+        assert_eq!(json["input"][0]["content"][0]["text"], "hello");
+        assert_eq!(json["max_output_tokens"], 1024);
+        assert_eq!(json["store"], false);
+        assert_eq!(json["stream"], true);
+        // Never request encrypted-reasoning replay (xAI OAuth rejects it).
+        assert!(json.get("include").is_none());
+        // Default thinking (reasoning: None) omits the field entirely.
+        assert!(json.get("reasoning").is_none());
+        // Non-streaming requests omit the stream field entirely.
+        let body = ResponsesRequest {
+            stream: None,
+            reasoning: Some(ResponsesReasoning { effort: "none" }),
+            ..body
+        };
+        let json = serde_json::to_value(&body).unwrap();
+        assert!(json.get("stream").is_none());
+        assert_eq!(json["reasoning"]["effort"], "none");
+    }
+
+    #[test]
+    fn resolve_reasoning_mapping() {
+        // NoThink on a model that accepts effort "none" -> send it.
+        assert!(matches!(
+            LlmClient::resolve_reasoning(
+                ThinkingMode::NoThink,
+                ThinkingControlMethod::ReasoningEffort,
+            ),
+            Some(ResponsesReasoning { effort: "none" })
+        ));
+        // Think -> omit the field so the server default (full reasoning) applies.
+        assert!(LlmClient::resolve_reasoning(
+            ThinkingMode::Think,
+            ThinkingControlMethod::ReasoningEffort,
+        )
+        .is_none());
+        // A model without the control never gets the field (grok-4.5 400s on it).
+        assert!(LlmClient::resolve_reasoning(
+            ThinkingMode::NoThink,
+            ThinkingControlMethod::Unsupported,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn resolve_thinking_reasoning_effort_returns_chat_noops() {
+        // The Responses-API control must not leak chat-completions knobs.
+        let (prefix, kwargs) = LlmClient::resolve_thinking(
+            ThinkingMode::NoThink,
+            ThinkingControlMethod::ReasoningEffort,
+        );
+        assert!(prefix.is_none());
+        assert!(kwargs.is_none());
+    }
+
+    #[test]
+    fn sse_responses_failed_emits_fatal_with_reason() {
+        // response.failed carries the reason in response.error.message.
+        let mut p = SseParser::new();
+        let events = p.feed(
+            b"data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"quota exceeded\"}}}\n",
+        );
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Fatal(r) if r == "quota exceeded"));
+
+        // A top-level error event carries it in `message`.
+        let events = p.feed(b"data: {\"type\":\"error\",\"message\":\"boom\"}\n");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Fatal(r) if r == "boom"));
+
+        // No detail anywhere still yields a terminal Fatal.
+        let events = p.feed(b"data: {\"type\":\"response.failed\"}\n");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Fatal(r) if r == "unspecified server error"));
+    }
+
+    #[test]
+    fn sse_responses_text_delta() {
+        let mut p = SseParser::new();
+        let events = p.feed(
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n",
+        );
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Content(s) if s == "hi"));
+    }
+
+    #[test]
+    fn sse_responses_reasoning_deltas() {
+        let mut p = SseParser::new();
+        let events = p.feed(
+            b"data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"think\"}\n\
+              data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"sum\"}\n",
+        );
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], SseEvent::Reasoning(s) if s == "think"));
+        assert!(matches!(&events[1], SseEvent::Reasoning(s) if s == "sum"));
+    }
+
+    #[test]
+    fn sse_responses_completed_emits_usage_finish_done() {
+        // The Responses stream has no [DONE]; response.completed is terminal.
+        let mut p = SseParser::new();
+        let events = p.feed(
+            b"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":7,\"output_tokens\":3,\"total_tokens\":10}}}\n",
+        );
+        assert_eq!(events.len(), 3);
+        assert!(matches!(&events[0], SseEvent::Usage(u) if u.prompt_tokens == 7 && u.completion_tokens == 3));
+        assert!(matches!(&events[1], SseEvent::Finish(r) if r == "stop"));
+        assert!(matches!(&events[2], SseEvent::Done));
+    }
+
+    #[test]
+    fn sse_responses_incomplete_token_cap_maps_to_length() {
+        let mut p = SseParser::new();
+        let events = p.feed(
+            b"data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n",
+        );
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], SseEvent::Finish(r) if r == "length"));
+        assert!(matches!(&events[1], SseEvent::Done));
+    }
+
+    #[test]
+    fn sse_responses_structural_events_ignored() {
+        let mut p = SseParser::new();
+        let events = p.feed(
+            b"data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\
+              data: {\"type\":\"response.output_item.added\",\"item\":{}}\n\
+              data: {\"type\":\"response.output_text.done\",\"text\":\"full\"}\n",
+        );
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn sse_responses_and_chat_formats_coexist() {
+        // One parser handles either wire format; a chat chunk after (or
+        // before) Responses events still parses via the fallback.
+        let mut p = SseParser::new();
+        let events = p.feed(
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\
+              data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n",
+        );
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], SseEvent::Content(s) if s == "a"));
+        assert!(matches!(&events[1], SseEvent::Content(s) if s == "b"));
+    }
+
+    #[test]
+    fn parse_responses_body_extracts_message_text() {
+        let json = r#"{
+            "status": "completed",
+            "output": [
+                {"type": "reasoning", "summary": []},
+                {"type": "message", "content": [
+                    {"type": "output_text", "text": "hello "},
+                    {"type": "output_text", "text": "world"}
+                ]}
+            ],
+            "usage": {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7}
+        }"#;
+        let mut capture = DebugCapture::default();
+        let text =
+            LlmClient::parse_responses_body(json, ProcessMode::Translate, &mut capture).unwrap();
+        assert_eq!(text, "hello world");
+        assert_eq!(capture.prompt_tokens, Some(5));
+        assert_eq!(capture.completion_tokens, Some(2));
+        assert_eq!(capture.total_tokens, Some(7));
+    }
+
+    #[test]
+    fn parse_responses_body_token_cap_is_truncated() {
+        let json = r#"{
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "partial"}]}]
+        }"#;
+        let mut capture = DebugCapture::default();
+        assert!(matches!(
+            LlmClient::parse_responses_body(json, ProcessMode::Translate, &mut capture),
+            Err(ApiError::Truncated)
+        ));
+    }
+
+    #[test]
+    fn parse_responses_body_failed_status_is_error() {
+        let json = r#"{"status":"failed","error":{"message":"quota exceeded"},"output":[]}"#;
+        let mut capture = DebugCapture::default();
+        match LlmClient::parse_responses_body(json, ProcessMode::Translate, &mut capture) {
+            Err(ApiError::MalformedResponse(msg)) => assert!(msg.contains("quota exceeded")),
+            other => panic!("expected MalformedResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_responses_body_garbage_is_malformed() {
+        let mut capture = DebugCapture::default();
+        assert!(matches!(
+            LlmClient::parse_responses_body("<html>", ProcessMode::Translate, &mut capture),
+            Err(ApiError::MalformedResponse(_))
+        ));
+    }
+
+    #[test]
+    fn responses_finish_reason_mapping() {
+        let completed: ResponsesResponse =
+            serde_json::from_str(r#"{"status":"completed"}"#).unwrap();
+        assert_eq!(completed.finish_reason(), "stop");
+        let capped: ResponsesResponse = serde_json::from_str(
+            r#"{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}"#,
+        )
+        .unwrap();
+        assert_eq!(capped.finish_reason(), "length");
+        let filtered: ResponsesResponse = serde_json::from_str(
+            r#"{"status":"incomplete","incomplete_details":{"reason":"content_filter"}}"#,
+        )
+        .unwrap();
+        assert_eq!(filtered.finish_reason(), "content_filter");
+        let bare: ResponsesResponse =
+            serde_json::from_str(r#"{"status":"incomplete"}"#).unwrap();
+        assert_eq!(bare.finish_reason(), "incomplete");
+    }
+
+    #[test]
+    fn usage_parses_responses_field_names() {
+        let usage: Usage = serde_json::from_str(
+            r#"{"input_tokens":1,"output_tokens":2,"total_tokens":3,"input_tokens_details":{"cached_tokens":0}}"#,
+        )
+        .unwrap();
+        assert_eq!(usage.prompt_tokens, 1);
+        assert_eq!(usage.completion_tokens, 2);
+        assert_eq!(usage.total_tokens, 3);
     }
 
     // --- MessageContent serialization tests ---
