@@ -248,7 +248,7 @@ impl OverlayApp {
     ) -> Self {
         let (capture_tx, capture_rx) = mpsc::channel();
         Self {
-            sm: StateMachine::new(crate::ProcessMode::default()),
+            sm: StateMachine::new(crate::ProcessMode::initial()),
             cmd_tx,
             resp_rx,
             clipboard,
@@ -301,7 +301,7 @@ impl OverlayApp {
     ) -> Self {
         let (capture_tx, capture_rx) = mpsc::channel();
         Self {
-            sm: StateMachine::new(crate::ProcessMode::default()),
+            sm: StateMachine::new(crate::ProcessMode::initial()),
             cmd_tx,
             resp_rx,
             clipboard,
@@ -633,7 +633,7 @@ impl OverlayApp {
                     // cycle over all modes; once loaded, respect availability.
                     let available = self.sm.available_modes();
                     let targets: &[crate::ProcessMode] = if available.is_empty() {
-                        crate::ProcessMode::ALL
+                        crate::ProcessMode::display_order()
                     } else {
                         available
                     };

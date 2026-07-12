@@ -311,12 +311,27 @@ pub enum ProcessMode {
 }
 
 impl ProcessMode {
-    /// All modes in tab bar display order.
+    /// All modes in built-in order. Prefer [`ProcessMode::display_order`] for
+    /// anything user-facing (tab bar, cycling) — it honors `[ui].tabs`.
     pub const ALL: &[ProcessMode] = &[
         ProcessMode::Translate,
         ProcessMode::Rephrase,
         ProcessMode::Summarize,
     ];
+
+    /// Tab-bar display order: `[ui].tabs` from the config when set, otherwise
+    /// [`ProcessMode::ALL`]. Always contains every mode exactly once (the
+    /// config can reorder, not hide). Resolved from the global config once on
+    /// first use — consistent with the config being immutable after init.
+    pub fn display_order() -> &'static [ProcessMode] {
+        static ORDER: std::sync::OnceLock<Vec<ProcessMode>> = std::sync::OnceLock::new();
+        ORDER.get_or_init(|| crate::config::get().ui_tab_order())
+    }
+
+    /// The mode selected at startup: the first display-order tab.
+    pub fn initial() -> ProcessMode {
+        Self::display_order().first().copied().unwrap_or_default()
+    }
 
     pub fn label(self) -> &'static str {
         match self {
@@ -334,23 +349,29 @@ impl ProcessMode {
         }
     }
 
-    /// Default thinking mode for this processing mode.
+    /// Default thinking mode for this processing mode: the per-mode config
+    /// override (`[translate|rephrase|summarize].thinking`) when set, else the
+    /// built-in default — Translate/Rephrase start fast (NoThink), Summarize
+    /// benefits from reasoning (Think).
     pub fn default_thinking(self) -> ThinkingMode {
+        if let Some(configured) = crate::config::get().mode_default_thinking(self) {
+            return configured;
+        }
         match self {
             Self::Translate | Self::Rephrase => ThinkingMode::NoThink,
             Self::Summarize => ThinkingMode::Think,
         }
     }
 
-    /// Next mode in `ALL` (display order), wrapping around, skipping any mode
-    /// not present in `targets`. Returns `self` unchanged when no other mode is
+    /// Next mode in display order, wrapping around, skipping any mode not
+    /// present in `targets`. Returns `self` unchanged when no other mode is
     /// available (empty `targets`, or `targets` holds only `self`). Used to
     /// cycle the mode while the hotkey modifiers are held.
     pub fn next_available(self, targets: &[ProcessMode]) -> ProcessMode {
         if targets.is_empty() {
             return self;
         }
-        let all = Self::ALL;
+        let all = Self::display_order();
         let start = all.iter().position(|&m| m == self).unwrap_or(0);
         // Walk forward from the mode after `self`, wrapping; first match wins.
         // The final offset returns to `self`, so a single-mode target yields self.

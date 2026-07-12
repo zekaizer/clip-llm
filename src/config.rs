@@ -30,7 +30,7 @@ use std::sync::OnceLock;
 use serde::Deserialize;
 use tracing::{debug, info, warn};
 
-use crate::{RephraseLength, RephraseStyle, PRIMARY_LANG, SECONDARY_LANG};
+use crate::{ProcessMode, RephraseLength, RephraseStyle, ThinkingMode, PRIMARY_LANG, SECONDARY_LANG};
 
 /// Environment variable holding an explicit config file path (overrides the
 /// next-to-executable lookup).
@@ -264,6 +264,11 @@ struct UiConfig {
     /// Whether a double-tap result starts pinned. Default false (already copied
     /// to the clipboard, so auto-hide is safe).
     double_tap_pinned: Option<bool>,
+    /// Tab-bar display order: mode names (`"translate"`, `"rephrase"`,
+    /// `"summarize"`). Order-only — modes left out keep their built-in
+    /// relative order after the listed ones; unknown names are ignored with
+    /// a warning. The first tab is also the mode selected at startup.
+    tabs: Option<Vec<String>>,
 }
 
 /// `[languages]` — substituted into `{primary_lang}` / `{secondary_lang}`.
@@ -288,6 +293,8 @@ impl Default for LanguagesConfig {
 #[serde(default)]
 struct TranslateConfig {
     prompt: Option<String>,
+    /// Default thinking mode for this mode: `"think"` or `"no_think"`.
+    thinking: Option<String>,
 }
 
 /// `[rephrase]` — `base` carries `{style}` / `{length}` placeholders.
@@ -295,6 +302,8 @@ struct TranslateConfig {
 #[serde(default)]
 struct RephraseConfig {
     base: Option<String>,
+    /// Default thinking mode for this mode: `"think"` or `"no_think"`.
+    thinking: Option<String>,
     style: RephraseStyleTable,
     length: RephraseLengthTable,
 }
@@ -327,6 +336,28 @@ struct RephraseLengthTable {
 struct SummarizeConfig {
     prompt: Option<String>,
     image_prompt: Option<String>,
+    /// Default thinking mode for this mode: `"think"` or `"no_think"`.
+    thinking: Option<String>,
+}
+
+/// Parse a config thinking-mode name. Accepts `"think"` and `"no_think"`
+/// (plus the common `"no-think"`/`"nothink"` spellings), case-insensitive.
+fn parse_thinking_name(raw: &str) -> Option<ThinkingMode> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "think" => Some(ThinkingMode::Think),
+        "no_think" | "no-think" | "nothink" => Some(ThinkingMode::NoThink),
+        _ => None,
+    }
+}
+
+/// Parse a config mode name for `[ui].tabs`, case-insensitive.
+fn parse_mode_name(raw: &str) -> Option<ProcessMode> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "translate" => Some(ProcessMode::Translate),
+        "rephrase" => Some(ProcessMode::Rephrase),
+        "summarize" => Some(ProcessMode::Summarize),
+        _ => None,
+    }
 }
 
 impl Config {
@@ -431,6 +462,55 @@ impl Config {
     /// Whether double-tap results start pinned (`[ui].double_tap_pinned`, default false).
     pub fn ui_double_tap_pinned(&self) -> bool {
         self.ui.double_tap_pinned.unwrap_or(false)
+    }
+
+    /// Tab-bar display order (`[ui].tabs`). Order-only semantics: listed modes
+    /// come first (unknown names warned and skipped, duplicates collapsed),
+    /// then every unlisted mode follows in built-in order — a mode can be
+    /// reordered but never hidden. Absent or fully-invalid config yields the
+    /// built-in order.
+    pub fn ui_tab_order(&self) -> Vec<ProcessMode> {
+        let mut order: Vec<ProcessMode> = Vec::with_capacity(ProcessMode::ALL.len());
+        if let Some(names) = &self.ui.tabs {
+            for name in names {
+                match parse_mode_name(name) {
+                    Some(mode) => {
+                        if !order.contains(&mode) {
+                            order.push(mode);
+                        }
+                    }
+                    None => warn!(
+                        "unknown mode {name:?} in [ui].tabs (expected translate | rephrase | summarize); ignoring"
+                    ),
+                }
+            }
+        }
+        for &mode in ProcessMode::ALL {
+            if !order.contains(&mode) {
+                order.push(mode);
+            }
+        }
+        order
+    }
+
+    /// Per-mode default thinking override
+    /// (`[translate|rephrase|summarize].thinking`): `"think"` or `"no_think"`.
+    /// `None` when unset or unparseable (unknown values warn and fall back to
+    /// the built-in default).
+    pub fn mode_default_thinking(&self, mode: ProcessMode) -> Option<ThinkingMode> {
+        let raw = match mode {
+            ProcessMode::Translate => self.translate.thinking.as_deref(),
+            ProcessMode::Rephrase => self.rephrase.thinking.as_deref(),
+            ProcessMode::Summarize => self.summarize.thinking.as_deref(),
+        }?;
+        let parsed = parse_thinking_name(raw);
+        if parsed.is_none() {
+            warn!(
+                "unknown thinking mode {raw:?} for {} (expected \"think\" or \"no_think\"); using the built-in default",
+                mode.label()
+            );
+        }
+        parsed
     }
 
     /// Primary language name (`{primary_lang}`).
@@ -713,6 +793,11 @@ fn starter_template() -> String {
     t.push_str("# [ui]\n");
     t.push_str(&r("single_tap_pinned", "false", "single-tap result is not auto-copied — set true to avoid losing it"));
     t.push_str(&r("double_tap_pinned", "false", ""));
+    t.push_str(&r(
+        "tabs",
+        "[\"translate\", \"rephrase\", \"summarize\"]",
+        "tab-bar order (first = selected at startup); reorders only, never hides",
+    ));
     t.push('\n');
 
     // [languages] — substituted into {primary_lang} / {secondary_lang}.
@@ -728,11 +813,13 @@ fn starter_template() -> String {
 
     // [translate]
     t.push_str("# [translate]\n");
+    t.push_str(&s("thinking", "no_think", "default thinking mode: think | no_think"));
     t.push_str(&s("prompt", DEFAULT_TRANSLATE_PROMPT, ""));
     t.push('\n');
 
     // [rephrase] — base template; {style}/{length} filled from the tables below.
     t.push_str("# [rephrase]\n");
+    t.push_str(&s("thinking", "no_think", "default thinking mode: think | no_think"));
     t.push_str(&s("base", DEFAULT_REPHRASE_BASE, ""));
     t.push('\n');
     t.push_str("# [rephrase.style]\n");
@@ -752,6 +839,7 @@ fn starter_template() -> String {
 
     // [summarize] — `prompt` for text, `image_prompt` for image-only clipboards.
     t.push_str("# [summarize]\n");
+    t.push_str(&s("thinking", "think", "default thinking mode: think | no_think"));
     t.push_str(&s("prompt", DEFAULT_SUMMARIZE_PROMPT, ""));
     t.push_str(&s("image_prompt", DEFAULT_SUMMARIZE_IMAGE_PROMPT, ""));
 
@@ -1281,6 +1369,75 @@ mod tests {
         let config = Config::default();
         assert!(!config.ui_single_tap_pinned());
         assert!(!config.ui_double_tap_pinned());
+    }
+
+    #[test]
+    fn ui_tab_order_reorders_and_appends_missing() {
+        let config: Config =
+            toml::from_str("[ui]\ntabs = [\"summarize\", \"translate\"]\n").unwrap();
+        // Listed modes lead; the unlisted one follows in built-in order.
+        assert_eq!(
+            config.ui_tab_order(),
+            vec![ProcessMode::Summarize, ProcessMode::Translate, ProcessMode::Rephrase]
+        );
+    }
+
+    #[test]
+    fn ui_tab_order_ignores_unknown_and_duplicates() {
+        let config: Config = toml::from_str(
+            "[ui]\ntabs = [\"summarize\", \"bogus\", \"Summarize\", \"rephrase\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.ui_tab_order(),
+            vec![ProcessMode::Summarize, ProcessMode::Rephrase, ProcessMode::Translate]
+        );
+    }
+
+    #[test]
+    fn ui_tab_order_defaults_to_builtin() {
+        assert_eq!(Config::default().ui_tab_order(), ProcessMode::ALL.to_vec());
+        // An empty (or fully invalid) list also falls back to built-in order.
+        let config: Config = toml::from_str("[ui]\ntabs = []\n").unwrap();
+        assert_eq!(config.ui_tab_order(), ProcessMode::ALL.to_vec());
+        let config: Config = toml::from_str("[ui]\ntabs = [\"bogus\"]\n").unwrap();
+        assert_eq!(config.ui_tab_order(), ProcessMode::ALL.to_vec());
+    }
+
+    #[test]
+    fn mode_default_thinking_parses_per_mode() {
+        let config: Config = toml::from_str(
+            "[translate]\nthinking = \"think\"\n\
+             [summarize]\nthinking = \"no_think\"\n\
+             [rephrase]\nthinking = \"bogus\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.mode_default_thinking(ProcessMode::Translate),
+            Some(ThinkingMode::Think)
+        );
+        assert_eq!(
+            config.mode_default_thinking(ProcessMode::Summarize),
+            Some(ThinkingMode::NoThink)
+        );
+        // Unknown value -> None, so the built-in default stays in effect.
+        assert_eq!(config.mode_default_thinking(ProcessMode::Rephrase), None);
+        // Unset -> None.
+        assert_eq!(
+            Config::default().mode_default_thinking(ProcessMode::Translate),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_thinking_name_accepts_common_spellings() {
+        assert_eq!(parse_thinking_name("think"), Some(ThinkingMode::Think));
+        assert_eq!(parse_thinking_name(" Think "), Some(ThinkingMode::Think));
+        for s in ["no_think", "no-think", "nothink", "NO_THINK"] {
+            assert_eq!(parse_thinking_name(s), Some(ThinkingMode::NoThink), "{s}");
+        }
+        assert_eq!(parse_thinking_name("off"), None);
+        assert_eq!(parse_thinking_name(""), None);
     }
 
     #[test]

@@ -217,7 +217,7 @@ pub fn render(
 
                 if matches!(state, OverlayState::Capturing) {
                     render_tab_bar(
-                        ui, mode, ProcessMode::ALL,
+                        ui, mode, ProcessMode::display_order(),
                         thinking, pinned, preview_mode, source_label,
                         &mut action,
                     );
@@ -863,7 +863,7 @@ fn render_tab_bar(
     let highlight = preview_mode.unwrap_or(current);
     ui.horizontal(|ui| {
         // Mode tabs (left side)
-        for &mode in ProcessMode::ALL {
+        for &mode in ProcessMode::display_order() {
             let is_available = available_modes.contains(&mode);
             let is_selected = mode == highlight && is_available;
 
