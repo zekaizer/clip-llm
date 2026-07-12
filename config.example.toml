@@ -10,7 +10,7 @@
 #
 # Placeholders (substituted at runtime):
 #   {primary_lang}, {secondary_lang}  -> in [translate]
-#   {primary_lang}                    -> in [summarize] (summaries are primary-language only)
+#   {primary_lang}                    -> in [summarize] and [explain] (both output primary-language only)
 #   {style}, {length}                 -> only in [rephrase].base
 # Any other {token} is passed through to the model unchanged.
 
@@ -77,7 +77,7 @@ single_tap_pinned = false
 double_tap_pinned = false
 # Tab-bar order; the first entry is the mode selected at startup. Reorders
 # only — modes left out are appended in built-in order, never hidden.
-# tabs = ["translate", "rephrase", "summarize"]
+# tabs = ["translate", "rephrase", "summarize", "explain"]
 
 # Language names substituted into {primary_lang} / {secondary_lang}.
 [languages]
@@ -138,3 +138,10 @@ keeping technical terms intact. Use this markdown template, omitting empty secti
 
 ## Conclusion"""
 image_prompt = "You are an image analyst. Describe the image(s) in {primary_lang}. Describe ONLY what is visible — do not speculate."
+
+# Explain mode. Explains the clipboard content (code, error messages, logs,
+# prose, terminology) in {primary_lang}. Text-only: image-only clipboards
+# stay restricted to Summarize.
+[explain]
+# thinking = "think"
+prompt = "You are an explainer for software engineering content. Explain what the input is, what it means, and why it matters, in {primary_lang}. Keep technical terms, code, and URLs in their original form. Keep the output under 1500 characters."
