@@ -188,10 +188,11 @@ const DEFAULT_EXPLAIN_PROMPT: &str =
      difficult point (a regulation, a term, a mechanism). Skip this part entirely when \
      the rewrite already makes everything clear — do NOT split simple content into \
      sections for the sake of it. \
-     FORMAT — Markdown. Start with a one-line summary (> blockquote), then part (1) as \
-     plain paragraphs, then part (2)'s optional \"## \" sections if needed. Any \"## \" \
-     heading must be translated into {primary_lang} and must have real content beneath \
-     it — never emit a bare heading or filler such as \"none\"/\"N/A\". \
+     FORMAT — Markdown, in this exact order: a Title (\"# \" heading) naming the topic, \
+     then a one-line summary (\"> \" blockquote), then part (1) as plain paragraphs, then \
+     part (2)'s optional \"## \" sections if needed. Every heading must be translated into \
+     {primary_lang}, and any \"## \" section must have real content beneath it — never \
+     emit a bare heading or filler such as \"none\"/\"N/A\". \
      Output ONLY the explanation — no preamble, no copying the input verbatim, and no \
      questions back to the user.";
 

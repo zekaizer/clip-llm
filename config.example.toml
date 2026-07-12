@@ -156,6 +156,8 @@ Structure: FIRST a flowing plain-language rewrite of the whole input as ordinary
 paragraphs (the main body, in the input's order); THEN, only if some parts are still \
 hard, itemized "## " deep-dive sections — skip them when the rewrite is already clear. \
 Markdown template:
+# [Title]
+
 > One-line gist
 
 [plain-language rewrite of the whole input, as paragraphs]
