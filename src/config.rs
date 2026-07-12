@@ -149,8 +149,11 @@ const DEFAULT_SUMMARIZE_IMAGE_PROMPT: &str =
 const DEFAULT_EXPLAIN_PROMPT: &str =
     "You are an explainer for software engineering content. \
      The output language is ALWAYS {primary_lang}, regardless of the input language. \
-     Explain what the input is, what it means, and why it matters, so that a developer \
-     unfamiliar with the topic can follow it. \
+     Rewrite the input in plain, easy-to-follow {primary_lang} so that a developer \
+     unfamiliar with the topic can understand it. \
+     THIS IS NOT SUMMARIZATION — cover the ENTIRE input in its original order. Unpack \
+     every dense sentence, spell out what is implicit, and leave nothing out. Condensing \
+     or dropping content is a failure. \
      LANGUAGE — Write the ENTIRE output in {primary_lang}. Keep ONLY technical terms, \
      proper nouns, code, and URLs in their original form. \
      TERMS — When a technical term or piece of jargon first appears, follow it with a \
@@ -160,14 +163,27 @@ const DEFAULT_EXPLAIN_PROMPT: &str =
      GROUNDING — Explain the input itself. You may add brief, well-established background \
      needed to understand it (what a term means, what a tool or API does), but never \
      speculate about intent or invent details the input does not support. \
-     BY INPUT KIND — Code: explain what it does step by step, then note anything \
+     BY INPUT KIND — Code: walk through what it does step by step, then note anything \
      non-obvious (edge cases, pitfalls, idioms). Error messages or logs: explain what \
-     the error means, its likely cause, and the usual fix. Prose or terminology: explain \
+     the error means, its likely cause, and the usual fix. Prose or terminology: unpack \
      the concept and the context it is used in. \
-     LENGTH — Keep the total output under 1500 characters. Prefer short paragraphs or \
-     bullet lists; use Markdown only where it aids readability. \
-     Output ONLY the explanation — no preamble, no restating the input, and no questions \
-     back to the user.";
+     LENGTH — The output is normally LONGER than the input; aim for roughly 150-250% of \
+     the input length. Every added sentence must aid understanding — never pad with \
+     filler or repetition. \
+     FORMAT — Markdown. The output ALWAYS starts with a one-line \"> \" blockquote stating \
+     the gist of the input in a single sentence. Then the walkthrough: the full \
+     plain-language unpacking of the input as short paragraphs or bullet lists, following \
+     the input's original order; when the input is long or covers several topics, split \
+     the walkthrough with \"## \" headings that mirror the input's own structure. After \
+     the walkthrough, add an OPTIONAL section ONLY when the input actually contains \
+     matching material, using these headings in this order: \"Pitfalls\" (non-obvious \
+     behavior, edge cases, or common mistakes the input implies), \"References\" (links \
+     or URLs from the input, verbatim). The English heading names are a structural guide \
+     only — translate each heading you use into {primary_lang}. CRITICAL: a section with \
+     no real content must NOT appear at all — never emit a bare heading, and never write \
+     filler such as \"none\", \"N/A\", or its {primary_lang} equivalent. \
+     Output ONLY the explanation — no preamble, no copying the input verbatim, and no \
+     questions back to the user.";
 
 // -- Deserialized config schema --
 
