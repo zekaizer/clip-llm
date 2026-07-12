@@ -165,41 +165,34 @@ const DEFAULT_EXPLAIN_PROMPT: &str =
      document line by line. \
      LANGUAGE — Write the ENTIRE output in {primary_lang}. Keep ONLY technical terms, \
      proper nouns, code, and URLs in their original form. \
-     TERMS — When a technical term or piece of jargon first appears, follow it with a \
-     brief plain-{primary_lang} explanation in parentheses, e.g. \"mutex (a lock that \
-     lets only one thread in at a time)\" rendered in {primary_lang}. Gloss each term \
-     only once; skip terms any developer already knows. \
      GROUNDING — Added background must be well-established knowledge; never speculate \
      about intent or invent facts the input does not support. \
-     BY INPUT KIND — Code: walk through what it does step by step, then note anything \
-     non-obvious (edge cases, pitfalls, idioms). Error messages or logs: explain what \
-     the error means, its likely cause, and the usual fix. Prose or terminology: teach \
-     the concepts involved and the context they live in. \
      LENGTH — The output is normally LONGER than the input; aim for roughly 150-250% of \
      the input length. Every added sentence must aid understanding — never pad with \
      filler or repetition. \
-     STRUCTURE — Two parts, in this order: \
-     (1) FIRST, a plain-language rewrite of the WHOLE input that PRESERVES THE INPUT'S \
-     OWN FORM — the same content made easy to read, in the input's original order and \
-     shape. Mirror how the input is laid out: if it is a numbered/step-by-step procedure, \
-     keep the steps and their numbering; if it is a list, keep it as a list; if it is \
-     running prose, keep it as prose. Preserve structural cues the input uses (step \
-     numbers, ordering, and inline emoji or flags such as country flags). Do NOT flatten \
-     a structured input into one paragraph blob, and do NOT impose structure the input \
-     does not have. This part is always present and is the main body. \
-     (2) THEN, ONLY IF the input has genuinely hard parts that still need more unpacking \
-     after the rewrite, add itemized deep-dive sections under \"## \" headings, one per \
-     difficult point (a regulation, a term, a mechanism). Skip this part entirely when \
-     the rewrite already makes everything clear — do NOT split simple content into \
-     sections for the sake of it. \
-     FORMAT — Markdown, in this exact order: a Title (\"# \" heading) naming the topic, \
-     then a one-line summary (\"> \" blockquote), then part (1) rewritten in the input's \
-     own form, then part (2)'s optional \"## \" sections if needed. \
-     The \"> \" summary is a SHORT distilled gist in your own words — at most one plain \
-     sentence capturing only the single main point. It must NOT copy or lightly \
-     paraphrase the input's wording, and must NOT try to restate every clause; a summary \
-     that is nearly as long as the opening sentence, or that reuses its phrasing, is \
-     wrong. Strip the jargon here — save the term glosses for the body. \
+     Follow this FIXED template every time — same skeleton for every input: \
+     LINE 1 — a Title as a \"# \" heading naming the topic. \
+     LINE 2 — a one-line summary as a \"> \" blockquote: a SHORT distilled gist in your \
+     own words, at most one plain sentence capturing only the single main point, with the \
+     jargon stripped out. It must NOT copy or lightly paraphrase the input's wording; a \
+     summary that is nearly as long as the opening sentence, or that reuses its phrasing, \
+     is wrong. \
+     BODY (always present, the main part) — a plain-language rewrite of the WHOLE input. \
+     This rewrite is ALWAYS the place the explaining happens: as each technical term or \
+     piece of jargon first appears, immediately follow it with a brief plain-{primary_lang} \
+     explanation in parentheses, e.g. \"mutex (한 번에 하나의 스레드만 들어오게 하는 잠금)\". \
+     Gloss each term once; skip terms any developer already knows. NEVER reproduce the \
+     input's sentences unchanged and defer the explanation elsewhere — an un-glossed near-copy \
+     of the input is a failure. PRESERVE THE INPUT'S OWN FORM: keep its order and shape — a \
+     numbered procedure stays numbered steps, a list stays a list, running prose stays prose; \
+     keep structural cues (step numbers, ordering, inline emoji or country flags). Do NOT \
+     flatten a structured input into one blob, and do NOT impose structure the input lacks. \
+     DEEP-DIVE SECTIONS (conditional) — add \"## \" sections AFTER the body ONLY for a \
+     concept whose mechanism genuinely needs several more sentences than its inline gloss \
+     gave (how/why it actually works). One section per such concept, and each must add NEW \
+     detail beyond the parenthetical — never restate the gloss. If the body's inline \
+     glosses already make everything clear, output NO sections at all. Apply this test \
+     the same way every time so similar inputs get the same shape. \
      Every heading must be translated into {primary_lang}, and any \"## \" section must \
      have real content beneath it — never emit a bare heading or filler such as \
      \"none\"/\"N/A\". \

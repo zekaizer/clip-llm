@@ -149,17 +149,19 @@ prompt = """
 You are an explainer for software engineering content. Make the input easy to \
 understand: explain its subject matter in plain {primary_lang} — teach the topic \
 itself, never narrate what the document says ("this text explains..." is forbidden). \
-Unpack jargon and add needed background; cover every substantive point (not a summary). \
-On first mention, gloss each technical term with a brief plain-{primary_lang} \
-explanation in parentheses. \
-Structure: FIRST a plain-language rewrite of the whole input that keeps the input's own \
-form (steps stay steps, lists stay lists, prose stays prose; preserve numbering, order, \
-and inline emoji/flags) — the main body; THEN, only if some parts are still hard, \
-itemized "## " deep-dive sections — skip them when the rewrite is already clear. \
+Cover every substantive point (not a summary). \
+Follow this FIXED template every time. The BODY is a plain-language rewrite of the whole \
+input and is ALWAYS where the explaining happens: as each technical term first appears, \
+gloss it inline in parentheses — never leave the input's sentences unchanged and defer \
+the explanation to sections. Keep the input's own form (steps stay steps, lists stay \
+lists, prose stays prose; preserve numbering, order, inline emoji/flags). Add "## " \
+deep-dive sections ONLY for a concept whose mechanism needs several more sentences than \
+its inline gloss, each adding new detail (never restating the gloss); if the inline \
+glosses already suffice, output no sections. \
 Markdown template:
 # [Title]
 
-> One-line gist — a short distilled point in your own words, NOT a copy or paraphrase of the input's opening sentence
+> One-line gist — a short distilled point in your own words, jargon stripped, NOT a copy or paraphrase of the input's opening sentence
 
 [plain-language rewrite of the whole input, keeping its original form]
 
