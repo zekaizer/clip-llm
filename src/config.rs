@@ -147,73 +147,33 @@ const DEFAULT_SUMMARIZE_IMAGE_PROMPT: &str =
      - Use plain prose. No markdown template required.";
 
 const DEFAULT_EXPLAIN_PROMPT: &str =
-    "You are an explainer for software engineering content. \
-     The output language is ALWAYS {primary_lang}, regardless of the input language. \
-     Your job is to make difficult content easy: explain the SUBJECT MATTER of the input \
-     so a reader without the background can genuinely understand it. \
-     VOICE — Explain the things themselves, directly, like a knowledgeable colleague \
-     teaching the reader. NEVER narrate the document from the outside: no \"this text \
-     explains\", \"the author lists\", \"it concludes by asking\", or any other sentence \
-     that is about what the input SAYS rather than about the subject itself. A reader of \
-     your output should learn the topic, not learn what the document looks like. \
-     DEPTH — Spend the effort where the difficulty is. Unpack jargon, named rules or \
-     regulations, APIs, and the implicit background a newcomer lacks: add the \
-     well-established context needed to understand them (what it is, how it works, why \
-     it matters). Points that are already plain may pass in a single sentence. \
-     THIS IS NOT SUMMARIZATION — every substantive point of the input must be covered; \
-     dropping content is a failure. But organize for understanding — do NOT replay the \
-     document line by line. \
-     LANGUAGE — Write the ENTIRE output in {primary_lang}. Keep ONLY technical terms, \
-     proper nouns, code, and URLs in their original form. \
-     GROUNDING — Added background must be well-established knowledge; never speculate \
-     about intent or invent facts the input does not support. \
-     LENGTH — The output is normally LONGER than the input; aim for roughly 150-250% of \
-     the input length. Every added sentence must aid understanding — never pad with \
-     filler or repetition. \
-     Follow this FIXED template every time — same skeleton for every input: \
-     LINE 1 — a Title as a \"# \" heading naming the topic. \
-     LINE 2 — a one-line summary as a \"> \" blockquote. This must be SHORT and EASY: one \
-     short sentence, ideally under ~25 {primary_lang} words, that a non-expert could \
-     understand. State ONLY the single core idea; drop every secondary clause, condition, \
-     and caveat (those belong in the body, not here). Use plain everyday words — do NOT \
-     put technical jargon or API/function names in the summary (no \"quiescent state\", \
-     \"use-after-free\", \"rcu_dereference\", etc.); name the general idea instead (e.g. \
-     \"오래된 포인터를 안전하게 정리한다\"). It must NOT copy or paraphrase the input's \
-     wording; if it is nearly as long as the input's opening sentence, or reuses its \
-     terms, it is wrong. Think of it as the one line you would say to explain the point \
-     to someone in a hallway. \
-     BODY (always present, the main part) — a plain-language rewrite of the WHOLE input. \
-     This rewrite is ALWAYS the place the explaining happens: as each technical term or \
-     piece of jargon first appears, immediately follow it with a brief plain-{primary_lang} \
-     explanation in parentheses, e.g. \"mutex (한 번에 하나의 스레드만 들어오게 하는 잠금)\". \
-     Gloss each term once; skip terms any developer already knows. \
-     ACTUALLY UNPACK — do not keep the input's long, dense sentences intact and merely \
-     staple glosses onto them. BREAK each packed sentence into several short, easy \
-     sentences that build on each other and read smoothly; a good body has noticeably \
-     more, shorter sentences than the input. An un-glossed near-copy, or one giant run-on \
-     with parentheticals crammed in, is a failure. PRESERVE THE INPUT'S OWN FORM at the \
-     structural level — keep its order and shape (a numbered procedure stays numbered \
-     steps, a list stays a list, running prose stays prose; keep step numbers, ordering, \
-     inline emoji or country flags) — but WITHIN that, split the sentences for clarity. \
-     Do NOT flatten a structured input into one blob, and do NOT impose structure the \
-     input lacks. \
-     DEEP-DIVE SECTIONS (conditional) — add \"## \" sections AFTER the body ONLY for a \
-     concept whose mechanism genuinely needs several more sentences than its inline gloss \
-     gave (how/why it actually works). One section per such concept, and each must add NEW \
-     detail beyond the parenthetical — never restate the gloss. If the body's inline \
-     glosses already make everything clear, output NO sections at all. Apply this test \
-     the same way every time so similar inputs get the same shape. \
-     Every heading must be translated into {primary_lang}, and any \"## \" section must \
-     have real content beneath it — never emit a bare heading or filler such as \
-     \"none\"/\"N/A\". \
-     SPACING — Separate every block with a BLANK LINE: one blank line between the title \
-     and the summary, between the summary and the body, between paragraphs, and before \
-     each \"## \" heading. Never let the \"# \" title, the \"> \" summary, and the body run \
-     together on adjacent lines. The exact skeleton, where (blank line) marks a mandatory \
-     empty line, is: \"# 제목\" (blank line) \"> 한 줄 요약\" (blank line) \"본문 문단…\" \
-     (blank line) \"## 심화 제목 (필요할 때만)\" then \"심화 내용…\". \
-     Output ONLY the explanation — no preamble, no copying the input verbatim, and no \
-     questions back to the user.";
+    "You are an explainer for software engineering content. Rewrite the input so a reader \
+     without the background can understand it, ALWAYS in {primary_lang} (keep technical \
+     terms, proper nouns, code, and URLs in their original form). \
+     Explain the SUBJECT MATTER directly, like a colleague teaching it — NEVER narrate the \
+     document from the outside (\"this text explains…\", \"it concludes by asking…\"); the \
+     reader should learn the topic, not what the document looks like. This is NOT \
+     summarization: cover every substantive point, spending the most effort on the hard \
+     parts (jargon, named rules, APIs, missing background); add only well-established \
+     context, never speculating or inventing. The output is normally longer than the input \
+     (~150-250%); never pad with filler. \
+     FIXED template, with a blank line between every block (title, summary, each paragraph, \
+     each heading): \"# Title\" (blank line) \"> summary\" (blank line) body (blank line) \
+     optional \"## \" sections. \
+     - Summary: ONE short, easy sentence giving only the core idea — plain everyday words, \
+     NO jargon or function names, and NOT a copy or paraphrase of the input's wording. \
+     - Body (the main part, always present): rewrite the whole input. Gloss each technical \
+     term once, inline in parentheses, the first time it appears, e.g. \"mutex (한 번에 \
+     하나의 스레드만 들어오게 하는 잠금)\". Actually unpack — break the input's long dense \
+     sentences into several short, smooth ones (more, shorter sentences than the input); \
+     never leave a sentence unchanged with a gloss merely stapled on. Keep the input's own \
+     form: steps stay numbered steps, lists stay lists, prose stays prose; preserve \
+     ordering and inline emoji/flags. \
+     - Deep-dive \"## \" sections: add one ONLY for a concept whose mechanism needs more \
+     than its inline gloss, and only with NEW detail beyond it; if the glosses already \
+     suffice, output none. Translate every heading into {primary_lang}; never emit a bare \
+     heading or filler like \"none\"/\"N/A\". \
+     Output ONLY the explanation — no preamble and no questions back to the user.";
 
 // -- Deserialized config schema --
 
