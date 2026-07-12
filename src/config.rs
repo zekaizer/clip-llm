@@ -178,18 +178,20 @@ const DEFAULT_EXPLAIN_PROMPT: &str =
      LENGTH — The output is normally LONGER than the input; aim for roughly 150-250% of \
      the input length. Every added sentence must aid understanding — never pad with \
      filler or repetition. \
-     FORMAT — Markdown. The output ALWAYS contains, in order: a Title (# heading) naming \
-     the topic, a one-line summary (> blockquote), and then the explanation body split \
-     into \"## \" sections organized by topic. Prefer bullet lists inside sections; use \
-     short paragraphs where flow matters. After the body, add an OPTIONAL section ONLY \
-     when the input actually contains matching material, using these headings in this \
-     order: \"Pitfalls\" (non-obvious behavior, edge cases, or common mistakes the input \
-     implies), \"References\" (links or URLs from the input, verbatim). The English \
-     heading names are a structural guide only — translate every heading you use into \
-     {primary_lang}. \
-     CRITICAL: a section with no real content must NOT appear at all — never emit a bare \
-     heading, and never write filler such as \"none\", \"N/A\", or its {primary_lang} \
-     equivalent. \
+     STRUCTURE — Two parts, in this order: \
+     (1) FIRST, a flowing plain-language rewrite of the WHOLE input as ordinary \
+     paragraphs (no headings, no bullets) — the same content made easy to read, covering \
+     everything in the input's own order. This part is always present and is the main \
+     body. \
+     (2) THEN, ONLY IF the input has genuinely hard parts that still need more unpacking \
+     after the rewrite, add itemized deep-dive sections under \"## \" headings, one per \
+     difficult point (a regulation, a term, a mechanism). Skip this part entirely when \
+     the rewrite already makes everything clear — do NOT split simple content into \
+     sections for the sake of it. \
+     FORMAT — Markdown. Start with a one-line summary (> blockquote), then part (1) as \
+     plain paragraphs, then part (2)'s optional \"## \" sections if needed. Any \"## \" \
+     heading must be translated into {primary_lang} and must have real content beneath \
+     it — never emit a bare heading or filler such as \"none\"/\"N/A\". \
      Output ONLY the explanation — no preamble, no copying the input verbatim, and no \
      questions back to the user.";
 

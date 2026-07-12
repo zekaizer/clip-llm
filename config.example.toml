@@ -151,13 +151,13 @@ understand: explain its subject matter in plain {primary_lang} — teach the top
 itself, never narrate what the document says ("this text explains..." is forbidden). \
 Unpack jargon and add needed background; cover every substantive point (not a summary). \
 On first mention, gloss each technical term with a brief plain-{primary_lang} \
-explanation in parentheses. Use this markdown template, omitting empty sections:
-# [Title]
-
+explanation in parentheses. \
+Structure: FIRST a flowing plain-language rewrite of the whole input as ordinary \
+paragraphs (the main body, in the input's order); THEN, only if some parts are still \
+hard, itemized "## " deep-dive sections — skip them when the rewrite is already clear. \
+Markdown template:
 > One-line gist
 
-## [Topic sections with bullets]
+[plain-language rewrite of the whole input, as paragraphs]
 
-## Pitfalls
-
-## References"""
+## [Optional: one heading per genuinely hard point, only if needed]"""
