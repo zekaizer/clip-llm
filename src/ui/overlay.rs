@@ -20,10 +20,6 @@ fn accent_color_dim() -> egui::Color32 {
 fn accent_color_preview() -> egui::Color32 {
     egui::Color32::from_rgba_unmultiplied(108, 166, 255, 140)
 }
-/// Action button: distance (px) at which the button becomes fully transparent.
-const ACTION_BTN_FADE_RADIUS: f32 = 80.0;
-/// Action button: maximum alpha value at zero distance from cursor.
-const ACTION_BTN_ALPHA_MAX: f32 = 200.0;
 /// Action button size (square).
 const ACTION_BTN_SIZE: f32 = 26.0;
 /// Height of the shared top "status/think" row: Processing's spinner+label
@@ -33,9 +29,10 @@ const ACTION_BTN_SIZE: f32 = 26.0;
 /// showing — no shift in the text block below it across the Processing→Result
 /// transition, or between the row's own content variants.
 const TOP_ROW_HEIGHT: f32 = 24.0;
-/// Height of the shared bottom "controls" row: Processing's Cancel button and
-/// Result's reserved space for the floating action buttons (see
-/// `ACTION_BTN_SIZE`, which this matches) both occupy this same slot.
+/// Height of the shared bottom "controls" row: Processing's Cancel button,
+/// and Result's/Error's docked action buttons (sized `ACTION_BTN_SIZE`, which
+/// this matches) all occupy this same slot — only the contents swap in place
+/// across state transitions.
 const BOTTOM_ROW_HEIGHT: f32 = ACTION_BTN_SIZE;
 /// The frame's inner margin, named so the latch height math can subtract
 /// exactly what this margin adds back around the measured inner content,
@@ -293,7 +290,7 @@ pub fn render(
 
     // Keyboard actions in the Result state (#52). Enter triggers the primary
     // action — paste-replace for double-tap, copy for single-tap — mirroring
-    // the floating action button. Cmd/Ctrl+C copies the full result, but only
+    // the docked action button. Cmd/Ctrl+C copies the full result, but only
     // when no text is selected: egui's label selection handles its own copy,
     // and overwriting it would clobber a deliberate partial-text copy.
     if matches!(state, OverlayState::Result(_)) {
@@ -551,35 +548,27 @@ fn render_error(
             .color(egui::Color32::from_rgb(255, 100, 100))
             .size(14.0),
     );
+    // Bottom controls row, same slot and docked-button style as Result's (see
+    // `BOTTOM_ROW_HEIGHT`): retry at the far right, copy-debug to its left —
+    // matching their relative order in Result, which only adds the primary
+    // copy/paste button after them.
     if can_retry || debug_available {
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            if can_retry {
-                let retry_btn = egui::Button::new(
-                    egui::RichText::new("Retry").size(12.0).color(egui::Color32::WHITE),
-                )
-                .fill(egui::Color32::from_rgba_unmultiplied(50, 50, 50, 200))
-                .corner_radius(6.0);
-                if ui.add(retry_btn).clicked() {
+        fixed_height_row(ui, BOTTOM_ROW_HEIGHT, |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if can_retry && docked_action_button(ui, "\u{21bb}", "Retry") {
                     *action = OverlayAction::Retry;
                 }
-            }
-            if debug_available {
-                let debug_btn = egui::Button::new(
-                    egui::RichText::new("Copy debug")
-                        .size(12.0)
-                        .color(egui::Color32::from_gray(190)),
-                )
-                .fill(egui::Color32::from_rgba_unmultiplied(50, 50, 50, 200))
-                .corner_radius(6.0);
-                if ui
-                    .add(debug_btn)
-                    .on_hover_text("Copy the raw request + response to the clipboard")
-                    .clicked()
+                if debug_available
+                    && docked_action_button(
+                        ui,
+                        "\u{1f50d}",
+                        "Copy the raw request + response to the clipboard",
+                    )
                 {
                     *action = OverlayAction::CopyDebug;
                 }
-            }
+            });
         });
     }
 }
@@ -666,12 +655,6 @@ fn render_result(
         _ => MAX_RESULT_HEIGHT,
     };
 
-    // Action buttons: always rendered at top-right of result area.
-    // auto_copy (double-tap): paste/replace button (↩)
-    // !auto_copy (single-tap): copy button (📋)
-    // plus a retry button (↻) to its left, for a fresh generation.
-    // Opacity changes on hover (subtle when idle, prominent when hovered — #24).
-    let result_top = ui.cursor().min;
     // While pinned and collapsed, the ScrollArea fills its whole budget
     // (`shrink_to_fit: false`) rather than shrinking to short content, so the
     // text column visually owns the latched space instead of leaving an
@@ -680,10 +663,8 @@ fn render_result(
     render_scrollable_text(ui, ("result", mode), text, text_max_height, false, shrink_to_fit);
 
     // Bottom row: shared slot with Processing's Cancel-button row (see
-    // `BOTTOM_ROW_HEIGHT`). The action buttons float over the text and take
-    // no layout space of their own, so this row instead shows a passive
-    // completion summary — filling what would otherwise be empty space left
-    // by the spinner/elapsed/Cancel controls disappearing, and mirroring
+    // `BOTTOM_ROW_HEIGHT`): the passive completion summary on the left, the
+    // docked action buttons right-aligned in the otherwise-empty right side —
     // "controls swap in place" the way the top row already does.
     ui.add_space(4.0);
     fixed_height_row(ui, BOTTOM_ROW_HEIGHT, |ui| {
@@ -692,6 +673,41 @@ fn render_result(
                 egui::RichText::new(status).color(egui::Color32::from_gray(120)).size(12.0),
             );
         }
+        // right_to_left: the first button rendered lands at the far right, so
+        // this reads in reverse visual order — primary action at the edge,
+        // then retry, then copy-debug.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // Primary: auto_copy (double-tap) = paste/replace (↩);
+            // otherwise copy (📋), with ✓ confirming a just-done copy (#16a).
+            let (icon, tip) = if auto_copy {
+                ("\u{21a9}", "Paste over the selection")
+            } else if copy_confirmed {
+                ("\u{2713}", "Copied")
+            } else {
+                ("\u{1f4cb}", "Copy to clipboard")
+            };
+            if docked_action_button(ui, icon, tip) {
+                *action = if auto_copy {
+                    OverlayAction::PasteReplace
+                } else {
+                    OverlayAction::CopyToClipboard
+                };
+            }
+            if docked_action_button(ui, "\u{21bb}", "Retry") {
+                *action = OverlayAction::Retry;
+            }
+            // Copy-debug (🔍): copies the raw request + response snapshot.
+            // Shown only when a capture exists for this result.
+            if debug_available
+                && docked_action_button(
+                    ui,
+                    "\u{1f50d}",
+                    "Copy the raw request + response to the clipboard",
+                )
+            {
+                *action = OverlayAction::CopyDebug;
+            }
+        });
     });
     // The floor for "never shorter than the latch" is already applied once,
     // at the true top of the whole inner ui, in `render()` — see the comment
@@ -699,68 +715,27 @@ fn render_result(
     // reserves space measured from the *current* cursor, not from the ui's
     // start, so calling it this late would add phantom extra height on top
     // of everything already drawn rather than act as a floor for the total).
-
-    let btn_size = egui::vec2(ACTION_BTN_SIZE, ACTION_BTN_SIZE);
-    let btn_pos = egui::pos2(
-        result_top.x + OVERLAY_WIDTH - btn_size.x - 2.0,
-        result_top.y + 2.0,
-    );
-    let btn_rect = egui::Rect::from_min_size(btn_pos, btn_size);
-
-    // ✓ confirms a just-completed copy for a moment (#16a).
-    let icon = if auto_copy {
-        "\u{21a9}"
-    } else if copy_confirmed {
-        "\u{2713}"
-    } else {
-        "\u{1f4cb}"
-    };
-    if floating_action_button(ui, btn_rect, icon) {
-        *action = if auto_copy {
-            OverlayAction::PasteReplace
-        } else {
-            OverlayAction::CopyToClipboard
-        };
-    }
-
-    let retry_rect = btn_rect.translate(egui::vec2(-(ACTION_BTN_SIZE + 4.0), 0.0));
-    if floating_action_button(ui, retry_rect, "\u{21bb}") {
-        *action = OverlayAction::Retry;
-    }
-
-    // Copy-debug (🔍): copies the raw request + response snapshot. Shown only
-    // when a capture exists for this result.
-    if debug_available {
-        let debug_rect = retry_rect.translate(egui::vec2(-(ACTION_BTN_SIZE + 4.0), 0.0));
-        if floating_action_button(ui, debug_rect, "\u{1f50d}") {
-            *action = OverlayAction::CopyDebug;
-        }
-    }
 }
 
-/// Floating action button with distance-based fade: fully transparent beyond
-/// [`ACTION_BTN_FADE_RADIUS`] from the cursor, ramping to [`ACTION_BTN_ALPHA_MAX`]
-/// at the button. Returns true when clicked.
-fn floating_action_button(ui: &mut egui::Ui, rect: egui::Rect, icon: &str) -> bool {
-    let alpha = ui.input(|i| {
-        i.pointer.hover_pos().map_or(0u8, |p| {
-            let dist = rect.center().distance(p);
-            if dist >= ACTION_BTN_FADE_RADIUS {
-                0
-            } else {
-                ((1.0 - dist / ACTION_BTN_FADE_RADIUS) * ACTION_BTN_ALPHA_MAX) as u8
-            }
-        })
-    });
-    let btn = egui::Button::new(
-        egui::RichText::new(icon)
-            .size(14.0)
-            .color(egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha)),
-    )
-    .fill(egui::Color32::from_rgba_unmultiplied(50, 50, 50, alpha))
-    .stroke(egui::Stroke::NONE)
-    .corner_radius(4.0);
-    ui.put(rect, btn).clicked()
+/// Docked action button for the bottom controls row: a fixed
+/// [`ACTION_BTN_SIZE`] square, always visible in a subdued tone that
+/// brightens on hover. Returns true when clicked.
+fn docked_action_button(ui: &mut egui::Ui, icon: &str, tooltip: &str) -> bool {
+    let hovered = ui
+        .ctx()
+        .read_response(ui.next_auto_id())
+        .is_some_and(|r| r.hovered());
+    let (fg, bg_alpha) = if hovered {
+        (egui::Color32::WHITE, 200)
+    } else {
+        (egui::Color32::from_gray(170), 90)
+    };
+    let btn = egui::Button::new(egui::RichText::new(icon).size(14.0).color(fg))
+        .min_size(egui::vec2(ACTION_BTN_SIZE, ACTION_BTN_SIZE))
+        .fill(egui::Color32::from_rgba_unmultiplied(50, 50, 50, bg_alpha))
+        .stroke(egui::Stroke::NONE)
+        .corner_radius(4.0);
+    ui.add(btn).on_hover_text(tooltip).clicked()
 }
 
 fn render_param_pills<T: Copy + PartialEq>(
