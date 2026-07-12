@@ -161,7 +161,7 @@ glosses already suffice, output no sections. \
 Markdown template:
 # [Title]
 
-> One-line gist — a short distilled point in your own words, jargon stripped, NOT a copy or paraphrase of the input's opening sentence
+> One-line gist — ONE short easy sentence (~25 words max) a non-expert understands; only the core idea, no jargon or function names, not a copy of the input
 
 [plain-language rewrite of the whole input, keeping its original form]
 

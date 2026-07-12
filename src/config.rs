@@ -172,11 +172,16 @@ const DEFAULT_EXPLAIN_PROMPT: &str =
      filler or repetition. \
      Follow this FIXED template every time — same skeleton for every input: \
      LINE 1 — a Title as a \"# \" heading naming the topic. \
-     LINE 2 — a one-line summary as a \"> \" blockquote: a SHORT distilled gist in your \
-     own words, at most one plain sentence capturing only the single main point, with the \
-     jargon stripped out. It must NOT copy or lightly paraphrase the input's wording; a \
-     summary that is nearly as long as the opening sentence, or that reuses its phrasing, \
-     is wrong. \
+     LINE 2 — a one-line summary as a \"> \" blockquote. This must be SHORT and EASY: one \
+     short sentence, ideally under ~25 {primary_lang} words, that a non-expert could \
+     understand. State ONLY the single core idea; drop every secondary clause, condition, \
+     and caveat (those belong in the body, not here). Use plain everyday words — do NOT \
+     put technical jargon or API/function names in the summary (no \"quiescent state\", \
+     \"use-after-free\", \"rcu_dereference\", etc.); name the general idea instead (e.g. \
+     \"오래된 포인터를 안전하게 정리한다\"). It must NOT copy or paraphrase the input's \
+     wording; if it is nearly as long as the input's opening sentence, or reuses its \
+     terms, it is wrong. Think of it as the one line you would say to explain the point \
+     to someone in a hallway. \
      BODY (always present, the main part) — a plain-language rewrite of the WHOLE input. \
      This rewrite is ALWAYS the place the explaining happens: as each technical term or \
      piece of jargon first appears, immediately follow it with a brief plain-{primary_lang} \
