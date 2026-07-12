@@ -181,12 +181,19 @@ struct PromptConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct ApiConfig {
+    /// API provider (alternative to `CLIP_LLM_PROVIDER`): `"openai"` (default,
+    /// any OpenAI-compatible chat/completions endpoint) or `"grok-oauth"`
+    /// (xAI's Responses API authenticated by the Grok CLI's OAuth session).
+    provider: Option<String>,
     /// API base URL (alternative to `CLIP_LLM_API_ENDPOINT`).
     endpoint: Option<String>,
     /// Model name (alternative to `CLIP_LLM_MODEL`).
     model: Option<String>,
     /// Bearer token (alternative to `CLIP_LLM_API_KEY`).
     api_key: Option<String>,
+    /// Path to the provider CLI's credential store, for OAuth providers.
+    /// Defaults per provider (`grok-oauth`: `~/.grok/auth.json`).
+    auth_file: Option<String>,
     /// Whether to use SSE streaming. `CLIP_LLM_NO_STREAM`, when set, forces this
     /// off, but there is no environment variable that forces it on — so a
     /// `streaming = false` here can only be re-enabled by editing the file.
@@ -323,9 +330,19 @@ struct SummarizeConfig {
 }
 
 impl Config {
+    /// Configured API provider, if any (`[api].provider`).
+    pub fn api_provider(&self) -> Option<&str> {
+        self.api.provider.as_deref()
+    }
+
     /// Configured API endpoint, if any (`[api].endpoint`).
     pub fn api_endpoint(&self) -> Option<&str> {
         self.api.endpoint.as_deref()
+    }
+
+    /// Configured OAuth credential-store path, if any (`[api].auth_file`).
+    pub fn api_auth_file(&self) -> Option<&str> {
+        self.api.auth_file.as_deref()
     }
 
     /// Configured model name, if any (`[api].model`).
@@ -658,9 +675,11 @@ fn starter_template() -> String {
     // [api] — the three required keys are uncommented (empty = unset = startup
     // error); env vars still win over these when set.
     t.push_str("[api]\n");
+    t.push_str(&s("provider", "openai", "or \"grok-oauth\": xAI Responses API via the Grok CLI's sign-in (endpoint/api_key not needed; run `grok` once to sign in)"));
     t.push_str("endpoint = \"\"   # REQUIRED — vLLM base URL, e.g. http://host:8000/v1 (or CLIP_LLM_API_ENDPOINT)\n");
     t.push_str("model    = \"\"   # REQUIRED — model name served by the endpoint (or CLIP_LLM_MODEL)\n");
     t.push_str("api_key  = \"\"   # REQUIRED — access token; use any non-empty value if the server needs none (or CLIP_LLM_API_KEY)\n");
+    t.push_str(&s("auth_file", "~/.grok/auth.json", "grok-oauth only: override the credential-store path"));
     t.push_str(&r("streaming", "true", "false disables SSE (like CLIP_LLM_NO_STREAM)"));
     t.push('\n');
 
