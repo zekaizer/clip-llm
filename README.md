@@ -4,13 +4,13 @@ System-wide LLM clipboard assistant. Captures text via global hotkey, sends it t
 
 ## Features
 
-- **Global hotkey** — `Ctrl+Shift+C` single-tap (read clipboard) / double-tap (copy selection + auto-paste result back)
-- **Translate / Rephrase / Summarize** — three processing modes with per-mode response caching
+- **Global hotkey** — `Ctrl+Shift+C` single-tap (read clipboard) / double-tap (copy selection + auto-paste result back), hold-cycle to switch mode
+- **Translate / Rephrase / Summarize** — three processing modes with per-mode response caching; tab order configurable (`[ui].tabs`)
 - **Rephrase parameters** — style (Correct / Casual / Formal / Business / Technical) and length (Terse / Brief / Same / Detailed / Full)
-- **Vision support** — paste images from clipboard for summarization via multimodal API
-- **Thinking mode** — toggle Think / NoThink per mode; model capability auto-detected at startup
-- **Floating overlay** — draggable popup with streaming response, proximity-fade action button
-- **OpenAI-compatible API** — works with vLLM or any `/v1/chat/completions` endpoint
+- **Vision support** — paste images from clipboard for summarization via multimodal API (`openai` provider)
+- **Thinking mode** — toggle Think / NoThink per mode with configurable per-mode defaults; model capability auto-detected at startup
+- **Floating overlay** — draggable popup with streaming response and docked action buttons (copy/paste, retry, copy-debug)
+- **Two API providers** — `openai`: vLLM or any `/v1/chat/completions` endpoint; `grok-oauth`: xAI's Responses API through the official Grok CLI's sign-in (no API key — tokens auto-refresh and write back to `~/.grok/auth.json`)
 - **Single binary, cross-platform** — macOS & Windows 11, no runtime dependencies
 
 ## Install
@@ -38,7 +38,7 @@ Settings come from a `config.toml` next to the executable (inside
 - [x] Phase 2 — Async API + SSE Streaming
 - [ ] Phase 3 — Status Feedback + System Tray (partial: Windows + macOS tray + friendly errors done; no toast/retry)
 - [ ] Phase 4 — Config File + Multiple Templates (partial: TOML config for prompts + API settings done)
-- [ ] Phase 5 — Template Cycle Selection UI
+- [x] Phase 5 — Template Cycle Selection UI
 - [x] Phase 6 — Windows Build & Distribution (partial: no CI/E2E tests)
 - [ ] Phase 7 — Extended Features
 
@@ -46,9 +46,10 @@ Settings come from a `config.toml` next to the executable (inside
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CLIP_LLM_API_ENDPOINT` | `http://localhost:8000/v1` | LLM API base URL |
-| `CLIP_LLM_MODEL` | `MiniMaxAI/MiniMax-M2.5` | Model name for chat completions |
-| `CLIP_LLM_API_KEY` | *(none)* | Bearer token for API auth (optional) |
+| `CLIP_LLM_PROVIDER` | `openai` | API provider: `openai` (chat/completions) or `grok-oauth` (xAI Responses API via the Grok CLI's OAuth session) |
+| `CLIP_LLM_API_ENDPOINT` | `http://localhost:8000/v1` | LLM API base URL (`grok-oauth` defaults to `https://api.x.ai/v1`) |
+| `CLIP_LLM_MODEL` | `MiniMaxAI/MiniMax-M2.5` | Model name served by the endpoint |
+| `CLIP_LLM_API_KEY` | *(none)* | Bearer token for API auth (unused by `grok-oauth`) |
 | `CLIP_LLM_CUSTOM_HEADERS` | *(none)* | Custom HTTP headers, comma-separated `Key:Value` pairs (e.g. `X-Dep-Ticket:abc,User-Id:u1`) |
 | `CLIP_LLM_NO_STREAM` | *(unset)* | Disable SSE streaming when set |
 | `CLIP_LLM_CONFIG` | *(unset)* | Path to the config TOML (overrides the `config.toml`-next-to-executable lookup) |
@@ -75,10 +76,14 @@ If no file is found — or it is malformed — the built-in defaults are used. E
 key is optional; you only specify what you want to change. The file holds these
 kinds of settings:
 
-- **`[api]`** — connection settings (endpoint, model, API key, custom headers,
-  streaming). Each mirrors a `CLIP_LLM_*` environment variable; the precedence is
-  **env var > config file > built-in default**. (Exception: `CLIP_LLM_NO_STREAM`
-  only forces streaming off — it cannot force `streaming = false` back on.)
+- **`[api]`** — connection settings (provider, endpoint, model, API key, custom
+  headers, streaming). Each mirrors a `CLIP_LLM_*` environment variable; the
+  precedence is **env var > config file > built-in default**. (Exception:
+  `CLIP_LLM_NO_STREAM` only forces streaming off — it cannot force
+  `streaming = false` back on.) With `provider = "grok-oauth"` only `model` is
+  required: sign in once with the Grok CLI (`grok`) and clip-llm reuses (and
+  auto-refreshes) its session from `~/.grok/auth.json` (`auth_file` overrides
+  the path).
 - **`[generation]`** — request parameters (`temperature`, `max_tokens`,
   `request_timeout_secs`, `initial_response_timeout_secs`). No
   environment-variable equivalent: **config file > built-in default**.
@@ -91,6 +96,13 @@ kinds of settings:
   whether a result starts pinned (stays open on focus loss instead of auto-hiding).
   A single-tap result is not auto-copied to the clipboard, so set
   `single_tap_pinned = true` to keep it from disappearing on focus change.
+  `tabs = ["translate", "rephrase", "summarize"]` sets the tab-bar order; the
+  first entry is the mode selected at startup (reorder-only — modes can't be
+  hidden).
+- **per-mode thinking** — `[translate|rephrase|summarize].thinking = "think" |
+  "no_think"` overrides that mode's default thinking (built-ins:
+  translate/rephrase = `no_think`, summarize = `think`); applies only when the
+  connected model supports thinking control.
 - **prompts** — per-mode system prompts, with placeholders substituted at runtime:
   - `{primary_lang}` / `{secondary_lang}` — in the `[translate]` prompt
   - `{primary_lang}` — in the `[summarize]` prompts (summaries are primary-language only)
