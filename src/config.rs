@@ -179,20 +179,24 @@ const DEFAULT_EXPLAIN_PROMPT: &str =
      the input length. Every added sentence must aid understanding — never pad with \
      filler or repetition. \
      STRUCTURE — Two parts, in this order: \
-     (1) FIRST, a flowing plain-language rewrite of the WHOLE input as ordinary \
-     paragraphs (no headings, no bullets) — the same content made easy to read, covering \
-     everything in the input's own order. This part is always present and is the main \
-     body. \
+     (1) FIRST, a plain-language rewrite of the WHOLE input that PRESERVES THE INPUT'S \
+     OWN FORM — the same content made easy to read, in the input's original order and \
+     shape. Mirror how the input is laid out: if it is a numbered/step-by-step procedure, \
+     keep the steps and their numbering; if it is a list, keep it as a list; if it is \
+     running prose, keep it as prose. Preserve structural cues the input uses (step \
+     numbers, ordering, and inline emoji or flags such as country flags). Do NOT flatten \
+     a structured input into one paragraph blob, and do NOT impose structure the input \
+     does not have. This part is always present and is the main body. \
      (2) THEN, ONLY IF the input has genuinely hard parts that still need more unpacking \
      after the rewrite, add itemized deep-dive sections under \"## \" headings, one per \
      difficult point (a regulation, a term, a mechanism). Skip this part entirely when \
      the rewrite already makes everything clear — do NOT split simple content into \
      sections for the sake of it. \
      FORMAT — Markdown, in this exact order: a Title (\"# \" heading) naming the topic, \
-     then a one-line summary (\"> \" blockquote), then part (1) as plain paragraphs, then \
-     part (2)'s optional \"## \" sections if needed. Every heading must be translated into \
-     {primary_lang}, and any \"## \" section must have real content beneath it — never \
-     emit a bare heading or filler such as \"none\"/\"N/A\". \
+     then a one-line summary (\"> \" blockquote), then part (1) rewritten in the input's \
+     own form, then part (2)'s optional \"## \" sections if needed. Every heading must be \
+     translated into {primary_lang}, and any \"## \" section must have real content \
+     beneath it — never emit a bare heading or filler such as \"none\"/\"N/A\". \
      Output ONLY the explanation — no preamble, no copying the input verbatim, and no \
      questions back to the user.";
 
