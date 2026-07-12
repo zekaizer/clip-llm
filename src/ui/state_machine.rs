@@ -725,6 +725,7 @@ impl StateMachine {
                 "rephrase|{:?}|{:?}|{thinking:?}",
                 self.rephrase_params.style, self.rephrase_params.length,
             ),
+            ProcessMode::Explain => format!("explain|{thinking:?}"),
         }
     }
 
@@ -1461,6 +1462,54 @@ mod tests {
             UiEffect::SendProcess { mode: ProcessMode::Summarize, .. }
         )));
         assert!(effects.contains(&UiEffect::ResetAreas));
+    }
+
+    // === Explain mode ===
+
+    #[test]
+    fn text_ready_with_explain_mode() {
+        let mut sm = StateMachine::new(ProcessMode::Explain);
+        let effects = start_processing(&mut sm, "code to explain");
+
+        assert_eq!(*sm.state(), OverlayState::Processing);
+        assert_eq!(sm.mode(), ProcessMode::Explain);
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            UiEffect::SendProcess { mode: ProcessMode::Explain, .. }
+        )));
+    }
+
+    #[test]
+    fn explain_does_not_share_cache_with_other_modes() {
+        let mut sm = new_sm();
+        // Translate → Result
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerResult {
+            text: "translated".into(),
+            think_content: None,
+            request_id: rid, incomplete: None });
+
+        // Switch to Explain: no cache hit — a fresh request goes out.
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Explain));
+        assert_eq!(*sm.state(), OverlayState::Processing);
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            UiEffect::SendProcess { mode: ProcessMode::Explain, .. }
+        )));
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerResult {
+            text: "explained".into(),
+            think_content: None,
+            request_id: rid, incomplete: None });
+
+        // Switching back to Translate serves the translate cache, not explain's.
+        sm.handle(UiEvent::UserSwitchMode(ProcessMode::Translate));
+        assert_eq!(*sm.state(), OverlayState::Result("translated".into()));
+        // And returning to Explain serves the explain cache without a request.
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Explain));
+        assert_eq!(*sm.state(), OverlayState::Result("explained".into()));
+        assert!(!effects.iter().any(|e| matches!(e, UiEffect::SendProcess { .. })));
     }
 
     // === Mode cache ===

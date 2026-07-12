@@ -308,6 +308,7 @@ pub enum ProcessMode {
     Translate,
     Rephrase,
     Summarize,
+    Explain,
 }
 
 impl ProcessMode {
@@ -317,6 +318,7 @@ impl ProcessMode {
         ProcessMode::Translate,
         ProcessMode::Rephrase,
         ProcessMode::Summarize,
+        ProcessMode::Explain,
     ];
 
     /// Tab-bar display order: `[ui].tabs` from the config when set, otherwise
@@ -338,6 +340,7 @@ impl ProcessMode {
             Self::Translate => "Translate",
             Self::Rephrase => "Rephrase",
             Self::Summarize => "Summarize",
+            Self::Explain => "Explain",
         }
     }
 
@@ -346,20 +349,21 @@ impl ProcessMode {
             Self::Translate => "Translating...",
             Self::Rephrase => "Rephrasing...",
             Self::Summarize => "Summarizing...",
+            Self::Explain => "Explaining...",
         }
     }
 
     /// Default thinking mode for this processing mode: the per-mode config
-    /// override (`[translate|rephrase|summarize].thinking`) when set, else the
-    /// built-in default — Translate/Rephrase start fast (NoThink), Summarize
-    /// benefits from reasoning (Think).
+    /// override (`[translate|rephrase|summarize|explain].thinking`) when set,
+    /// else the built-in default — Translate/Rephrase start fast (NoThink),
+    /// Summarize/Explain benefit from reasoning (Think).
     pub fn default_thinking(self) -> ThinkingMode {
         if let Some(configured) = crate::config::get().mode_default_thinking(self) {
             return configured;
         }
         match self {
             Self::Translate | Self::Rephrase => ThinkingMode::NoThink,
-            Self::Summarize => ThinkingMode::Think,
+            Self::Summarize | Self::Explain => ThinkingMode::Think,
         }
     }
 
@@ -410,6 +414,9 @@ impl ProcessMode {
             }
             Self::Summarize => {
                 crate::config::substitute(config.summarize_prompt(), primary, secondary)
+            }
+            Self::Explain => {
+                crate::config::substitute(config.explain_prompt(), primary, secondary)
             }
         };
         // Prepend the shared preamble (`[prompt].preamble`) that applies to every
@@ -530,8 +537,9 @@ mod tests {
         let all = ProcessMode::ALL;
         assert_eq!(ProcessMode::Translate.next_available(all), ProcessMode::Rephrase);
         assert_eq!(ProcessMode::Rephrase.next_available(all), ProcessMode::Summarize);
+        assert_eq!(ProcessMode::Summarize.next_available(all), ProcessMode::Explain);
         // Wraps back to the first mode.
-        assert_eq!(ProcessMode::Summarize.next_available(all), ProcessMode::Translate);
+        assert_eq!(ProcessMode::Explain.next_available(all), ProcessMode::Translate);
     }
 
     #[test]

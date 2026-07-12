@@ -10,7 +10,7 @@
 #
 # Placeholders (substituted at runtime):
 #   {primary_lang}, {secondary_lang}  -> in [translate]
-#   {primary_lang}                    -> in [summarize] (summaries are primary-language only)
+#   {primary_lang}                    -> in [summarize] and [explain] (both output primary-language only)
 #   {style}, {length}                 -> only in [rephrase].base
 # Any other {token} is passed through to the model unchanged.
 
@@ -77,7 +77,7 @@ single_tap_pinned = false
 double_tap_pinned = false
 # Tab-bar order; the first entry is the mode selected at startup. Reorders
 # only — modes left out are appended in built-in order, never hidden.
-# tabs = ["translate", "rephrase", "summarize"]
+# tabs = ["translate", "rephrase", "summarize", "explain"]
 
 # Language names substituted into {primary_lang} / {secondary_lang}.
 [languages]
@@ -138,3 +138,33 @@ keeping technical terms intact. Use this markdown template, omitting empty secti
 
 ## Conclusion"""
 image_prompt = "You are an image analyst. Describe the image(s) in {primary_lang}. Describe ONLY what is visible — do not speculate."
+
+# Explain mode. Rewrites the clipboard content (code, error messages, logs,
+# prose, terminology) in plain, easy-to-follow {primary_lang} — NOT a summary:
+# the whole input is unpacked, so the output is normally longer than the input.
+# Text-only: image-only clipboards stay restricted to Summarize.
+[explain]
+# thinking = "think"
+prompt = """
+You are an explainer for software engineering content. Make the input easy to \
+understand: explain its subject matter in plain {primary_lang} — teach the topic \
+itself, never narrate what the document says ("this text explains..." is forbidden). \
+Cover every substantive point (not a summary). \
+Follow this FIXED template every time. The BODY is a plain-language rewrite of the whole \
+input and is ALWAYS where the explaining happens: as each technical term first appears, \
+gloss it inline in parentheses — never leave the input's sentences unchanged and defer \
+the explanation to sections. Actually unpack: break the input's long dense sentences \
+into several short easy ones, don't just staple glosses onto the originals. Keep the \
+input's own form (steps stay steps, lists stay lists, prose stays prose; preserve \
+numbering, order, inline emoji/flags). Add "## " deep-dive sections ONLY for a concept \
+whose mechanism needs several more sentences than its inline gloss, each adding new \
+detail (never restating the gloss); if the inline glosses already suffice, output no \
+sections. Separate every block (title, summary, paragraphs, headings) with a BLANK LINE. \
+Markdown template:
+# [Title]
+
+> One-line gist — ONE short easy sentence (~25 words max) a non-expert understands; only the core idea, no jargon or function names, not a copy of the input
+
+[plain-language rewrite of the whole input, keeping its original form]
+
+## [Optional: one heading per genuinely hard point, only if needed]"""

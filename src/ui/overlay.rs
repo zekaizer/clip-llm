@@ -206,16 +206,10 @@ pub fn render(
                 // release, so it shows a spinner until then. Content type is not
                 // yet known, so all modes are offered; image-only is reconciled on
                 // capture in on_content_ready.
-                // The badge tells the user where the content came from; in the
-                // Error state the message itself already says what failed, and
-                // the last source may be stale (e.g. a startup config notice).
-                let source_label =
-                    (!matches!(state, OverlayState::Error(_))).then(|| source.label());
-
                 if matches!(state, OverlayState::Capturing) {
                     render_tab_bar(
                         ui, mode, ProcessMode::display_order(),
-                        thinking, pinned, preview_mode, source_label,
+                        thinking, pinned, preview_mode,
                         &mut action,
                     );
                     ui.add_space(4.0);
@@ -227,7 +221,7 @@ pub fn render(
 
                 render_tab_bar(
                     ui, mode, available_modes,
-                    thinking, pinned, preview_mode, source_label,
+                    thinking, pinned, preview_mode,
                     &mut action,
                 );
 
@@ -257,6 +251,7 @@ pub fn render(
                             copy_confirmed,
                             streaming.incomplete,
                             debug_available,
+                            source,
                             completion_status.as_deref(),
                             content_top,
                             pinned_inner_height,
@@ -584,6 +579,7 @@ fn render_result(
     copy_confirmed: bool,
     incomplete: Option<&str>,
     debug_available: bool,
+    source: CaptureSource,
     // Compact completion summary for the bottom row (see the doc comment on
     // `render()`'s `completion_status` parameter, which this is threaded
     // from).
@@ -668,6 +664,7 @@ fn render_result(
     // "controls swap in place" the way the top row already does.
     ui.add_space(4.0);
     fixed_height_row(ui, BOTTOM_ROW_HEIGHT, |ui| {
+        render_source_badge(ui, source);
         if let Some(status) = completion_status {
             ui.label(
                 egui::RichText::new(status).color(egui::Color32::from_gray(120)).size(12.0),
@@ -715,6 +712,23 @@ fn render_result(
     // reserves space measured from the *current* cursor, not from the ui's
     // start, so calling it this late would add phantom extra height on top
     // of everything already drawn rather than act as a floor for the total).
+}
+
+/// Compact source badge in Result's bottom row — where the content came from:
+/// selection (double-tap) vs clipboard (single-tap). Makes a slow double-tap
+/// that resolved to a single-tap — sending stale clipboard content — visibly
+/// different (#50). Icon-only to keep the row compact; the tooltip spells it out.
+fn render_source_badge(ui: &mut egui::Ui, source: CaptureSource) {
+    let (icon, tip) = match source {
+        CaptureSource::Selection => ("\u{2702}", "Source: selection (double-tap)"),
+        CaptureSource::Clipboard => ("\u{1f4cb}", "Source: clipboard (single-tap)"),
+    };
+    ui.label(
+        egui::RichText::new(icon)
+            .size(12.0)
+            .color(egui::Color32::from_gray(120)),
+    )
+    .on_hover_text(tip);
 }
 
 /// Docked action button for the bottom controls row: a fixed
@@ -826,7 +840,6 @@ fn render_tab_bar(
     thinking: ThinkingState,
     pinned: bool,
     preview_mode: Option<ProcessMode>,
-    source_label: Option<&'static str>,
     action: &mut OverlayAction,
 ) {
     // Content is loaded whenever any mode is available; when empty the overlay
@@ -837,6 +850,9 @@ fn render_tab_bar(
     let cycling = preview_mode.is_some();
     let highlight = preview_mode.unwrap_or(current);
     ui.horizontal(|ui| {
+        // Four tabs plus the right cluster (source badge, thinking pills, pin,
+        // close) fill the row; tighten the default spacing so they never collide.
+        ui.spacing_mut().item_spacing.x = 4.0;
         // Mode tabs (left side)
         for &mode in ProcessMode::display_order() {
             let is_available = available_modes.contains(&mode);
@@ -960,18 +976,6 @@ fn render_tab_bar(
                 }
             }
 
-            // Source badge (leftmost of the right cluster) — where the content
-            // came from: "Selection" (double-tap) vs "Clipboard" (single-tap).
-            // Makes a slow double-tap that resolved to a single-tap — sending
-            // stale clipboard content — visibly different (#50).
-            if let Some(label) = source_label {
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new(label)
-                        .size(11.0)
-                        .color(egui::Color32::from_gray(120)),
-                );
-            }
         });
     });
 }
