@@ -926,11 +926,15 @@ impl OverlayApp {
     }
 
     /// Calculate centered-and-clamped window position for `spawn_position`.
-    /// Returns top-left corner in screen coordinates (Quartz on macOS, logical on Windows).
+    /// `win_size` is in egui logical points; the returned top-left is in
+    /// platform screen coordinates (Quartz points on macOS, physical pixels
+    /// on Windows — see `Platform::mouse_position`).
     fn calculate_centered_position(&self, win_size: egui::Vec2) -> Option<egui::Pos2> {
         let cursor = self.spawn_position?;
-        let bounds = self.platform.display_bounds_at_point(cursor.x as f64, cursor.y as f64);
-        Some(center_clamped_to_bounds(cursor, win_size, bounds))
+        let (cx, cy) = (cursor.x as f64, cursor.y as f64);
+        let bounds = self.platform.display_bounds_at_point(cx, cy);
+        let scale = self.platform.points_to_screen_scale_at(cx, cy) as f32;
+        Some(centered_position_screen(cursor, win_size, scale, bounds))
     }
 
     /// Position for this frame's reposition pass. Streaming-time positioning
@@ -945,10 +949,16 @@ impl OverlayApp {
         if matches!(self.sm.state(), OverlayState::Result(_) | OverlayState::Error(_))
             && let Some(latch) = self.result_latch
         {
-            let bounds = self
-                .spawn_position
-                .and_then(|c| self.platform.display_bounds_at_point(c.x as f64, c.y as f64));
-            return Some(anchored_clamped_to_bounds(latch.top_left, win_size, bounds));
+            let (bounds, scale) = match self.spawn_position {
+                Some(c) => (
+                    self.platform.display_bounds_at_point(c.x as f64, c.y as f64),
+                    self.platform.points_to_screen_scale_at(c.x as f64, c.y as f64) as f32,
+                ),
+                // No spawn point → no bounds, so the anchor passes through
+                // unclamped and the scale is moot.
+                None => (None, 1.0),
+            };
+            return Some(anchored_position_screen(latch.top_left, win_size, scale, bounds));
         }
         self.calculate_centered_position(win_size)
     }
@@ -1490,6 +1500,33 @@ fn anchored_clamped_to_bounds(
     clamp_top_left_to_bounds(anchor_top_left, win_size, bounds)
 }
 
+/// Center a window of `win_size_points` (egui logical points) on `cursor` and
+/// clamp within `bounds`, where `cursor` and `bounds` are platform screen
+/// coordinates (Quartz points on macOS, physical virtual-screen pixels on
+/// Windows — see `Platform::mouse_position`). `scale` converts points to
+/// screen units on the target monitor (`Platform::points_to_screen_scale_at`);
+/// centering/clamping with the unscaled point size on a non-100% monitor
+/// would misplace the window and misjudge whether it fits the work area.
+fn centered_position_screen(
+    cursor: egui::Pos2,
+    win_size_points: egui::Vec2,
+    scale: f32,
+    bounds: Option<(f64, f64, f64, f64)>,
+) -> egui::Pos2 {
+    center_clamped_to_bounds(cursor, win_size_points * scale, bounds)
+}
+
+/// Anchored variant of `centered_position_screen` — same unit contract, but
+/// keeps a fixed top-left instead of centering (see `anchored_clamped_to_bounds`).
+fn anchored_position_screen(
+    anchor_top_left: egui::Pos2,
+    win_size_points: egui::Vec2,
+    scale: f32,
+    bounds: Option<(f64, f64, f64, f64)>,
+) -> egui::Pos2 {
+    anchored_clamped_to_bounds(anchor_top_left, win_size_points * scale, bounds)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1754,6 +1791,61 @@ mod tests {
             bounds(-1920.0, 0.0, 1920.0, 1080.0),
         );
         assert_eq!(pos, egui::pos2(-1260.0, 340.0));
+    }
+
+    // --- mixed-DPI screen-space positioning: win_size arrives in egui logical
+    // points and must be converted into the target monitor's screen units
+    // (physical pixels on Windows) before centering/clamping. Scenario:
+    // primary 1920×1080 @ 100% (physical 0..1920), secondary 1920×1080
+    // logical @ 150% (physical 1920..4800, i.e. 2880×1620 physical). ---
+
+    #[test]
+    fn mixed_dpi_centers_with_scaled_window_size() {
+        let pos = centered_position_screen(
+            egui::pos2(3000.0, 800.0), // cursor, physical px on the 150% monitor
+            egui::vec2(400.0, 300.0),  // window size, egui points
+            1.5,
+            bounds(1920.0, 0.0, 2880.0, 1620.0),
+        );
+        // screen-space size 600×450 → top-left (3000-300, 800-225)
+        assert_eq!(pos, egui::pos2(2700.0, 575.0));
+    }
+
+    #[test]
+    fn mixed_dpi_clamps_with_scaled_window_size() {
+        let pos = centered_position_screen(
+            egui::pos2(4700.0, 800.0),
+            egui::vec2(400.0, 300.0),
+            1.5,
+            bounds(1920.0, 0.0, 2880.0, 1620.0),
+        );
+        // max_x = 1920 + 2880 - 600 (scaled width, not the 400pt raw width)
+        assert_eq!(pos.x, 4200.0);
+    }
+
+    #[test]
+    fn mixed_dpi_anchored_overflow_shifts_up_with_scaled_size() {
+        let pos = anchored_position_screen(
+            egui::pos2(2000.0, 1400.0),
+            egui::vec2(400.0, 300.0),
+            1.5,
+            bounds(1920.0, 0.0, 2880.0, 1620.0),
+        );
+        // scaled height 450 → max_y = 1620 - 450 = 1170
+        assert_eq!(pos, egui::pos2(2000.0, 1170.0));
+    }
+
+    #[test]
+    fn unit_scale_reduces_to_plain_point_space_centering() {
+        // macOS (and any 100% monitor): scale 1.0 must behave exactly like the
+        // unscaled point-space centering.
+        let pos = centered_position_screen(
+            egui::pos2(1280.0, 720.0),
+            egui::vec2(600.0, 400.0),
+            1.0,
+            bounds(0.0, 0.0, 2560.0, 1440.0),
+        );
+        assert_eq!(pos, egui::pos2(980.0, 520.0));
     }
 
     // --- poll_responses: stale worker responses must not pollute adapter state ---

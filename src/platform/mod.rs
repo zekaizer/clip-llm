@@ -24,12 +24,31 @@ pub trait Platform {
     /// Check and prompt for required OS permissions (e.g. macOS Accessibility).
     fn check_accessibility(&self) -> Result<(), crate::PlatformError>;
 
-    /// Get the current mouse cursor position in screen coordinates (egui logical points).
+    /// Get the current mouse cursor position in **platform screen coordinates**:
+    /// Quartz logical points on macOS, physical virtual-screen pixels on
+    /// Windows. This is the single coordinate space shared by
+    /// [`Platform::display_bounds_at_point`], [`Platform::show_window`],
+    /// [`Platform::show_window_no_activate`] and [`Platform::reposition_window`].
+    ///
+    /// Windows deliberately does NOT divide by any DPI scale: with mixed
+    /// per-monitor DPI the "physical ÷ monitor scale" mapping is not
+    /// invertible (a point on a 150% secondary monitor collides with a point
+    /// on a 100% primary one), so positions stay physical end-to-end and only
+    /// *sizes* are converted via [`Platform::points_to_screen_scale_at`].
     fn mouse_position(&self) -> Option<(f64, f64)>;
 
-    /// Get the display work area (logical points) of the monitor containing the given point.
+    /// Get the display work area of the monitor containing the given point,
+    /// in the same platform screen coordinates as [`Platform::mouse_position`].
     /// Returns (origin_x, origin_y, width, height). Work area excludes taskbar/dock.
     fn display_bounds_at_point(&self, x: f64, y: f64) -> Option<(f64, f64, f64, f64)>;
+
+    /// Scale factor converting egui logical points to platform screen units at
+    /// the given screen-space point: the containing monitor's DPI scale
+    /// (physical pixels per point) on Windows; 1.0 on macOS, whose screen
+    /// space (Quartz) is already measured in points.
+    fn points_to_screen_scale_at(&self, _x: f64, _y: f64) -> f64 {
+        1.0
+    }
 
     /// Show and focus the overlay window at an optional position.
     /// Returns true if an egui `Visible(true)` viewport sync is also needed

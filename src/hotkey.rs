@@ -33,7 +33,8 @@ pub enum TapAction {
 #[derive(Debug, Clone, Copy)]
 pub struct TapEvent {
     pub action: TapAction,
-    /// Mouse position (logical points) at the moment of the first key press.
+    /// Mouse position at the moment of the first key press, in platform
+    /// screen coordinates (see `Platform::mouse_position`).
     pub mouse_pos: Option<(f64, f64)>,
 }
 
