@@ -746,6 +746,13 @@ pub fn move_window_offscreen() {
     }
 }
 
+/// Tag stamped into `dwExtraInfo` of every key event this app injects, so the
+/// modifier watcher's LL hook can tell our own synthetic events apart from
+/// real keyboard input. Deliberately NOT the generic `LLKHF_INJECTED` flag:
+/// filtering on that would also drop legitimate input injected by the user's
+/// own tools (key remappers etc.) — only self-generated events are excluded.
+pub(crate) const SYNTHETIC_INPUT_TAG: usize = 0x434C4950; // "CLIP"
+
 fn make_key_input(vk: u16, flags: u32) -> INPUT {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{MapVirtualKeyW, MAPVK_VK_TO_VSC};
     // Real keyboards always deliver a scancode; leaving wScan at 0 makes the
@@ -761,7 +768,7 @@ fn make_key_input(vk: u16, flags: u32) -> INPUT {
                 wScan: scan,
                 dwFlags: flags,
                 time: 0,
-                dwExtraInfo: 0,
+                dwExtraInfo: SYNTHETIC_INPUT_TAG,
             },
         },
     }
