@@ -223,6 +223,16 @@ mod win {
     unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         if code >= 0 {
             let kb = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
+            // Skip this app's own injected chord events (simulate_copy /
+            // simulate_paste): their synthetic modifier ups/downs would
+            // otherwise corrupt the tracked *physical* hold state mid-capture
+            // — e.g. the chord's Ctrl-down flipping `combo_held` back to true
+            // while the user still holds Shift, feeding the coordinator's
+            // cycle-commit logic a phantom re-hold. Real input, including
+            // input injected by third-party remappers, is still tracked.
+            if kb.dwExtraInfo == crate::platform::windows::SYNTHETIC_INPUT_TAG {
+                return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
+            }
             let vk = kb.vkCode;
             let msg = wparam as u32;
             let is_up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
