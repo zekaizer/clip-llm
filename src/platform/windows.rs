@@ -747,12 +747,18 @@ pub fn move_window_offscreen() {
 }
 
 fn make_key_input(vk: u16, flags: u32) -> INPUT {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{MapVirtualKeyW, MAPVK_VK_TO_VSC};
+    // Real keyboards always deliver a scancode; leaving wScan at 0 makes the
+    // injected event distinguishable from physical input and breaks consumers
+    // that read it (Chromium derives DOM `code` from the scancode, RDP/VM
+    // layers replay it), so fill it from the virtual key.
+    let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u16;
     INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
                 wVk: vk,
-                wScan: 0,
+                wScan: scan,
                 dwFlags: flags,
                 time: 0,
                 dwExtraInfo: 0,
