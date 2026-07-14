@@ -39,10 +39,10 @@ const BOTTOM_ROW_HEIGHT: f32 = ACTION_BTN_SIZE;
 /// instead of duplicating "16, 14" as a second magic literal (see
 /// `pinned_inner_height` in `render()`).
 const FRAME_MARGIN: egui::Margin = egui::Margin::symmetric(16, 14);
-/// Floor for the Result answer text's ScrollArea when its budget is capped to
-/// fit a pinned latch height (see `render_result`) — guards against a
-/// degenerate near-zero or negative budget if the surrounding chrome alone
-/// already consumes most/all of the latch.
+/// Floor for the Result answer text's column when its budget is derived from
+/// a pinned latch height (see `render_result`) — guards against a degenerate
+/// near-zero or negative budget if the surrounding chrome alone already
+/// consumes most/all of the latch.
 const MIN_RESULT_TEXT_HEIGHT: f32 = 24.0;
 
 /// Streaming and think-block display state for Processing/Result rendering.
@@ -119,10 +119,9 @@ pub fn render(
     // `OverlayApp::result_latch`) so the final answer never renders shorter
     // than the last streaming frame — the fix for the visible
     // Processing→Result resize jump. `None` outside Result/Error, or when no
-    // latch is active (falls back to normal auto-sizing). Growth above this
-    // when think is expanded is unrestricted; otherwise Result/Error render
-    // at *exactly* this height (see `pinned_inner_height` below and
-    // `render_result`'s ScrollArea budget cap), not just floored to it.
+    // latch is active (falls back to normal auto-sizing). A floor only:
+    // content taller than the latch grows the window naturally, up to
+    // `MAX_RESULT_HEIGHT` for the answer text (see `render_result`).
     min_result_height: Option<f32>,
     ctx: &egui::Context,
 ) -> OverlayOutput {
@@ -191,8 +190,8 @@ pub fn render(
                 // text) would add that much space on TOP of what's already
                 // used instead of acting as a floor for the total. This is
                 // what makes `desired_size` naturally >= the last streaming
-                // frame's size even before the exact-cap below narrows a
-                // taller natural render back down to exactly that size.
+                // frame's size; content taller than the latch grows past it
+                // (the latch is a floor, not a cap — see `render_result`).
                 if let Some(h) = pinned_inner_height
                     && matches!(state, OverlayState::Result(_) | OverlayState::Error(_))
                 {
@@ -333,32 +332,25 @@ fn fixed_height_row(ui: &mut egui::Ui, height: f32, add_contents: impl FnOnce(&m
     });
 }
 
-/// Renders a vertically scrollable, word-wrapped text label with a consistent style.
-///
-/// `shrink_to_fit`: `true` (the usual case) shrinks the ScrollArea down to
-/// the content's natural height, up to `max_height`. `false` instead always
-/// renders at exactly `max_height` regardless of content — used by a pinned,
-/// collapsed Result (see `render_result`) so the text column visually fills
-/// the latched budget instead of leaving an empty gap below short content.
+/// Renders a vertically scrollable, word-wrapped text label with a consistent
+/// style, shrinking to the content's natural height up to `max_height`.
 fn render_scrollable_text(
     ui: &mut egui::Ui,
     id_salt: impl std::hash::Hash,
     text: &str,
     max_height: f32,
     stick_to_bottom: bool,
-    shrink_to_fit: bool,
 ) {
     egui::ScrollArea::vertical()
         .id_salt(id_salt)
         .max_height(max_height)
         // egui's ScrollArea defaults to a 64px `min_scrolled_size` floor once
         // content needs scrolling, silently overriding a smaller max_height
-        // (discovered via the exact-height-pin tests below: a `max_height`
-        // as low as e.g. 24 was still rendering at ~64px). Match that floor
-        // to the same one `render_result`'s budget cap already floors to,
-        // so a tightly capped budget is actually honored.
+        // (a `max_height` as low as e.g. 24 was still rendering at ~64px).
+        // Match that floor to the same one `render_result`'s budget math
+        // floors to, so a tight budget is actually honored.
         .min_scrolled_height(MIN_RESULT_TEXT_HEIGHT)
-        .auto_shrink([false, shrink_to_fit])
+        .auto_shrink([false, true])
         .stick_to_bottom(stick_to_bottom)
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
         .show(ui, |ui| {
@@ -456,7 +448,7 @@ fn render_capturing(
     if let Some(text) = picking_text {
         // Single-tap picking: the clipboard content has arrived, so show the
         // data that will be processed in the chosen mode on release.
-        render_scrollable_text(ui, "picking", text, MAX_RESULT_HEIGHT, false, true);
+        render_scrollable_text(ui, "picking", text, MAX_RESULT_HEIGHT, false);
     } else {
         // Content not yet available — double-tap captures the selection on
         // modifier release (copy simulation needs the modifiers up) and the
@@ -521,7 +513,7 @@ fn render_processing(
     });
     if !streaming_text.is_empty() {
         ui.add_space(4.0);
-        render_scrollable_text(ui, ("streaming", mode), streaming_text, MAX_RESULT_HEIGHT, true, true);
+        render_scrollable_text(ui, ("streaming", mode), streaming_text, MAX_RESULT_HEIGHT, true);
     }
     ui.add_space(4.0);
     // Bottom row: shared slot with Result's reserved action-button space (see
@@ -595,12 +587,11 @@ fn render_result(
     // (already margin-adjusted by `render()`, which also applies this as a
     // floor at the true top of the ui — see `pinned_inner_height` there).
     // `None` when no latch is active (normal auto-sizing via
-    // `MAX_RESULT_HEIGHT`). While collapsed, this is honored *exactly*: the
-    // answer text's ScrollArea budget is capped so total content == this
-    // value even if the natural text is taller. Ignored while
-    // `think_expanded`, which is free to grow the window; collapsing again
-    // returns to this exact pinned height, not to whatever egui would
-    // otherwise auto-measure.
+    // `MAX_RESULT_HEIGHT`). A FLOOR while collapsed: the answer text column
+    // pads up to the leftover latched budget when shorter, and grows the
+    // window naturally (up to `MAX_RESULT_HEIGHT`) when taller. Ignored
+    // while `think_expanded`, which is free to grow the window; collapsing
+    // again returns to at least the latched height.
     pinned_inner_height: Option<f32>,
     action: &mut OverlayAction,
 ) {
@@ -633,30 +624,36 @@ fn render_result(
     }
     ui.add_space(4.0);
 
-    // Budget for the answer text: normally MAX_RESULT_HEIGHT (auto-sizing).
-    // When collapsed and a latch is active, shrink the ScrollArea's
-    // max_height so the *total* pinned content comes out to exactly
-    // `pinned_inner_height`, even if the natural text is taller — the
-    // flexible ScrollArea absorbs the difference instead of the window
-    // growing. `used_before_text` is measured (not estimated), so it
-    // correctly accounts for the optional incomplete banner above;
-    // `reserved_after_text` is the fixed add_space + bottom row that always
-    // follows, unconditionally.
-    let text_max_height = match (pinned_inner_height, think_expanded) {
+    // Answer text: always auto-sizes up to MAX_RESULT_HEIGHT. With a latch
+    // active (and Think collapsed), the leftover latched budget additionally
+    // acts as a FLOOR on the text column: a short answer still owns the
+    // latched space (no empty gap above the bottom row, no shrink-jump at
+    // the Processing→Result seam), while a taller answer is free to grow the
+    // window to its natural size — capping growth at the latch too left the
+    // window shorter than its content whenever the last Processing frame
+    // undershot the final answer (thinking-only streams, cached/fast
+    // responses, post-processed text taller than the streamed preview).
+    // `used_before_text` is measured (not estimated), so it correctly
+    // accounts for the optional incomplete banner above; `reserved_after_text`
+    // is the fixed add_space + bottom row that always follows,
+    // unconditionally.
+    match (pinned_inner_height, think_expanded) {
         (Some(target), false) => {
             let used_before_text = ui.cursor().top() - content_top;
             let reserved_after_text = 4.0 + BOTTOM_ROW_HEIGHT;
-            (target - used_before_text - reserved_after_text).max(MIN_RESULT_TEXT_HEIGHT)
+            let floor =
+                (target - used_before_text - reserved_after_text).max(MIN_RESULT_TEXT_HEIGHT);
+            // `set_min_height` reserves space from the current cursor, so
+            // applied here (right before the text, inside its own scope) it
+            // floors exactly the text column: shorter content pads up to the
+            // latch, taller content grows past it up to MAX_RESULT_HEIGHT.
+            ui.scope(|ui| {
+                ui.set_min_height(floor);
+                render_scrollable_text(ui, ("result", mode), text, MAX_RESULT_HEIGHT, false);
+            });
         }
-        _ => MAX_RESULT_HEIGHT,
-    };
-
-    // While pinned and collapsed, the ScrollArea fills its whole budget
-    // (`shrink_to_fit: false`) rather than shrinking to short content, so the
-    // text column visually owns the latched space instead of leaving an
-    // empty gap between it and the bottom row below.
-    let shrink_to_fit = pinned_inner_height.is_none() || think_expanded;
-    render_scrollable_text(ui, ("result", mode), text, text_max_height, false, shrink_to_fit);
+        _ => render_scrollable_text(ui, ("result", mode), text, MAX_RESULT_HEIGHT, false),
+    }
 
     // Bottom row: shared slot with Processing's Cancel-button row (see
     // `BOTTOM_ROW_HEIGHT`): the passive completion summary on the left, the
@@ -989,9 +986,9 @@ mod tests {
     /// the given `ctx` rather than a fresh one, so `egui::Area`'s persisted
     /// per-frame sizing memory (see the "egui Area sizing fix" comment on
     /// `render()`) carries over between calls exactly like consecutive real
-    /// frames — required for the exact-height-pin tests below, which rely on
-    /// that carried-over Area state after a Processing→Result transition
-    /// skips the Area reset (see `ResetAreas` handling in `mod.rs`).
+    /// frames; tests mirror the app's `ResetAreas` at a state transition by
+    /// calling `ctx.memory_mut(|m| m.reset_areas())` themselves (see the
+    /// `ResetAreas` handling in `mod.rs`).
     fn render_headless(
         ctx: &egui::Context,
         state: &OverlayState,
@@ -1045,51 +1042,69 @@ mod tests {
         (ctx, last.expect("looped at least once"))
     }
 
-    /// The core exact-pin claim: a Result whose natural (unconstrained) text
-    /// is *taller* than the latch must still render at exactly the latch
-    /// height on the very next frame — the answer text's ScrollArea absorbs
-    /// the extra height, the window does not grow. This is what makes the
-    /// Processing→Result transition frame send zero viewport-size commands
-    /// (see `OverlayApp::update_viewport`'s `last_desired_size` gate) and
-    /// skip the Area re-measure (see the `ResetAreas` handling in `mod.rs`).
+    /// The latch is a FLOOR, not a ceiling: a Result whose natural
+    /// (unconstrained) text is *taller* than the latch must grow the window
+    /// to its natural auto-size (still capped by `MAX_RESULT_HEIGHT`) instead
+    /// of absorbing the extra height into the ScrollArea. Pinning growth too
+    /// left the window shorter than its content whenever the last Processing
+    /// frame undershot the final answer (thinking-only streams, cached/fast
+    /// responses, post-processed text taller than the streamed preview).
+    /// The Area reset mirrors the app's unconditional `ResetAreas` at the
+    /// transition (see `execute_effects` in `mod.rs`) — without it the
+    /// carried-over Area memory starves the ScrollArea and the height only
+    /// crawls toward natural over many frames instead of landing in one.
     #[test]
-    fn result_pinned_height_matches_latch_when_text_is_taller() {
+    fn result_grows_beyond_latch_when_text_is_taller() {
         let (ctx, processing) = settle_processing("hi");
         let latch = processing.content_size.expect("Processing must report a content size").y;
 
+        ctx.memory_mut(|m| m.reset_areas());
         let long_text = "line\n".repeat(200);
-        let result = render_headless(&ctx, &OverlayState::Result(long_text), "", Some(latch));
+        let result =
+            render_headless(&ctx, &OverlayState::Result(long_text.clone()), "", Some(latch));
         let result_height = result.content_size.expect("Result must report a content size").y;
 
-        // Never shorter than the latch (the more important invariant — a
-        // shrink is what originally made this transition visibly jump) is
-        // exact. A few px of *overshoot* is tolerated: `ScrollArea` has its
-        // own internal chrome (bar margins etc., see `render_scrollable_text`'s
-        // `min_scrolled_height` comment) that isn't perfectly predictable
-        // from the outside budget math in `render_result` — this residual is
-        // an order of magnitude smaller than the original unbounded-growth
-        // defect (tens of px) and is not visually perceptible.
         assert!(result_height >= latch - 0.5, "must never render shorter than the latch");
         assert!(
-            result_height < latch + 12.0,
-            "pinned Result height {result_height} must stay close to the latch {latch} \
-             (small ScrollArea-chrome overshoot tolerated) even though the natural text \
-             is much taller — the ScrollArea should be absorbing that height, not the window",
+            result_height > latch + 50.0,
+            "a Result much taller than the latch ({latch}) must grow the window \
+             ({result_height}) instead of scrolling inside the latched height",
+        );
+
+        // Growth converges to the same auto-size an unlatched render produces
+        // (i.e. natural height capped by MAX_RESULT_HEIGHT) — the latch only
+        // ever adds height, never subtracts it.
+        let unlatched_ctx = egui::Context::default();
+        let mut unlatched = None;
+        for _ in 0..5 {
+            unlatched = Some(render_headless(
+                &unlatched_ctx,
+                &OverlayState::Result(long_text.clone()),
+                "",
+                None,
+            ));
+        }
+        let unlatched_height = unlatched.unwrap().content_size.unwrap().y;
+        assert!(
+            (result_height - unlatched_height).abs() < 12.0,
+            "latched growth ({result_height}) must converge to the unlatched \
+             auto-size ({unlatched_height})",
         );
     }
 
-    /// The floor side of the same claim: a Result whose natural text is
-    /// *shorter* than the latch must still render at exactly the latch
-    /// height on the very next frame (never shrink below it either). The
-    /// text area fills the whole latched budget (`shrink_to_fit: false` in
-    /// `render_result`) rather than shrinking to the short content, so no
-    /// empty gap is left between the text column and the bottom row.
+    /// The floor side: a Result whose natural text is *shorter* than the
+    /// latch must still render at exactly the latch height on the very next
+    /// frame (never shrink below it). The text column's floor (`set_min_height`
+    /// in `render_result`) pads up to the latched budget rather than shrinking
+    /// to the short content, so no empty gap is left between the text column
+    /// and the bottom row.
     #[test]
     fn result_pinned_height_matches_latch_when_text_is_shorter() {
         let (ctx, processing) =
             settle_processing("a fairly long streaming preview of the answer so far");
         let latch = processing.content_size.expect("Processing must report a content size").y;
 
+        ctx.memory_mut(|m| m.reset_areas());
         let result = render_headless(&ctx, &OverlayState::Result("short".into()), "", Some(latch));
         let result_height = result.content_size.expect("Result must report a content size").y;
 
