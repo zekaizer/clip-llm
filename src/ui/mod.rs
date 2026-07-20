@@ -521,6 +521,16 @@ impl OverlayApp {
                     // the identical geometry, so the reset costs nothing
                     // there.
                     ctx.memory_mut(|m| m.reset_areas());
+                    // `reset_areas` only clears Area geometry — egui persists
+                    // each ScrollArea's offset (and stick-to-bottom flag)
+                    // separately in `ctx.data`, keyed by widget id, for the
+                    // whole process lifetime. Without clearing it here, a
+                    // result the user once scrolled reopens at that stale
+                    // offset on every later request in the same mode instead
+                    // of at the top. ResetAreas fires only on real state
+                    // transitions (never mid-stream or on think/param
+                    // toggles), so this cannot fight in-state scrolling.
+                    clear_scroll_state(ctx);
                 }
                 UiEffect::PasteClipboard => {
                     if let Err(e) = self.platform.paste_to_foreground() {
@@ -1448,6 +1458,15 @@ fn clamp_top_left_to_bounds(
     egui::pos2(x, y)
 }
 
+/// Drop every persisted `ScrollArea` state (scroll offset + stick-to-bottom
+/// flag) so the next frame's scroll areas start from the top. egui stores this
+/// per widget id in `ctx.data` for the process lifetime — `Memory::reset_areas`
+/// does not touch it. Called from the `ResetAreas` effect, i.e. only at real
+/// state transitions.
+fn clear_scroll_state(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.remove_by_type::<egui::scroll_area::State>());
+}
+
 /// Center `win_size` on `cursor` and clamp the result within `bounds`.
 ///
 /// `bounds` is `(origin_x, origin_y, width, height)` in the same coordinate space
@@ -1516,6 +1535,29 @@ mod tests {
 
     fn bounds(ox: f64, oy: f64, w: f64, h: f64) -> Option<(f64, f64, f64, f64)> {
         Some((ox, oy, w, h))
+    }
+
+    // --- scroll state reset (stale result scroll offset — see clear_scroll_state) ---
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn clear_scroll_state_drops_persisted_offsets() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::new("result_scroll_regression");
+        let mut state = egui::scroll_area::State::default();
+        state.offset = egui::vec2(0.0, 123.0);
+        state.store(&ctx, id);
+        assert!(
+            egui::scroll_area::State::load(&ctx, id).is_some(),
+            "precondition: scroll state must persist in ctx.data"
+        );
+
+        clear_scroll_state(&ctx);
+
+        assert!(
+            egui::scroll_area::State::load(&ctx, id).is_none(),
+            "clear_scroll_state must drop every persisted ScrollArea state"
+        );
     }
 
     // --- no bounds: pure cursor centering ---
