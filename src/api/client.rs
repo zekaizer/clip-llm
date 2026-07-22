@@ -76,6 +76,13 @@ fn effective_max_tokens(ceiling: u32, budget: Option<u32>, prompt_est: u32) -> u
     }
 }
 
+/// Whether image parts should be attached to the request: an image-consuming
+/// mode ([`ProcessMode::consumes_images`]), a vision-capable model, and images
+/// actually present on the clipboard.
+fn should_use_images(mode: ProcessMode, vision: bool, has_images: bool) -> bool {
+    mode.consumes_images() && vision && has_images
+}
+
 // -- Request types (OpenAI chat completions schema) --
 
 #[derive(Serialize)]
@@ -1310,16 +1317,14 @@ impl LlmClient {
         let (sys_prefix, template_kwargs) =
             Self::resolve_thinking(thinking_mode, thinking_control);
 
-        let use_images =
-            mode == ProcessMode::Summarize && vision && content.has_images();
-        let image_only = use_images && !content.has_text();
+        let use_images = should_use_images(mode, vision, content.has_images());
 
         // Image-only clipboard but model lacks vision — nothing useful to send.
         if !content.has_text() && content.has_images() && !vision {
             return Err(ApiError::NoUsableContent);
         }
 
-        let base_prompt = mode.system_prompt(rephrase_params, image_only);
+        let base_prompt = mode.system_prompt(rephrase_params);
         let sys_prompt = if let Some(prefix) = sys_prefix {
             format!("{prefix}{base_prompt}")
         } else {
@@ -1664,6 +1669,19 @@ mod tests {
             require_setting(Some(String::new()), Some(""), "api.model"),
             Err(ApiError::MissingConfig("api.model"))
         ));
+    }
+
+    #[test]
+    fn should_use_images_gates_on_mode_vision_and_presence() {
+        // Summarize and Explain consume images when vision + images are present.
+        assert!(should_use_images(ProcessMode::Summarize, true, true));
+        assert!(should_use_images(ProcessMode::Explain, true, true));
+        // Translate/Rephrase never attach images, even with vision + images.
+        assert!(!should_use_images(ProcessMode::Translate, true, true));
+        assert!(!should_use_images(ProcessMode::Rephrase, true, true));
+        // No vision, or no images, disables attachment for image-consuming modes.
+        assert!(!should_use_images(ProcessMode::Explain, false, true));
+        assert!(!should_use_images(ProcessMode::Summarize, true, false));
     }
 
     #[test]

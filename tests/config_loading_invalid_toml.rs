@@ -34,7 +34,7 @@ fn startup_falls_back_to_defaults_on_invalid_toml() {
     );
 
     // Built-in defaults remain active despite the malformed file.
-    let translate = ProcessMode::Translate.system_prompt(RephraseParams::default(), false);
+    let translate = ProcessMode::Translate.system_prompt(RephraseParams::default());
     assert!(translate.contains("translator"));
 
     let _ = std::fs::remove_file(&path);

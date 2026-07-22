@@ -367,6 +367,19 @@ impl ProcessMode {
         }
     }
 
+    /// Whether this mode consumes image input. Summarize/Explain describe or
+    /// explain the image; Translate/Rephrase transform existing text and have
+    /// nothing to act on. Single source of truth for image handling — the API
+    /// client's image attachment and the UI's image-only mode set both derive
+    /// from this. Exhaustive `match` (no wildcard) so a new variant forces a
+    /// deliberate choice here.
+    pub fn consumes_images(self) -> bool {
+        match self {
+            Self::Summarize | Self::Explain => true,
+            Self::Translate | Self::Rephrase => false,
+        }
+    }
+
     /// Next mode in display order, wrapping around, skipping any mode not
     /// present in `targets`. Returns `self` unchanged when no other mode is
     /// available (empty `targets`, or `targets` holds only `self`). Used to
@@ -400,7 +413,10 @@ impl ProcessMode {
     /// Builds the system prompt for this mode from the runtime
     /// [`Config`](crate::config::Config). Templates and language
     /// names come from the external config when present, else built-in defaults.
-    pub fn system_prompt(self, params: RephraseParams, image_only: bool) -> String {
+    ///
+    /// Medium-agnostic: each mode's prompt handles text, image(s), or both, so the
+    /// caller no longer distinguishes image-only input here.
+    pub fn system_prompt(self, params: RephraseParams) -> String {
         let config = crate::config::get();
         let primary = config.primary_lang();
         let secondary = config.secondary_lang();
@@ -409,9 +425,6 @@ impl ProcessMode {
                 crate::config::substitute(config.translate_prompt(), primary, secondary)
             }
             Self::Rephrase => config.rephrase_prompt(params.style, params.length),
-            Self::Summarize if image_only => {
-                crate::config::substitute(config.summarize_image_prompt(), primary, secondary)
-            }
             Self::Summarize => {
                 crate::config::substitute(config.summarize_prompt(), primary, secondary)
             }
@@ -552,7 +565,7 @@ mod tests {
 
     #[test]
     fn next_available_single_target_stays_put() {
-        // Image-only content restricts cycling to Summarize alone.
+        // A single available target: cycling always resolves to it.
         let targets = &[ProcessMode::Summarize];
         assert_eq!(ProcessMode::Summarize.next_available(targets), ProcessMode::Summarize);
         // Even starting from a non-target mode resolves to the only target.
@@ -562,6 +575,14 @@ mod tests {
     #[test]
     fn next_available_empty_targets_returns_self() {
         assert_eq!(ProcessMode::Translate.next_available(&[]), ProcessMode::Translate);
+    }
+
+    #[test]
+    fn consumes_images_only_summarize_and_explain() {
+        assert!(ProcessMode::Summarize.consumes_images());
+        assert!(ProcessMode::Explain.consumes_images());
+        assert!(!ProcessMode::Translate.consumes_images());
+        assert!(!ProcessMode::Rephrase.consumes_images());
     }
 }
 

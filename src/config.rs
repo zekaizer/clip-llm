@@ -113,9 +113,12 @@ const DEFAULT_REPHRASE_LENGTH_FULL: &str =
     "Target output length: 200% of input. Do not exceed 220%. Add substantive detail only — no padding or repetition.";
 
 const DEFAULT_SUMMARIZE_PROMPT: &str =
-    "You are a text summarizer for software engineering content. \
+    "You are a summarizer for software engineering content. The input is clipboard \
+     content — text, image(s), or both. \
      The output language is ALWAYS {primary_lang}, regardless of the input language. \
      Summarize the input, capturing only its key points and essential information. \
+     For image input, summarize ONLY what is visible (text, UI, diagrams, code, error \
+     messages, data); never infer, speculate, or add anything not shown. \
      LANGUAGE — Write the ENTIRE output in {primary_lang}: the title, every section heading, \
      and all body text. The English heading names below are a structural guide only — \
      translate each heading you use into {primary_lang}. Keep ONLY technical terms, proper nouns, \
@@ -134,22 +137,14 @@ const DEFAULT_SUMMARIZE_PROMPT: &str =
      or its {primary_lang} equivalent in place of content — a heading with no real content, or with a \
      placeholder standing in for content, is a failure.";
 
-const DEFAULT_SUMMARIZE_IMAGE_PROMPT: &str =
-    "You are an image analyst for software engineering content. \
-     Describe and summarize the given image(s) in {primary_lang}. \
-     Rules: \
-     - Always output in {primary_lang}. \
-     - Keep technical terms, proper nouns, UI labels, and code references intact (do not translate them). \
-     - Keep the total output under 1000 characters. \
-     - STRICT: Describe ONLY what is visible in the image. \
-     Do not infer, speculate, or add information not present. \
-     - Focus on: text content, UI elements, diagrams, code snippets, error messages, or data shown. \
-     - Use plain prose. No markdown template required.";
-
 const DEFAULT_EXPLAIN_PROMPT: &str =
-    "You are an explainer for software engineering content. Rewrite the input so a reader \
+    "You are an explainer for software engineering content. The input is clipboard content \
+     — text, image(s), or both. Rewrite it so a reader \
      without the background can understand it, ALWAYS in {primary_lang} (keep technical \
      terms, proper nouns, code, and URLs in their original form). \
+     For image input, explain what is shown and what it means (diagrams, screenshots, \
+     error messages, code), basing everything strictly on what is visible; never speculate \
+     about what is not shown. \
      Explain the SUBJECT MATTER directly, like a colleague teaching it — NEVER narrate the \
      document from the outside (\"this text explains…\", \"it concludes by asking…\"); the \
      reader should learn the topic, not what the document looks like. This is NOT \
@@ -365,7 +360,6 @@ struct RephraseLengthTable {
 #[serde(default)]
 struct SummarizeConfig {
     prompt: Option<String>,
-    image_prompt: Option<String>,
     /// Default thinking mode for this mode: `"think"` or `"no_think"`.
     thinking: Option<String>,
 }
@@ -600,17 +594,9 @@ impl Config {
         slot.as_deref().unwrap_or(default)
     }
 
-    /// Summarize-mode prompt template for text input.
+    /// Summarize-mode prompt template (handles text and/or image input).
     pub fn summarize_prompt(&self) -> &str {
         self.summarize.prompt.as_deref().unwrap_or(DEFAULT_SUMMARIZE_PROMPT)
-    }
-
-    /// Summarize-mode prompt template for image-only input.
-    pub fn summarize_image_prompt(&self) -> &str {
-        self.summarize
-            .image_prompt
-            .as_deref()
-            .unwrap_or(DEFAULT_SUMMARIZE_IMAGE_PROMPT)
     }
 
     /// Explain-mode prompt template.
@@ -883,11 +869,10 @@ fn starter_template() -> String {
     t.push_str(&s("full", DEFAULT_REPHRASE_LENGTH_FULL, ""));
     t.push('\n');
 
-    // [summarize] — `prompt` for text, `image_prompt` for image-only clipboards.
+    // [summarize] — `prompt` handles both text and image input.
     t.push_str("# [summarize]\n");
     t.push_str(&s("thinking", "think", "default thinking mode: think | no_think"));
     t.push_str(&s("prompt", DEFAULT_SUMMARIZE_PROMPT, ""));
-    t.push_str(&s("image_prompt", DEFAULT_SUMMARIZE_IMAGE_PROMPT, ""));
     t.push('\n');
 
     // [explain]
@@ -1110,15 +1095,12 @@ mod tests {
 
     /// Reconstructs the expected prompt from config accessors — an independent
     /// path used to validate `ProcessMode::system_prompt`.
-    fn assemble(config: &Config, mode: ProcessMode, params: RephraseParams, image_only: bool) -> String {
+    fn assemble(config: &Config, mode: ProcessMode, params: RephraseParams) -> String {
         let primary = config.primary_lang();
         let secondary = config.secondary_lang();
         let mode_prompt = match mode {
             ProcessMode::Translate => substitute(config.translate_prompt(), primary, secondary),
             ProcessMode::Rephrase => config.rephrase_prompt(params.style, params.length),
-            ProcessMode::Summarize if image_only => {
-                substitute(config.summarize_image_prompt(), primary, secondary)
-            }
             ProcessMode::Summarize => substitute(config.summarize_prompt(), primary, secondary),
             ProcessMode::Explain => substitute(config.explain_prompt(), primary, secondary),
         };
@@ -1129,31 +1111,29 @@ mod tests {
     }
 
     /// The default-config assembly must equal `ProcessMode::system_prompt` for
-    /// every mode/param/image combination. This pins the `DEFAULT_*` constants to
+    /// every mode/param combination. This pins the `DEFAULT_*` constants to
     /// the established behavior across all 25 rephrase combos plus the other modes.
     #[test]
     fn defaults_match_system_prompt() {
         let config = Config::default();
-        for image_only in [false, true] {
-            assert_eq!(
-                assemble(&config, ProcessMode::Translate, RephraseParams::default(), image_only),
-                ProcessMode::Translate.system_prompt(RephraseParams::default(), image_only),
-            );
-            assert_eq!(
-                assemble(&config, ProcessMode::Summarize, RephraseParams::default(), image_only),
-                ProcessMode::Summarize.system_prompt(RephraseParams::default(), image_only),
-            );
-            assert_eq!(
-                assemble(&config, ProcessMode::Explain, RephraseParams::default(), image_only),
-                ProcessMode::Explain.system_prompt(RephraseParams::default(), image_only),
-            );
-        }
+        assert_eq!(
+            assemble(&config, ProcessMode::Translate, RephraseParams::default()),
+            ProcessMode::Translate.system_prompt(RephraseParams::default()),
+        );
+        assert_eq!(
+            assemble(&config, ProcessMode::Summarize, RephraseParams::default()),
+            ProcessMode::Summarize.system_prompt(RephraseParams::default()),
+        );
+        assert_eq!(
+            assemble(&config, ProcessMode::Explain, RephraseParams::default()),
+            ProcessMode::Explain.system_prompt(RephraseParams::default()),
+        );
         for &style in RephraseStyle::ALL {
             for &length in RephraseLength::ALL {
                 let params = RephraseParams { style, length };
                 assert_eq!(
-                    assemble(&config, ProcessMode::Rephrase, params, false),
-                    ProcessMode::Rephrase.system_prompt(params, false),
+                    assemble(&config, ProcessMode::Rephrase, params),
+                    ProcessMode::Rephrase.system_prompt(params),
                     "mismatch for {style:?}/{length:?}",
                 );
             }
@@ -1235,7 +1215,7 @@ mod tests {
     fn preamble_prepended_to_every_mode_by_default() {
         let config = Config::default();
         for mode in [ProcessMode::Translate, ProcessMode::Rephrase, ProcessMode::Summarize] {
-            let p = assemble(&config, mode, RephraseParams::default(), false);
+            let p = assemble(&config, mode, RephraseParams::default());
             assert!(
                 p.starts_with("The user message contains the clipboard content"),
                 "{mode:?} missing preamble"
@@ -1246,14 +1226,14 @@ mod tests {
     #[test]
     fn empty_preamble_disables_prefix() {
         let config: Config = toml::from_str("[prompt]\npreamble = \"\"").unwrap();
-        let p = assemble(&config, ProcessMode::Translate, RephraseParams::default(), false);
+        let p = assemble(&config, ProcessMode::Translate, RephraseParams::default());
         assert!(p.starts_with("You are a translator"));
     }
 
     #[test]
     fn custom_preamble_is_prepended() {
         let config: Config = toml::from_str("[prompt]\npreamble = \"GUARD-XYZ.\"").unwrap();
-        let p = assemble(&config, ProcessMode::Summarize, RephraseParams::default(), false);
+        let p = assemble(&config, ProcessMode::Summarize, RephraseParams::default());
         assert!(p.starts_with("GUARD-XYZ.\n\n"));
     }
 

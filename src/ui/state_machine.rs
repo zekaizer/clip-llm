@@ -5,8 +5,24 @@
 //! logic fully unit-testable.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use crate::{ClipboardContent, ProcessMode, RephraseLength, RephraseParams, RephraseStyle, ThinkingMode};
+
+/// Modes offered for an image-only clipboard (no usable text): the image-consuming
+/// modes, projected from [`ProcessMode::consumes_images`] over [`ProcessMode::ALL`]
+/// so this stays a view of that single predicate rather than a second source of
+/// truth. Preserves `ALL` order, matching the text branch of `available_modes`.
+fn image_consuming_modes() -> &'static [ProcessMode] {
+    static MODES: OnceLock<Vec<ProcessMode>> = OnceLock::new();
+    MODES.get_or_init(|| {
+        ProcessMode::ALL
+            .iter()
+            .copied()
+            .filter(|m| m.consumes_images())
+            .collect()
+    })
+}
 
 // ---------------------------------------------------------------------------
 // OverlayState
@@ -296,14 +312,12 @@ impl StateMachine {
 
     /// Modes available for the current content.
     /// - No content: no modes available (tabs disabled).
-    /// - Image-only: Summarize only.
+    /// - Image-only: the image-consuming modes ([`image_consuming_modes`]).
     /// - Text (with or without images): all modes.
     pub fn available_modes(&self) -> &[ProcessMode] {
         match &self.original_content {
             None => &[],
-            Some(content) if content.text.is_none() && content.has_images() => {
-                &[ProcessMode::Summarize]
-            }
+            Some(content) if content.is_image_only() => image_consuming_modes(),
             Some(_) => ProcessMode::ALL,
         }
     }
@@ -404,9 +418,14 @@ impl StateMachine {
     fn on_content_ready(&mut self, content: ClipboardContent, auto_copy: bool) -> Vec<UiEffect> {
         let old_state = self.state.clone();
 
-        // Image-only content: auto-switch to Summarize.
-        if content.text.is_none() && content.has_images() {
-            self.mode = ProcessMode::Summarize;
+        // Image-only content: if the current mode can't consume images, fall back
+        // to the first image-consuming mode. A mode that already handles images
+        // (e.g. Explain) is kept.
+        if content.is_image_only()
+            && !self.mode.consumes_images()
+            && let Some(&fallback) = image_consuming_modes().first()
+        {
+            self.mode = fallback;
         }
 
         // Preserve the result cache and the user's per-session mode/param choices
@@ -696,17 +715,6 @@ impl StateMachine {
         vec![UiEffect::ResetAreas, UiEffect::ShowWindow]
     }
 
-    /// Whether the loaded content is image-only (no usable text). This selects the
-    /// image-specific Summarize prompt in the API client, so it is part of the
-    /// cache identity. Mirrors `LlmClient`'s `image_only` derivation for every case
-    /// that is actually cached (an image-only request with no vision support errors
-    /// out before producing a cacheable result).
-    fn is_image_only(&self) -> bool {
-        self.original_content
-            .as_ref()
-            .is_some_and(|c| c.text.is_none() && c.has_images())
-    }
-
     /// Cache key identifying the request that would be sent for the current state.
     ///
     /// Keyed on exactly the inputs that change the system prompt + thinking control
@@ -718,9 +726,7 @@ impl StateMachine {
         let thinking = self.effective_thinking_mode();
         match self.mode {
             ProcessMode::Translate => format!("translate|{thinking:?}"),
-            ProcessMode::Summarize => {
-                format!("summarize|{}|{thinking:?}", self.is_image_only())
-            }
+            ProcessMode::Summarize => format!("summarize|{thinking:?}"),
             ProcessMode::Rephrase => format!(
                 "rephrase|{:?}|{:?}|{thinking:?}",
                 self.rephrase_params.style, self.rephrase_params.length,
@@ -1671,32 +1677,6 @@ mod tests {
         assert!(effects.iter().any(|e| matches!(e, UiEffect::SendProcess { .. })));
     }
 
-    #[test]
-    fn image_only_summarize_does_not_share_cache_key_with_text() {
-        use std::sync::Arc;
-        // The API client uses the image-specific Summarize prompt for image-only
-        // content, so its result must not collide with a text Summarize result.
-        let mut sm = StateMachine::new(ProcessMode::Summarize);
-
-        // Text Summarize → Result, cached under the text key.
-        let e = start_processing(&mut sm, "hello");
-        let rid = last_request_id(&e);
-        sm.handle(UiEvent::WorkerResult { text: "text summary".into(), think_content: None, request_id: rid, incomplete: None });
-        let text_key = sm.cache_key();
-
-        // New image-only content (stays Summarize) → distinct key.
-        let e = sm.handle(UiEvent::ContentReady {
-            content: ClipboardContent { text: None, images: vec![Arc::new(vec![0x89, 0x50])] },
-            auto_copy: true,
-        });
-        let rid = last_request_id(&e);
-        let image_key = sm.cache_key();
-        assert_ne!(text_key, image_key, "image-only and text Summarize must key differently");
-
-        sm.handle(UiEvent::WorkerResult { text: "image summary".into(), think_content: None, request_id: rid, incomplete: None });
-        assert_eq!(*sm.state(), OverlayState::Result("image summary".into()));
-    }
-
     // === Retry ===
 
     #[test]
@@ -1922,11 +1902,34 @@ mod tests {
     }
 
     #[test]
-    fn image_only_available_modes_only_summarize() {
+    fn image_only_available_modes_summarize_and_explain() {
         let mut sm = new_sm();
         sm.handle(UiEvent::ContentReady { content: image_only_content(), auto_copy: true });
 
-        assert_eq!(sm.available_modes(), &[ProcessMode::Summarize]);
+        assert_eq!(
+            sm.available_modes(),
+            &[ProcessMode::Summarize, ProcessMode::Explain]
+        );
+    }
+
+    #[test]
+    fn image_only_keeps_explain_mode() {
+        let mut sm = StateMachine::new(ProcessMode::Explain);
+        sm.handle(UiEvent::ContentReady { content: image_only_content(), auto_copy: true });
+
+        // Explain already consumes images, so it is not forced back to Summarize.
+        assert_eq!(sm.mode(), ProcessMode::Explain);
+    }
+
+    #[test]
+    fn image_only_allows_switch_to_explain() {
+        let mut sm = new_sm();
+        sm.handle(UiEvent::ContentReady { content: image_only_content(), auto_copy: true });
+        assert_eq!(sm.mode(), ProcessMode::Summarize);
+
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Explain));
+        assert_eq!(sm.mode(), ProcessMode::Explain);
+        assert!(effects.iter().any(|e| matches!(e, UiEffect::SendProcess { .. })));
     }
 
     #[test]

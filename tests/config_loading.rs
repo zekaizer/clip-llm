@@ -37,15 +37,15 @@ fn startup_loads_override_from_env_path() {
 
     // Overridden mode reflects the file (placeholders substituted) and carries
     // the shared preamble prepended ahead of it.
-    let translate = ProcessMode::Translate.system_prompt(RephraseParams::default(), false);
+    let translate = ProcessMode::Translate.system_prompt(RephraseParams::default());
     assert!(
         translate.ends_with("OVERRIDE Korean->English"),
         "override not applied/substituted: {translate}"
     );
 
     // Untouched modes keep the built-in defaults.
-    let summarize = ProcessMode::Summarize.system_prompt(RephraseParams::default(), false);
-    assert!(summarize.contains("text summarizer for software engineering content"));
+    let summarize = ProcessMode::Summarize.system_prompt(RephraseParams::default());
+    assert!(summarize.contains("summarizer for software engineering content"));
 
     let _ = std::fs::remove_file(&path);
     // SAFETY: same invariant as above — still single-threaded, no concurrent

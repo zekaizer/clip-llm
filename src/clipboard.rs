@@ -56,6 +56,14 @@ impl ClipboardContent {
     pub fn has_images(&self) -> bool {
         !self.images.is_empty()
     }
+
+    /// Whether the content is image-only: no text field at all, but one or more
+    /// images. Note this keys on `text.is_none()`, not [`has_text`](Self::has_text)
+    /// (which also rejects whitespace-only text) — it mirrors the mode-gating the
+    /// UI applies to a captured clipboard.
+    pub fn is_image_only(&self) -> bool {
+        self.text.is_none() && self.has_images()
+    }
 }
 
 /// Long edge (px) above which a clipboard image is downscaled before PNG
