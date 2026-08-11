@@ -6,7 +6,7 @@ System-wide LLM clipboard assistant. Captures text via global hotkey, sends it t
 
 - **Global hotkey** — `Ctrl+Shift+C` single-tap (read clipboard) / double-tap (copy selection + auto-paste result back), hold-cycle to switch mode
 - **Translate / Rephrase / Summarize / Explain / Transcribe** — five processing modes with per-mode response caching; tab order configurable (`[ui].tabs`)
-- **Transcribe** — transcribes a clipboard image into Markdown, picking the fitting representation per region (GFM table, mermaid diagram, code fence, prose); offered only when the clipboard holds an image and no text
+- **Transcribe** — turns a clipboard image into structured Markdown: GFM tables, mermaid blocks (diagram type matched to what the drawing shows, with syntax-pitfall guardrails), tagged code fences, LaTeX, prose — inline SVG only as a last resort for freeform drawings. Offered only when the clipboard holds an image and no text
 - **Rephrase parameters** — style (Correct / Casual / Formal / Business / Technical) and length (Terse / Brief / Same / Detailed / Full)
 - **Vision support** — paste images from clipboard for summarization via multimodal API (`openai` provider)
 - **Thinking mode** — toggle Think / NoThink per mode with configurable per-mode defaults; model capability auto-detected at startup
@@ -107,7 +107,7 @@ kinds of settings:
 - **prompts** — per-mode system prompts, with placeholders substituted at runtime:
   - `{primary_lang}` / `{secondary_lang}` — in the `[translate]` prompt
   - `{primary_lang}` — in the `[summarize]` and `[explain]` prompts (both are primary-language only)
-  - none in `[transcribe]` — Transcribe transcribes, so the output language is whatever the image shows
+  - none in `[transcribe]` — it transcribes, so the output language is whatever the image shows
   - `{style}` / `{length}` — only in `[rephrase].base`
 
 See [config.example.toml](config.example.toml) for the full schema and examples.

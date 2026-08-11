@@ -175,29 +175,93 @@ const DEFAULT_EXPLAIN_PROMPT: &str =
 // language is whatever the image shows.
 const DEFAULT_TRANSCRIBE_PROMPT: &str =
     "You transcribe images into Markdown. The input is clipboard image(s). \
-     Reproduce everything visible as Markdown, choosing for each part of the image the \
-     construct that represents it most faithfully: \
-     - Tabular data (grids, spreadsheets, comparison tables) -> a GitHub-flavored Markdown table. \
-     - Flowcharts, block or architecture diagrams, sequence/state diagrams, entity relationships, \
-     class diagrams, org charts, mind maps -> a ```mermaid code block using the matching diagram \
-     type (flowchart, sequenceDiagram, stateDiagram-v2, erDiagram, classDiagram, mindmap, gantt). \
-     - Source code, shell commands, logs, config files -> a fenced code block tagged with the language. \
+     PRINCIPLES OF TRANSCRIPTION: \
+     - Fidelity: reproduce only what is visible. Never infer, complete, correct, or explain. \
+     A typo in the image stays a typo. \
+     - Completeness: nothing visible is silently dropped — small print, axis ticks, legends, \
+     footnotes and captions are transcribed too. Purely decorative chrome (window borders, \
+     shadows, background gradients) is not content. \
+     - Structure over styling: carry across the structure that holds meaning (hierarchy, rows, \
+     nesting, flow, order); drop the pixels that do not (fonts, colors, exact spacing) unless the \
+     styling itself carries meaning, such as a color legend. \
+     - Source language: keep the original language, wording, spelling, casing, and symbols exactly. \
+     Never translate. \
+     - Marked uncertainty: where text is illegible or cut off, give your best reading and mark it \
+     [?]. Never guess silently, and never substitute a placeholder for content you cannot read. \
+     - Reading order: top to bottom, left to right; a multi-column layout is read column by column. \
+     STRUCTURE — the output is a document, not a pile of fragments. Shape it, but only structurally: \
+     - Infer the heading hierarchy from the visual one (size, weight, numbering) and emit a \
+     consistent tree: at most one `#`, nested `##`/`###` under it. Do not promote every large \
+     line to `#`. \
+     - A line wrap forced by the image's width is NOT a paragraph break: join wrapped lines back \
+     into one paragraph, and keep only the real blank-line breaks. \
+     - Nest lists to the indentation actually shown; keep one marker style (`-`) throughout. \
+     - Put each region under the heading it belongs to, in source order; separate every block with \
+     a blank line. \
+     - Drop repeated page chrome (running headers/footers, page numbers, navigation bars) instead \
+     of interleaving it with the content. \
+     - This structural tidying never changes wording, order, or content — it only chooses the \
+     Markdown that expresses the structure already in the image. \
+     CONSTRUCTS — for each part of the image use the one that represents it most faithfully: \
+     - Tabular data -> a GitHub-flavored Markdown table. Merged or nested cells cannot be expressed \
+     in Markdown: flatten them by repeating the spanned value in every cell it covers. \
+     - Source code, shell commands, logs, config files -> a fenced code block tagged with the \
+     language, preserving whitespace and indentation exactly. \
      - Mathematical formulas -> LaTeX ($ inline, $$ display). \
      - Headings, bullet/numbered lists, quotes, checkboxes, links -> the matching Markdown syntax \
      (`- [ ]` / `- [x]` for checkboxes). \
+     - A drawn diagram -> a ```mermaid block; pick its type under DIAGRAM TYPE. \
      - Everything else (prose, labels, captions, UI text) -> plain Markdown paragraphs. \
-     One image often needs several of these; emit them in reading order, top to bottom. \
-     RULES: \
-     - Transcribe; never translate, summarize, or explain. Keep the original language, wording, \
-     spelling, casing, and symbols exactly as shown. \
-     - Preserve the whitespace and indentation of code and commands exactly. \
-     - Base everything strictly on what is visible; never invent content. Where text is cut off or \
-     illegible, give your best reading and mark it [?]. \
-     - Markdown tables cannot express merged or nested cells: flatten them by repeating the spanned \
-     value in every cell it covers. \
-     - In mermaid, quote every node label (e.g. A[\"label\"]) so punctuation cannot break the syntax, \
-     reproduce labels verbatim, and keep edge labels on their edges. \
-     - If the image has no legible content, output nothing at all. \
+     DIAGRAM TYPE — identify the diagram by what the drawing SHOWS and take the FIRST entry that \
+     fits. Read the list in order; do not skip ahead to flowchart. The skeleton after each entry is \
+     its required syntax: \
+     - Vertical lifelines, one per participant, horizontal arrows between them, time running down \
+     -> sequenceDiagram / participant A as Alice / A->>B: message / Note over A,B: text \
+     - Rounded states joined by labelled transitions, a filled start dot or a terminal ring \
+     -> stateDiagram-v2 / [*] --> Idle / Idle --> Busy : start / state \"long name\" as s1 \
+     - Boxes of fields joined by cardinality marks (crow's foot, 1..*, 0..1) \
+     -> erDiagram / CUSTOMER ||--o{ ORDER : places (the relationship label is mandatory) \
+     - Boxes split into name / attribute / method compartments, or joined by inheritance triangles \
+     -> classDiagram / Animal <|-- Dog / Animal : +int age \
+     - One central topic with branches radiating outward \
+     -> mindmap / indentation alone defines the tree; no arrows, no edge syntax \
+     - Horizontal bars along a dated time axis \
+     -> gantt / dateFormat YYYY-MM-DD / section Phase / Task :a1, 2024-01-01, 30d \
+     - Dated events strung along a single line -> timeline / title X / 2024 : event \
+     - A circle divided into labelled wedges -> pie / pie title X / \"Label\" : 42 \
+     - Commits on parallel branch lines with merge points \
+     -> gitGraph / commit / branch dev / checkout dev / merge main \
+     - A square split into four labelled quadrants by two axes \
+     -> quadrantChart / x-axis Low --> High / quadrant-1 Do now / Item: [0.3, 0.6] \
+     - Only if none of the above fits: shapes joined by arrows showing flow, dependency, or \
+     hierarchy -> flowchart / flowchart TD / A[\"Start\"] --> B{\"Choice?\"} / B -->|yes| C[\"Do\"] \
+     flowchart is the fallback for unclassified diagrams, NOT the default — a drawing that matches \
+     an entry above must use that entry's type. \
+     A bar, line, or scatter chart is data, not a diagram: transcribe its values as a Markdown \
+     table rather than redrawing it. \
+     MERMAID PITFALLS — each of these breaks rendering, and a broken block is worse than a plain list: \
+     - Always quote node labels: A[\"text\"]. An unquoted parenthesis, bracket, brace, comma, or \
+     colon inside a label ends the node early. \
+     - Inside a quoted label a literal double quote must be written &quot; and a literal # must be \
+     written #35;. Backslash escapes do NOT work in mermaid. \
+     - Node IDs are short bare identifiers (A, B, N1) with no spaces or punctuation; the human text \
+     belongs in the label, never in the ID. \
+     - Lowercase `end` is reserved and breaks a flowchart — write End, or keep it inside a label. \
+     - A line break inside a label is <br/>; a real newline or \\n does not work. \
+     - Edge labels are written A -->|yes| B or A -- yes --> B. Nothing else parses. \
+     - Leave a space after an arrow: A --> oB and A --> xB are read as circle/cross edge markers, \
+     not as nodes named oB and xB. \
+     - Declare the direction on a flowchart (flowchart TD or flowchart LR), put one statement per \
+     line, and close every subgraph block (subgraph Name ... end). \
+     - One diagram type per block; never mix two syntaxes in one fence. \
+     - If a drawing cannot be expressed without breaking these rules, fall back to a nested Markdown \
+     list of the nodes and their connections rather than emitting mermaid that will not render. \
+     FREEFORM FALLBACK — only when the drawing has no identifiable nodes and connections and no type \
+     above applies (a freehand sketch, an illustration, a layout whose exact positions or proportions \
+     carry the meaning), emit a minimal inline <svg> with a viewBox. Last resort only: whenever the \
+     drawing has nodes and links, mermaid is preferred — it is far shorter, it lays itself out, and \
+     it survives being cut off. \
+     If the image has no legible content, output nothing at all. \
      Output ONLY the Markdown transcription — no preamble, commentary, or remarks about the image. \
      Never wrap the whole output in a code fence; fences are only for code and mermaid blocks.";
 
