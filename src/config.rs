@@ -171,9 +171,9 @@ const DEFAULT_EXPLAIN_PROMPT: &str =
      heading or filler like \"none\"/\"N/A\". \
      Output ONLY the explanation — no preamble and no questions back to the user.";
 
-// Carries no language placeholder on purpose: OCR transcribes, so the output
+// Carries no language placeholder on purpose: Transcribe transcribes, so the output
 // language is whatever the image shows.
-const DEFAULT_OCR_PROMPT: &str =
+const DEFAULT_TRANSCRIBE_PROMPT: &str =
     "You transcribe images into Markdown. The input is clipboard image(s). \
      Reproduce everything visible as Markdown, choosing for each part of the image the \
      construct that represents it most faithfully: \
@@ -218,7 +218,7 @@ pub struct Config {
     rephrase: RephraseConfig,
     summarize: SummarizeConfig,
     explain: ExplainConfig,
-    ocr: OcrConfig,
+    transcribe: TranscribeConfig,
     prompt: PromptConfig,
 }
 
@@ -405,10 +405,10 @@ struct ExplainConfig {
     thinking: Option<String>,
 }
 
-/// `[ocr]`.
+/// `[transcribe]`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-struct OcrConfig {
+struct TranscribeConfig {
     prompt: Option<String>,
     /// Default thinking mode for this mode: `"think"` or `"no_think"`.
     thinking: Option<String>,
@@ -431,7 +431,7 @@ fn parse_mode_name(raw: &str) -> Option<ProcessMode> {
         "rephrase" => Some(ProcessMode::Rephrase),
         "summarize" => Some(ProcessMode::Summarize),
         "explain" => Some(ProcessMode::Explain),
-        "ocr" => Some(ProcessMode::Ocr),
+        "transcribe" => Some(ProcessMode::Transcribe),
         _ => None,
     }
 }
@@ -556,7 +556,7 @@ impl Config {
                         }
                     }
                     None => warn!(
-                        "unknown mode {name:?} in [ui].tabs (expected translate | rephrase | summarize | explain | ocr); ignoring"
+                        "unknown mode {name:?} in [ui].tabs (expected translate | rephrase | summarize | explain | transcribe); ignoring"
                     ),
                 }
             }
@@ -570,7 +570,7 @@ impl Config {
     }
 
     /// Per-mode default thinking override
-    /// (`[translate|rephrase|summarize|explain|ocr].thinking`): `"think"` or
+    /// (`[translate|rephrase|summarize|explain|transcribe].thinking`): `"think"` or
     /// `"no_think"`. `None` when unset or unparseable (unknown values warn and
     /// fall back to the built-in default).
     pub fn mode_default_thinking(&self, mode: ProcessMode) -> Option<ThinkingMode> {
@@ -579,7 +579,7 @@ impl Config {
             ProcessMode::Rephrase => self.rephrase.thinking.as_deref(),
             ProcessMode::Summarize => self.summarize.thinking.as_deref(),
             ProcessMode::Explain => self.explain.thinking.as_deref(),
-            ProcessMode::Ocr => self.ocr.thinking.as_deref(),
+            ProcessMode::Transcribe => self.transcribe.thinking.as_deref(),
         }?;
         let parsed = parse_thinking_name(raw);
         if parsed.is_none() {
@@ -647,9 +647,9 @@ impl Config {
         self.explain.prompt.as_deref().unwrap_or(DEFAULT_EXPLAIN_PROMPT)
     }
 
-    /// OCR-mode prompt template (image input only).
-    pub fn ocr_prompt(&self) -> &str {
-        self.ocr.prompt.as_deref().unwrap_or(DEFAULT_OCR_PROMPT)
+    /// Transcribe-mode prompt template (image input only).
+    pub fn transcribe_prompt(&self) -> &str {
+        self.transcribe.prompt.as_deref().unwrap_or(DEFAULT_TRANSCRIBE_PROMPT)
     }
 
     /// Builds the Rephrase prompt by substituting the `{style}` / `{length}`
@@ -875,7 +875,7 @@ fn starter_template() -> String {
     t.push_str(&r("double_tap_pinned", "false", ""));
     t.push_str(&r(
         "tabs",
-        "[\"translate\", \"rephrase\", \"summarize\", \"explain\", \"ocr\"]",
+        "[\"translate\", \"rephrase\", \"summarize\", \"explain\", \"transcribe\"]",
         "tab-bar order (first = selected at startup); reorders only, never hides",
     ));
     t.push('\n');
@@ -929,10 +929,10 @@ fn starter_template() -> String {
     t.push_str(&s("prompt", DEFAULT_EXPLAIN_PROMPT, ""));
     t.push('\n');
 
-    // [ocr] — the tab is offered only for an image-only clipboard.
-    t.push_str("# [ocr]\n");
+    // [transcribe] — the tab is offered only for an image-only clipboard.
+    t.push_str("# [transcribe]\n");
     t.push_str(&s("thinking", "no_think", "default thinking mode: think | no_think"));
-    t.push_str(&s("prompt", DEFAULT_OCR_PROMPT, ""));
+    t.push_str(&s("prompt", DEFAULT_TRANSCRIBE_PROMPT, ""));
 
     t
 }
@@ -1157,7 +1157,7 @@ mod tests {
             ProcessMode::Rephrase => config.rephrase_prompt(params.style, params.length),
             ProcessMode::Summarize => substitute(config.summarize_prompt(), primary, secondary),
             ProcessMode::Explain => substitute(config.explain_prompt(), primary, secondary),
-            ProcessMode::Ocr => substitute(config.ocr_prompt(), primary, secondary),
+            ProcessMode::Transcribe => substitute(config.transcribe_prompt(), primary, secondary),
         };
         match config.prompt_preamble() {
             Some(preamble) => format!("{}\n\n{mode_prompt}", substitute(preamble, primary, secondary)),
@@ -1184,8 +1184,8 @@ mod tests {
             ProcessMode::Explain.system_prompt(RephraseParams::default()),
         );
         assert_eq!(
-            assemble(&config, ProcessMode::Ocr, RephraseParams::default()),
-            ProcessMode::Ocr.system_prompt(RephraseParams::default()),
+            assemble(&config, ProcessMode::Transcribe, RephraseParams::default()),
+            ProcessMode::Transcribe.system_prompt(RephraseParams::default()),
         );
         for &style in RephraseStyle::ALL {
             for &length in RephraseLength::ALL {
@@ -1318,7 +1318,7 @@ mod tests {
         for section in [
             "[api]", "[api.headers]", "[generation]", "[telemetry]", "[hotkey]",
             "[ui]", "[languages]", "[prompt]", "[translate]", "[rephrase]",
-            "[rephrase.style]", "[rephrase.length]", "[summarize]", "[explain]", "[ocr]",
+            "[rephrase.style]", "[rephrase.length]", "[summarize]", "[explain]", "[transcribe]",
         ] {
             assert!(t.contains(section), "missing section {section}");
         }
@@ -1342,7 +1342,7 @@ mod tests {
         assert_eq!(config.summarize_prompt(), DEFAULT_SUMMARIZE_PROMPT);
         assert_eq!(config.rephrase_base(), DEFAULT_REPHRASE_BASE);
         assert_eq!(config.explain_prompt(), DEFAULT_EXPLAIN_PROMPT);
-        assert_eq!(config.ocr_prompt(), DEFAULT_OCR_PROMPT);
+        assert_eq!(config.transcribe_prompt(), DEFAULT_TRANSCRIBE_PROMPT);
     }
 
     #[test]
@@ -1481,7 +1481,7 @@ mod tests {
                 ProcessMode::Translate,
                 ProcessMode::Rephrase,
                 ProcessMode::Explain,
-                ProcessMode::Ocr,
+                ProcessMode::Transcribe,
             ]
         );
     }
@@ -1499,7 +1499,7 @@ mod tests {
                 ProcessMode::Rephrase,
                 ProcessMode::Translate,
                 ProcessMode::Explain,
-                ProcessMode::Ocr,
+                ProcessMode::Transcribe,
             ]
         );
     }
@@ -1521,7 +1521,7 @@ mod tests {
              [summarize]\nthinking = \"no_think\"\n\
              [rephrase]\nthinking = \"bogus\"\n\
              [explain]\nthinking = \"no_think\"\n\
-             [ocr]\nthinking = \"think\"\n",
+             [transcribe]\nthinking = \"think\"\n",
         )
         .unwrap();
         assert_eq!(
@@ -1537,7 +1537,7 @@ mod tests {
             Some(ThinkingMode::NoThink)
         );
         assert_eq!(
-            config.mode_default_thinking(ProcessMode::Ocr),
+            config.mode_default_thinking(ProcessMode::Transcribe),
             Some(ThinkingMode::Think)
         );
         // Unknown value -> None, so the built-in default stays in effect.

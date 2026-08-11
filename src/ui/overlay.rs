@@ -873,7 +873,7 @@ fn render_tab_bar(
             let response = ui.add(button);
             // Explain why a tab is disabled instead of silently swallowing the
             // click. Two directions: a text mode locked out by an image-only
-            // clipboard, or an image-only mode (OCR) locked out by text.
+            // clipboard, or an image-only mode (Transcribe) locked out by text.
             let response = if !is_available && has_content {
                 if mode.requires_image_only() {
                     response.on_hover_text("Requires an image-only clipboard")

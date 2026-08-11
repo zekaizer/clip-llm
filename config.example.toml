@@ -77,7 +77,7 @@ single_tap_pinned = false
 double_tap_pinned = false
 # Tab-bar order; the first entry is the mode selected at startup. Reorders
 # only — modes left out are appended in built-in order, never hidden.
-# tabs = ["translate", "rephrase", "summarize", "explain", "ocr"]
+# tabs = ["translate", "rephrase", "summarize", "explain", "transcribe"]
 
 # Language names substituted into {primary_lang} / {secondary_lang}.
 [languages]
@@ -168,11 +168,11 @@ Markdown template:
 
 ## [Optional: one heading per genuinely hard point, only if needed]"""
 
-# OCR mode. Transcribes a clipboard image into Markdown, picking the fitting
+# Transcribe mode. Transcribes a clipboard image into Markdown, picking the fitting
 # construct per region (GFM table, mermaid block, code fence, prose). The tab is
 # offered ONLY when the clipboard holds an image and no text. No language
-# placeholder: OCR transcribes, so the output language is whatever the image shows.
-[ocr]
+# placeholder: Transcribe transcribes, so the output language is whatever the image shows.
+[transcribe]
 # thinking = "no_think"
 prompt = """
 You transcribe images into Markdown. Reproduce everything visible, choosing for each \

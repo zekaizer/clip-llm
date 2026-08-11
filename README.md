@@ -5,8 +5,8 @@ System-wide LLM clipboard assistant. Captures text via global hotkey, sends it t
 ## Features
 
 - **Global hotkey** — `Ctrl+Shift+C` single-tap (read clipboard) / double-tap (copy selection + auto-paste result back), hold-cycle to switch mode
-- **Translate / Rephrase / Summarize / Explain / OCR** — five processing modes with per-mode response caching; tab order configurable (`[ui].tabs`)
-- **OCR** — transcribes a clipboard image into Markdown, picking the fitting representation per region (GFM table, mermaid diagram, code fence, prose); offered only when the clipboard holds an image and no text
+- **Translate / Rephrase / Summarize / Explain / Transcribe** — five processing modes with per-mode response caching; tab order configurable (`[ui].tabs`)
+- **Transcribe** — transcribes a clipboard image into Markdown, picking the fitting representation per region (GFM table, mermaid diagram, code fence, prose); offered only when the clipboard holds an image and no text
 - **Rephrase parameters** — style (Correct / Casual / Formal / Business / Technical) and length (Terse / Brief / Same / Detailed / Full)
 - **Vision support** — paste images from clipboard for summarization via multimodal API (`openai` provider)
 - **Thinking mode** — toggle Think / NoThink per mode with configurable per-mode defaults; model capability auto-detected at startup
@@ -97,17 +97,17 @@ kinds of settings:
   whether a result starts pinned (stays open on focus loss instead of auto-hiding).
   A single-tap result is not auto-copied to the clipboard, so set
   `single_tap_pinned = true` to keep it from disappearing on focus change.
-  `tabs = ["translate", "rephrase", "summarize", "explain", "ocr"]` sets the
+  `tabs = ["translate", "rephrase", "summarize", "explain", "transcribe"]` sets the
   tab-bar order; the first entry is the mode selected at startup (reorder-only —
   modes can't be hidden).
-- **per-mode thinking** — `[translate|rephrase|summarize|explain|ocr].thinking =
+- **per-mode thinking** — `[translate|rephrase|summarize|explain|transcribe].thinking =
   "think" | "no_think"` overrides that mode's default thinking (built-ins:
-  translate/rephrase/ocr = `no_think`, summarize/explain = `think`); applies only
+  translate/rephrase/transcribe = `no_think`, summarize/explain = `think`); applies only
   when the connected model supports thinking control.
 - **prompts** — per-mode system prompts, with placeholders substituted at runtime:
   - `{primary_lang}` / `{secondary_lang}` — in the `[translate]` prompt
   - `{primary_lang}` — in the `[summarize]` and `[explain]` prompts (both are primary-language only)
-  - none in `[ocr]` — OCR transcribes, so the output language is whatever the image shows
+  - none in `[transcribe]` — Transcribe transcribes, so the output language is whatever the image shows
   - `{style}` / `{length}` — only in `[rephrase].base`
 
 See [config.example.toml](config.example.toml) for the full schema and examples.

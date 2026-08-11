@@ -442,7 +442,7 @@ impl StateMachine {
         let old_state = self.state.clone();
 
         // The selected mode may not fit the new content — a text-only mode with an
-        // image-only clipboard, or an image-only mode (Ocr) once text arrives.
+        // image-only clipboard, or an image-only mode (Transcribe) once text arrives.
         // Fall back to the first mode the content actually supports; a mode that
         // already fits (e.g. Explain on an image) is kept.
         let modes = modes_for(&content);
@@ -756,7 +756,7 @@ impl StateMachine {
                 self.rephrase_params.style, self.rephrase_params.length,
             ),
             ProcessMode::Explain => format!("explain|{thinking:?}"),
-            ProcessMode::Ocr => format!("ocr|{thinking:?}"),
+            ProcessMode::Transcribe => format!("transcribe|{thinking:?}"),
         }
     }
 
@@ -1933,7 +1933,7 @@ mod tests {
 
         assert_eq!(
             sm.available_modes(),
-            &[ProcessMode::Summarize, ProcessMode::Explain, ProcessMode::Ocr]
+            &[ProcessMode::Summarize, ProcessMode::Explain, ProcessMode::Transcribe]
         );
     }
 
@@ -1963,7 +1963,7 @@ mod tests {
         sm.handle(UiEvent::ContentReady { content: text_and_image_content(), auto_copy: true });
 
         assert_eq!(sm.mode(), ProcessMode::Translate);
-        // Ocr is gated on image-only content, so text alongside the image hides it.
+        // Transcribe is gated on image-only content, so text alongside the image hides it.
         assert_eq!(
             sm.available_modes(),
             &[
@@ -1976,7 +1976,7 @@ mod tests {
     }
 
     #[test]
-    fn text_only_available_modes_exclude_ocr() {
+    fn text_only_available_modes_exclude_transcribe() {
         let mut sm = new_sm();
         start_processing(&mut sm, "hello");
 
@@ -1992,43 +1992,43 @@ mod tests {
     }
 
     #[test]
-    fn image_only_keeps_ocr_mode() {
-        let mut sm = StateMachine::new(ProcessMode::Ocr);
+    fn image_only_keeps_transcribe_mode() {
+        let mut sm = StateMachine::new(ProcessMode::Transcribe);
         sm.handle(UiEvent::ContentReady { content: image_only_content(), auto_copy: true });
 
-        assert_eq!(sm.mode(), ProcessMode::Ocr);
+        assert_eq!(sm.mode(), ProcessMode::Transcribe);
     }
 
     #[test]
-    fn ocr_falls_back_when_content_carries_text() {
-        // Ocr is only meaningful for an image-only clipboard; text content must
+    fn transcribe_falls_back_when_content_carries_text() {
+        // Transcribe is only meaningful for an image-only clipboard; text content must
         // drop back to a mode that can actually process it.
-        let mut sm = StateMachine::new(ProcessMode::Ocr);
+        let mut sm = StateMachine::new(ProcessMode::Transcribe);
         sm.handle(UiEvent::ContentReady { content: text_and_image_content(), auto_copy: true });
         assert_eq!(sm.mode(), ProcessMode::Translate);
 
-        let mut sm = StateMachine::new(ProcessMode::Ocr);
+        let mut sm = StateMachine::new(ProcessMode::Transcribe);
         start_processing(&mut sm, "hello");
         assert_eq!(sm.mode(), ProcessMode::Translate);
     }
 
     #[test]
-    fn mode_switch_to_ocr_blocked_for_text_content() {
+    fn mode_switch_to_transcribe_blocked_for_text_content() {
         let mut sm = new_sm();
         start_processing(&mut sm, "hello");
 
-        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Ocr));
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Transcribe));
         assert!(effects.is_empty());
         assert_eq!(sm.mode(), ProcessMode::Translate);
     }
 
     #[test]
-    fn image_only_allows_switch_to_ocr() {
+    fn image_only_allows_switch_to_transcribe() {
         let mut sm = new_sm();
         sm.handle(UiEvent::ContentReady { content: image_only_content(), auto_copy: true });
 
-        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Ocr));
-        assert_eq!(sm.mode(), ProcessMode::Ocr);
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Transcribe));
+        assert_eq!(sm.mode(), ProcessMode::Transcribe);
         assert!(effects.iter().any(|e| matches!(e, UiEffect::SendProcess { .. })));
     }
 
