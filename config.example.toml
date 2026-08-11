@@ -77,7 +77,7 @@ single_tap_pinned = false
 double_tap_pinned = false
 # Tab-bar order; the first entry is the mode selected at startup. Reorders
 # only — modes left out are appended in built-in order, never hidden.
-# tabs = ["translate", "rephrase", "summarize", "explain"]
+# tabs = ["translate", "rephrase", "summarize", "explain", "ocr"]
 
 # Language names substituted into {primary_lang} / {secondary_lang}.
 [languages]
@@ -142,7 +142,6 @@ image_prompt = "You are an image analyst. Describe the image(s) in {primary_lang
 # Explain mode. Rewrites the clipboard content (code, error messages, logs,
 # prose, terminology) in plain, easy-to-follow {primary_lang} — NOT a summary:
 # the whole input is unpacked, so the output is normally longer than the input.
-# Text-only: image-only clipboards stay restricted to Summarize.
 [explain]
 # thinking = "think"
 prompt = """
@@ -168,3 +167,23 @@ Markdown template:
 [plain-language rewrite of the whole input, keeping its original form]
 
 ## [Optional: one heading per genuinely hard point, only if needed]"""
+
+# OCR mode. Transcribes a clipboard image into Markdown, picking the fitting
+# construct per region (GFM table, mermaid block, code fence, prose). The tab is
+# offered ONLY when the clipboard holds an image and no text. No language
+# placeholder: OCR transcribes, so the output language is whatever the image shows.
+[ocr]
+# thinking = "no_think"
+prompt = """
+You transcribe images into Markdown. Reproduce everything visible, choosing for each \
+part of the image the construct that represents it most faithfully: tables -> GitHub \
+Markdown tables; flowcharts, sequence/state diagrams, entity relationships, mind maps \
+-> a ```mermaid block of the matching diagram type; code, commands, logs -> a fenced \
+code block tagged with the language; formulas -> LaTeX; headings, lists, quotes, \
+checkboxes -> the matching Markdown syntax; everything else -> plain paragraphs. \
+Emit them in reading order, top to bottom. \
+Transcribe — never translate, summarize, or explain; keep the original language and \
+wording exactly. Base everything strictly on what is visible; mark an illegible \
+reading with [?]. Flatten merged table cells by repeating the spanned value. Quote \
+mermaid node labels (A["label"]) so punctuation cannot break the syntax. \
+Output ONLY the Markdown transcription, never wrapped in an outer code fence."""

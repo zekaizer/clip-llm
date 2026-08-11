@@ -24,6 +24,30 @@ fn image_consuming_modes() -> &'static [ProcessMode] {
     })
 }
 
+/// Modes offered once the clipboard carries text: everything except the modes
+/// gated on image-only input ([`ProcessMode::requires_image_only`]). Same
+/// projection shape as [`image_consuming_modes`], preserving `ALL` order.
+fn text_modes() -> &'static [ProcessMode] {
+    static MODES: OnceLock<Vec<ProcessMode>> = OnceLock::new();
+    MODES.get_or_init(|| {
+        ProcessMode::ALL
+            .iter()
+            .copied()
+            .filter(|m| !m.requires_image_only())
+            .collect()
+    })
+}
+
+/// Modes offered for `content` — the single rule behind both the tab bar
+/// ([`StateMachine::available_modes`]) and the mode fallback on new content.
+fn modes_for(content: &ClipboardContent) -> &'static [ProcessMode] {
+    if content.is_image_only() {
+        image_consuming_modes()
+    } else {
+        text_modes()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // OverlayState
 // ---------------------------------------------------------------------------
@@ -313,12 +337,11 @@ impl StateMachine {
     /// Modes available for the current content.
     /// - No content: no modes available (tabs disabled).
     /// - Image-only: the image-consuming modes ([`image_consuming_modes`]).
-    /// - Text (with or without images): all modes.
+    /// - Text (with or without images): the text modes ([`text_modes`]).
     pub fn available_modes(&self) -> &[ProcessMode] {
         match &self.original_content {
             None => &[],
-            Some(content) if content.is_image_only() => image_consuming_modes(),
-            Some(_) => ProcessMode::ALL,
+            Some(content) => modes_for(content),
         }
     }
 
@@ -418,12 +441,13 @@ impl StateMachine {
     fn on_content_ready(&mut self, content: ClipboardContent, auto_copy: bool) -> Vec<UiEffect> {
         let old_state = self.state.clone();
 
-        // Image-only content: if the current mode can't consume images, fall back
-        // to the first image-consuming mode. A mode that already handles images
-        // (e.g. Explain) is kept.
-        if content.is_image_only()
-            && !self.mode.consumes_images()
-            && let Some(&fallback) = image_consuming_modes().first()
+        // The selected mode may not fit the new content — a text-only mode with an
+        // image-only clipboard, or an image-only mode (Ocr) once text arrives.
+        // Fall back to the first mode the content actually supports; a mode that
+        // already fits (e.g. Explain on an image) is kept.
+        let modes = modes_for(&content);
+        if !modes.contains(&self.mode)
+            && let Some(&fallback) = modes.first()
         {
             self.mode = fallback;
         }
@@ -732,6 +756,7 @@ impl StateMachine {
                 self.rephrase_params.style, self.rephrase_params.length,
             ),
             ProcessMode::Explain => format!("explain|{thinking:?}"),
+            ProcessMode::Ocr => format!("ocr|{thinking:?}"),
         }
     }
 
@@ -1902,13 +1927,13 @@ mod tests {
     }
 
     #[test]
-    fn image_only_available_modes_summarize_and_explain() {
+    fn image_only_available_modes_are_the_image_consuming_ones() {
         let mut sm = new_sm();
         sm.handle(UiEvent::ContentReady { content: image_only_content(), auto_copy: true });
 
         assert_eq!(
             sm.available_modes(),
-            &[ProcessMode::Summarize, ProcessMode::Explain]
+            &[ProcessMode::Summarize, ProcessMode::Explain, ProcessMode::Ocr]
         );
     }
 
@@ -1938,15 +1963,73 @@ mod tests {
         sm.handle(UiEvent::ContentReady { content: text_and_image_content(), auto_copy: true });
 
         assert_eq!(sm.mode(), ProcessMode::Translate);
-        assert_eq!(sm.available_modes(), ProcessMode::ALL);
+        // Ocr is gated on image-only content, so text alongside the image hides it.
+        assert_eq!(
+            sm.available_modes(),
+            &[
+                ProcessMode::Translate,
+                ProcessMode::Rephrase,
+                ProcessMode::Summarize,
+                ProcessMode::Explain,
+            ]
+        );
     }
 
     #[test]
-    fn text_only_available_modes_all() {
+    fn text_only_available_modes_exclude_ocr() {
         let mut sm = new_sm();
         start_processing(&mut sm, "hello");
 
-        assert_eq!(sm.available_modes(), ProcessMode::ALL);
+        assert_eq!(
+            sm.available_modes(),
+            &[
+                ProcessMode::Translate,
+                ProcessMode::Rephrase,
+                ProcessMode::Summarize,
+                ProcessMode::Explain,
+            ]
+        );
+    }
+
+    #[test]
+    fn image_only_keeps_ocr_mode() {
+        let mut sm = StateMachine::new(ProcessMode::Ocr);
+        sm.handle(UiEvent::ContentReady { content: image_only_content(), auto_copy: true });
+
+        assert_eq!(sm.mode(), ProcessMode::Ocr);
+    }
+
+    #[test]
+    fn ocr_falls_back_when_content_carries_text() {
+        // Ocr is only meaningful for an image-only clipboard; text content must
+        // drop back to a mode that can actually process it.
+        let mut sm = StateMachine::new(ProcessMode::Ocr);
+        sm.handle(UiEvent::ContentReady { content: text_and_image_content(), auto_copy: true });
+        assert_eq!(sm.mode(), ProcessMode::Translate);
+
+        let mut sm = StateMachine::new(ProcessMode::Ocr);
+        start_processing(&mut sm, "hello");
+        assert_eq!(sm.mode(), ProcessMode::Translate);
+    }
+
+    #[test]
+    fn mode_switch_to_ocr_blocked_for_text_content() {
+        let mut sm = new_sm();
+        start_processing(&mut sm, "hello");
+
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Ocr));
+        assert!(effects.is_empty());
+        assert_eq!(sm.mode(), ProcessMode::Translate);
+    }
+
+    #[test]
+    fn image_only_allows_switch_to_ocr() {
+        let mut sm = new_sm();
+        sm.handle(UiEvent::ContentReady { content: image_only_content(), auto_copy: true });
+
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Ocr));
+        assert_eq!(sm.mode(), ProcessMode::Ocr);
+        assert!(effects.iter().any(|e| matches!(e, UiEffect::SendProcess { .. })));
     }
 
     #[test]
