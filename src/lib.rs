@@ -311,7 +311,7 @@ pub enum ProcessMode {
     Explain,
     /// Transcribe an image into Markdown, picking the representation that fits
     /// what is shown (table, mermaid diagram, code fence, prose).
-    Ocr,
+    Transcribe,
 }
 
 impl ProcessMode {
@@ -322,7 +322,7 @@ impl ProcessMode {
         ProcessMode::Rephrase,
         ProcessMode::Summarize,
         ProcessMode::Explain,
-        ProcessMode::Ocr,
+        ProcessMode::Transcribe,
     ];
 
     /// Tab-bar display order: `[ui].tabs` from the config when set, otherwise
@@ -345,7 +345,7 @@ impl ProcessMode {
             Self::Rephrase => "Rephrase",
             Self::Summarize => "Summarize",
             Self::Explain => "Explain",
-            Self::Ocr => "OCR",
+            Self::Transcribe => "Transcribe",
         }
     }
 
@@ -355,7 +355,7 @@ impl ProcessMode {
             Self::Rephrase => "Rephrasing...",
             Self::Summarize => "Summarizing...",
             Self::Explain => "Explaining...",
-            Self::Ocr => "Transcribing...",
+            Self::Transcribe => "Transcribing...",
         }
     }
 
@@ -368,9 +368,9 @@ impl ProcessMode {
             return configured;
         }
         match self {
-            // Ocr transcribes rather than reasons, and its output is long — the
+            // Transcribe reads rather than reasons, and its output is long — the
             // reasoning pass would only delay the first token.
-            Self::Translate | Self::Rephrase | Self::Ocr => ThinkingMode::NoThink,
+            Self::Translate | Self::Rephrase | Self::Transcribe => ThinkingMode::NoThink,
             Self::Summarize | Self::Explain => ThinkingMode::Think,
         }
     }
@@ -383,19 +383,19 @@ impl ProcessMode {
     /// deliberate choice here.
     pub fn consumes_images(self) -> bool {
         match self {
-            Self::Summarize | Self::Explain | Self::Ocr => true,
+            Self::Summarize | Self::Explain | Self::Transcribe => true,
             Self::Translate | Self::Rephrase => false,
         }
     }
 
-    /// Whether this mode is offered *only* for an image-only clipboard. Ocr
+    /// Whether this mode is offered *only* for an image-only clipboard. Transcribe
     /// transcribes an image and has nothing to do with text that is already on
     /// the clipboard, so its tab stays disabled unless the image stands alone.
     /// Every other mode accepts text and is always offered. Exhaustive `match`
     /// (no wildcard) so a new variant forces a deliberate choice here.
     pub fn requires_image_only(self) -> bool {
         match self {
-            Self::Ocr => true,
+            Self::Transcribe => true,
             Self::Translate | Self::Rephrase | Self::Summarize | Self::Explain => false,
         }
     }
@@ -451,7 +451,7 @@ impl ProcessMode {
             Self::Explain => {
                 crate::config::substitute(config.explain_prompt(), primary, secondary)
             }
-            Self::Ocr => crate::config::substitute(config.ocr_prompt(), primary, secondary),
+            Self::Transcribe => crate::config::substitute(config.transcribe_prompt(), primary, secondary),
         };
         // Prepend the shared preamble (`[prompt].preamble`) that applies to every
         // mode, if configured. Empty/absent leaves the mode prompt unchanged.
@@ -572,9 +572,9 @@ mod tests {
         assert_eq!(ProcessMode::Translate.next_available(all), ProcessMode::Rephrase);
         assert_eq!(ProcessMode::Rephrase.next_available(all), ProcessMode::Summarize);
         assert_eq!(ProcessMode::Summarize.next_available(all), ProcessMode::Explain);
-        assert_eq!(ProcessMode::Explain.next_available(all), ProcessMode::Ocr);
+        assert_eq!(ProcessMode::Explain.next_available(all), ProcessMode::Transcribe);
         // Wraps back to the first mode.
-        assert_eq!(ProcessMode::Ocr.next_available(all), ProcessMode::Translate);
+        assert_eq!(ProcessMode::Transcribe.next_available(all), ProcessMode::Translate);
     }
 
     #[test]
@@ -600,19 +600,19 @@ mod tests {
     }
 
     #[test]
-    fn consumes_images_only_summarize_explain_and_ocr() {
+    fn consumes_images_only_summarize_explain_and_transcribe() {
         assert!(ProcessMode::Summarize.consumes_images());
         assert!(ProcessMode::Explain.consumes_images());
-        assert!(ProcessMode::Ocr.consumes_images());
+        assert!(ProcessMode::Transcribe.consumes_images());
         assert!(!ProcessMode::Translate.consumes_images());
         assert!(!ProcessMode::Rephrase.consumes_images());
     }
 
     #[test]
-    fn requires_image_only_ocr_alone() {
-        assert!(ProcessMode::Ocr.requires_image_only());
+    fn requires_image_only_transcribe_alone() {
+        assert!(ProcessMode::Transcribe.requires_image_only());
         // Every other mode accepts text, so none of them is image-gated.
-        for mode in ProcessMode::ALL.iter().filter(|&&m| m != ProcessMode::Ocr) {
+        for mode in ProcessMode::ALL.iter().filter(|&&m| m != ProcessMode::Transcribe) {
             assert!(!mode.requires_image_only(), "{mode:?} must not be image-gated");
         }
     }

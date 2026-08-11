@@ -171,33 +171,97 @@ const DEFAULT_EXPLAIN_PROMPT: &str =
      heading or filler like \"none\"/\"N/A\". \
      Output ONLY the explanation — no preamble and no questions back to the user.";
 
-// Carries no language placeholder on purpose: OCR transcribes, so the output
+// Carries no language placeholder on purpose: Transcribe transcribes, so the output
 // language is whatever the image shows.
-const DEFAULT_OCR_PROMPT: &str =
+const DEFAULT_TRANSCRIBE_PROMPT: &str =
     "You transcribe images into Markdown. The input is clipboard image(s). \
-     Reproduce everything visible as Markdown, choosing for each part of the image the \
-     construct that represents it most faithfully: \
-     - Tabular data (grids, spreadsheets, comparison tables) -> a GitHub-flavored Markdown table. \
-     - Flowcharts, block or architecture diagrams, sequence/state diagrams, entity relationships, \
-     class diagrams, org charts, mind maps -> a ```mermaid code block using the matching diagram \
-     type (flowchart, sequenceDiagram, stateDiagram-v2, erDiagram, classDiagram, mindmap, gantt). \
-     - Source code, shell commands, logs, config files -> a fenced code block tagged with the language. \
+     PRINCIPLES OF TRANSCRIPTION: \
+     - Fidelity: reproduce only what is visible. Never infer, complete, correct, or explain. \
+     A typo in the image stays a typo. \
+     - Completeness: nothing visible is silently dropped — small print, axis ticks, legends, \
+     footnotes and captions are transcribed too. Purely decorative chrome (window borders, \
+     shadows, background gradients) is not content. \
+     - Structure over styling: carry across the structure that holds meaning (hierarchy, rows, \
+     nesting, flow, order); drop the pixels that do not (fonts, colors, exact spacing) unless the \
+     styling itself carries meaning, such as a color legend. \
+     - Source language: keep the original language, wording, spelling, casing, and symbols exactly. \
+     Never translate. \
+     - Marked uncertainty: where text is illegible or cut off, give your best reading and mark it \
+     [?]. Never guess silently, and never substitute a placeholder for content you cannot read. \
+     - Reading order: top to bottom, left to right; a multi-column layout is read column by column. \
+     STRUCTURE — the output is a document, not a pile of fragments. Shape it, but only structurally: \
+     - Infer the heading hierarchy from the visual one (size, weight, numbering) and emit a \
+     consistent tree: at most one `#`, nested `##`/`###` under it. Do not promote every large \
+     line to `#`. \
+     - A line wrap forced by the image's width is NOT a paragraph break: join wrapped lines back \
+     into one paragraph, and keep only the real blank-line breaks. \
+     - Nest lists to the indentation actually shown; keep one marker style (`-`) throughout. \
+     - Put each region under the heading it belongs to, in source order; separate every block with \
+     a blank line. \
+     - Drop repeated page chrome (running headers/footers, page numbers, navigation bars) instead \
+     of interleaving it with the content. \
+     - This structural tidying never changes wording, order, or content — it only chooses the \
+     Markdown that expresses the structure already in the image. \
+     CONSTRUCTS — for each part of the image use the one that represents it most faithfully: \
+     - Tabular data -> a GitHub-flavored Markdown table. Merged or nested cells cannot be expressed \
+     in Markdown: flatten them by repeating the spanned value in every cell it covers. \
+     - Source code, shell commands, logs, config files -> a fenced code block tagged with the \
+     language, preserving whitespace and indentation exactly. \
      - Mathematical formulas -> LaTeX ($ inline, $$ display). \
      - Headings, bullet/numbered lists, quotes, checkboxes, links -> the matching Markdown syntax \
      (`- [ ]` / `- [x]` for checkboxes). \
+     - A drawn diagram -> a ```mermaid block; pick its type under DIAGRAM TYPE. \
      - Everything else (prose, labels, captions, UI text) -> plain Markdown paragraphs. \
-     One image often needs several of these; emit them in reading order, top to bottom. \
-     RULES: \
-     - Transcribe; never translate, summarize, or explain. Keep the original language, wording, \
-     spelling, casing, and symbols exactly as shown. \
-     - Preserve the whitespace and indentation of code and commands exactly. \
-     - Base everything strictly on what is visible; never invent content. Where text is cut off or \
-     illegible, give your best reading and mark it [?]. \
-     - Markdown tables cannot express merged or nested cells: flatten them by repeating the spanned \
-     value in every cell it covers. \
-     - In mermaid, quote every node label (e.g. A[\"label\"]) so punctuation cannot break the syntax, \
-     reproduce labels verbatim, and keep edge labels on their edges. \
-     - If the image has no legible content, output nothing at all. \
+     DIAGRAM TYPE — identify the diagram by what the drawing SHOWS and take the FIRST entry that \
+     fits. Read the list in order; do not skip ahead to flowchart. The skeleton after each entry is \
+     its required syntax: \
+     - Vertical lifelines, one per participant, horizontal arrows between them, time running down \
+     -> sequenceDiagram / participant A as Alice / A->>B: message / Note over A,B: text \
+     - Rounded states joined by labelled transitions, a filled start dot or a terminal ring \
+     -> stateDiagram-v2 / [*] --> Idle / Idle --> Busy : start / state \"long name\" as s1 \
+     - Boxes of fields joined by cardinality marks (crow's foot, 1..*, 0..1) \
+     -> erDiagram / CUSTOMER ||--o{ ORDER : places (the relationship label is mandatory) \
+     - Boxes split into name / attribute / method compartments, or joined by inheritance triangles \
+     -> classDiagram / Animal <|-- Dog / Animal : +int age \
+     - One central topic with branches radiating outward \
+     -> mindmap / indentation alone defines the tree; no arrows, no edge syntax \
+     - Horizontal bars along a dated time axis \
+     -> gantt / dateFormat YYYY-MM-DD / section Phase / Task :a1, 2024-01-01, 30d \
+     - Dated events strung along a single line -> timeline / title X / 2024 : event \
+     - A circle divided into labelled wedges -> pie / pie title X / \"Label\" : 42 \
+     - Commits on parallel branch lines with merge points \
+     -> gitGraph / commit / branch dev / checkout dev / merge main \
+     - A square split into four labelled quadrants by two axes \
+     -> quadrantChart / x-axis Low --> High / quadrant-1 Do now / Item: [0.3, 0.6] \
+     - Only if none of the above fits: shapes joined by arrows showing flow, dependency, or \
+     hierarchy -> flowchart / flowchart TD / A[\"Start\"] --> B{\"Choice?\"} / B -->|yes| C[\"Do\"] \
+     flowchart is the fallback for unclassified diagrams, NOT the default — a drawing that matches \
+     an entry above must use that entry's type. \
+     A bar, line, or scatter chart is data, not a diagram: transcribe its values as a Markdown \
+     table rather than redrawing it. \
+     MERMAID PITFALLS — each of these breaks rendering, and a broken block is worse than a plain list: \
+     - Always quote node labels: A[\"text\"]. An unquoted parenthesis, bracket, brace, comma, or \
+     colon inside a label ends the node early. \
+     - Inside a quoted label a literal double quote must be written &quot; and a literal # must be \
+     written #35;. Backslash escapes do NOT work in mermaid. \
+     - Node IDs are short bare identifiers (A, B, N1) with no spaces or punctuation; the human text \
+     belongs in the label, never in the ID. \
+     - Lowercase `end` is reserved and breaks a flowchart — write End, or keep it inside a label. \
+     - A line break inside a label is <br/>; a real newline or \\n does not work. \
+     - Edge labels are written A -->|yes| B or A -- yes --> B. Nothing else parses. \
+     - Leave a space after an arrow: A --> oB and A --> xB are read as circle/cross edge markers, \
+     not as nodes named oB and xB. \
+     - Declare the direction on a flowchart (flowchart TD or flowchart LR), put one statement per \
+     line, and close every subgraph block (subgraph Name ... end). \
+     - One diagram type per block; never mix two syntaxes in one fence. \
+     - If a drawing cannot be expressed without breaking these rules, fall back to a nested Markdown \
+     list of the nodes and their connections rather than emitting mermaid that will not render. \
+     FREEFORM FALLBACK — only when the drawing has no identifiable nodes and connections and no type \
+     above applies (a freehand sketch, an illustration, a layout whose exact positions or proportions \
+     carry the meaning), emit a minimal inline <svg> with a viewBox. Last resort only: whenever the \
+     drawing has nodes and links, mermaid is preferred — it is far shorter, it lays itself out, and \
+     it survives being cut off. \
+     If the image has no legible content, output nothing at all. \
      Output ONLY the Markdown transcription — no preamble, commentary, or remarks about the image. \
      Never wrap the whole output in a code fence; fences are only for code and mermaid blocks.";
 
@@ -218,7 +282,7 @@ pub struct Config {
     rephrase: RephraseConfig,
     summarize: SummarizeConfig,
     explain: ExplainConfig,
-    ocr: OcrConfig,
+    transcribe: TranscribeConfig,
     prompt: PromptConfig,
 }
 
@@ -405,10 +469,10 @@ struct ExplainConfig {
     thinking: Option<String>,
 }
 
-/// `[ocr]`.
+/// `[transcribe]`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-struct OcrConfig {
+struct TranscribeConfig {
     prompt: Option<String>,
     /// Default thinking mode for this mode: `"think"` or `"no_think"`.
     thinking: Option<String>,
@@ -431,7 +495,7 @@ fn parse_mode_name(raw: &str) -> Option<ProcessMode> {
         "rephrase" => Some(ProcessMode::Rephrase),
         "summarize" => Some(ProcessMode::Summarize),
         "explain" => Some(ProcessMode::Explain),
-        "ocr" => Some(ProcessMode::Ocr),
+        "transcribe" => Some(ProcessMode::Transcribe),
         _ => None,
     }
 }
@@ -556,7 +620,7 @@ impl Config {
                         }
                     }
                     None => warn!(
-                        "unknown mode {name:?} in [ui].tabs (expected translate | rephrase | summarize | explain | ocr); ignoring"
+                        "unknown mode {name:?} in [ui].tabs (expected translate | rephrase | summarize | explain | transcribe); ignoring"
                     ),
                 }
             }
@@ -570,7 +634,7 @@ impl Config {
     }
 
     /// Per-mode default thinking override
-    /// (`[translate|rephrase|summarize|explain|ocr].thinking`): `"think"` or
+    /// (`[translate|rephrase|summarize|explain|transcribe].thinking`): `"think"` or
     /// `"no_think"`. `None` when unset or unparseable (unknown values warn and
     /// fall back to the built-in default).
     pub fn mode_default_thinking(&self, mode: ProcessMode) -> Option<ThinkingMode> {
@@ -579,7 +643,7 @@ impl Config {
             ProcessMode::Rephrase => self.rephrase.thinking.as_deref(),
             ProcessMode::Summarize => self.summarize.thinking.as_deref(),
             ProcessMode::Explain => self.explain.thinking.as_deref(),
-            ProcessMode::Ocr => self.ocr.thinking.as_deref(),
+            ProcessMode::Transcribe => self.transcribe.thinking.as_deref(),
         }?;
         let parsed = parse_thinking_name(raw);
         if parsed.is_none() {
@@ -647,9 +711,9 @@ impl Config {
         self.explain.prompt.as_deref().unwrap_or(DEFAULT_EXPLAIN_PROMPT)
     }
 
-    /// OCR-mode prompt template (image input only).
-    pub fn ocr_prompt(&self) -> &str {
-        self.ocr.prompt.as_deref().unwrap_or(DEFAULT_OCR_PROMPT)
+    /// Transcribe-mode prompt template (image input only).
+    pub fn transcribe_prompt(&self) -> &str {
+        self.transcribe.prompt.as_deref().unwrap_or(DEFAULT_TRANSCRIBE_PROMPT)
     }
 
     /// Builds the Rephrase prompt by substituting the `{style}` / `{length}`
@@ -875,7 +939,7 @@ fn starter_template() -> String {
     t.push_str(&r("double_tap_pinned", "false", ""));
     t.push_str(&r(
         "tabs",
-        "[\"translate\", \"rephrase\", \"summarize\", \"explain\", \"ocr\"]",
+        "[\"translate\", \"rephrase\", \"summarize\", \"explain\", \"transcribe\"]",
         "tab-bar order (first = selected at startup); reorders only, never hides",
     ));
     t.push('\n');
@@ -929,10 +993,10 @@ fn starter_template() -> String {
     t.push_str(&s("prompt", DEFAULT_EXPLAIN_PROMPT, ""));
     t.push('\n');
 
-    // [ocr] — the tab is offered only for an image-only clipboard.
-    t.push_str("# [ocr]\n");
+    // [transcribe] — the tab is offered only for an image-only clipboard.
+    t.push_str("# [transcribe]\n");
     t.push_str(&s("thinking", "no_think", "default thinking mode: think | no_think"));
-    t.push_str(&s("prompt", DEFAULT_OCR_PROMPT, ""));
+    t.push_str(&s("prompt", DEFAULT_TRANSCRIBE_PROMPT, ""));
 
     t
 }
@@ -1157,7 +1221,7 @@ mod tests {
             ProcessMode::Rephrase => config.rephrase_prompt(params.style, params.length),
             ProcessMode::Summarize => substitute(config.summarize_prompt(), primary, secondary),
             ProcessMode::Explain => substitute(config.explain_prompt(), primary, secondary),
-            ProcessMode::Ocr => substitute(config.ocr_prompt(), primary, secondary),
+            ProcessMode::Transcribe => substitute(config.transcribe_prompt(), primary, secondary),
         };
         match config.prompt_preamble() {
             Some(preamble) => format!("{}\n\n{mode_prompt}", substitute(preamble, primary, secondary)),
@@ -1184,8 +1248,8 @@ mod tests {
             ProcessMode::Explain.system_prompt(RephraseParams::default()),
         );
         assert_eq!(
-            assemble(&config, ProcessMode::Ocr, RephraseParams::default()),
-            ProcessMode::Ocr.system_prompt(RephraseParams::default()),
+            assemble(&config, ProcessMode::Transcribe, RephraseParams::default()),
+            ProcessMode::Transcribe.system_prompt(RephraseParams::default()),
         );
         for &style in RephraseStyle::ALL {
             for &length in RephraseLength::ALL {
@@ -1318,7 +1382,7 @@ mod tests {
         for section in [
             "[api]", "[api.headers]", "[generation]", "[telemetry]", "[hotkey]",
             "[ui]", "[languages]", "[prompt]", "[translate]", "[rephrase]",
-            "[rephrase.style]", "[rephrase.length]", "[summarize]", "[explain]", "[ocr]",
+            "[rephrase.style]", "[rephrase.length]", "[summarize]", "[explain]", "[transcribe]",
         ] {
             assert!(t.contains(section), "missing section {section}");
         }
@@ -1342,7 +1406,7 @@ mod tests {
         assert_eq!(config.summarize_prompt(), DEFAULT_SUMMARIZE_PROMPT);
         assert_eq!(config.rephrase_base(), DEFAULT_REPHRASE_BASE);
         assert_eq!(config.explain_prompt(), DEFAULT_EXPLAIN_PROMPT);
-        assert_eq!(config.ocr_prompt(), DEFAULT_OCR_PROMPT);
+        assert_eq!(config.transcribe_prompt(), DEFAULT_TRANSCRIBE_PROMPT);
     }
 
     #[test]
@@ -1481,7 +1545,7 @@ mod tests {
                 ProcessMode::Translate,
                 ProcessMode::Rephrase,
                 ProcessMode::Explain,
-                ProcessMode::Ocr,
+                ProcessMode::Transcribe,
             ]
         );
     }
@@ -1499,7 +1563,7 @@ mod tests {
                 ProcessMode::Rephrase,
                 ProcessMode::Translate,
                 ProcessMode::Explain,
-                ProcessMode::Ocr,
+                ProcessMode::Transcribe,
             ]
         );
     }
@@ -1521,7 +1585,7 @@ mod tests {
              [summarize]\nthinking = \"no_think\"\n\
              [rephrase]\nthinking = \"bogus\"\n\
              [explain]\nthinking = \"no_think\"\n\
-             [ocr]\nthinking = \"think\"\n",
+             [transcribe]\nthinking = \"think\"\n",
         )
         .unwrap();
         assert_eq!(
@@ -1537,7 +1601,7 @@ mod tests {
             Some(ThinkingMode::NoThink)
         );
         assert_eq!(
-            config.mode_default_thinking(ProcessMode::Ocr),
+            config.mode_default_thinking(ProcessMode::Transcribe),
             Some(ThinkingMode::Think)
         );
         // Unknown value -> None, so the built-in default stays in effect.

@@ -77,7 +77,7 @@ single_tap_pinned = false
 double_tap_pinned = false
 # Tab-bar order; the first entry is the mode selected at startup. Reorders
 # only — modes left out are appended in built-in order, never hidden.
-# tabs = ["translate", "rephrase", "summarize", "explain", "ocr"]
+# tabs = ["translate", "rephrase", "summarize", "explain", "transcribe"]
 
 # Language names substituted into {primary_lang} / {secondary_lang}.
 [languages]
@@ -168,22 +168,48 @@ Markdown template:
 
 ## [Optional: one heading per genuinely hard point, only if needed]"""
 
-# OCR mode. Transcribes a clipboard image into Markdown, picking the fitting
+# Transcribe mode. Turns a clipboard image into Markdown, picking the fitting
 # construct per region (GFM table, mermaid block, code fence, prose). The tab is
 # offered ONLY when the clipboard holds an image and no text. No language
-# placeholder: OCR transcribes, so the output language is whatever the image shows.
-[ocr]
+# placeholder: it transcribes, so the output language is whatever the image shows.
+#
+# The prompt below is a CONDENSED example. The built-in default is longer: it also
+# carries per-diagram-type syntax skeletons and a mermaid-pitfall list. Overriding
+# `prompt` replaces the built-in entirely, so start from the built-in (visible in the
+# starter config.toml the tray's "Open Config" writes) if you only want to tweak it.
+# Set thinking = "think" if the model keeps picking the wrong diagram type.
+[transcribe]
 # thinking = "no_think"
 prompt = """
-You transcribe images into Markdown. Reproduce everything visible, choosing for each \
-part of the image the construct that represents it most faithfully: tables -> GitHub \
-Markdown tables; flowcharts, sequence/state diagrams, entity relationships, mind maps \
--> a ```mermaid block of the matching diagram type; code, commands, logs -> a fenced \
-code block tagged with the language; formulas -> LaTeX; headings, lists, quotes, \
-checkboxes -> the matching Markdown syntax; everything else -> plain paragraphs. \
-Emit them in reading order, top to bottom. \
-Transcribe — never translate, summarize, or explain; keep the original language and \
-wording exactly. Base everything strictly on what is visible; mark an illegible \
-reading with [?]. Flatten merged table cells by repeating the spanned value. Quote \
-mermaid node labels (A["label"]) so punctuation cannot break the syntax. \
+You transcribe images into Markdown. \
+PRINCIPLES: reproduce only what is visible — never infer, complete, correct, or \
+translate; drop nothing visible; mark an illegible reading with [?]; read top to \
+bottom, left to right. \
+STRUCTURE: the output is a document, not a pile of fragments. Infer the heading \
+hierarchy from the visual one (at most one `#`), join lines that were wrapped only by \
+the image's width back into one paragraph, nest lists to the indentation shown, and \
+drop repeated page chrome. Structural tidying never changes wording or order. \
+CONSTRUCTS: tables -> GitHub Markdown tables (flatten merged cells by repeating the \
+spanned value); code, commands, logs -> a fenced code block tagged with the language; \
+formulas -> LaTeX; headings, lists, quotes, checkboxes -> the matching Markdown syntax; \
+a drawn diagram -> a ```mermaid block; everything else -> plain paragraphs. \
+DIAGRAM TYPE — take the FIRST match, do not skip ahead to flowchart: vertical lifelines \
+with horizontal arrows between them -> sequenceDiagram; rounded states with labelled \
+transitions -> stateDiagram-v2; field boxes joined by cardinality marks -> erDiagram; \
+name/attribute/method compartments -> classDiagram; one central topic with radiating \
+branches -> mindmap; horizontal bars on a dated axis -> gantt; dated events on one line \
+-> timeline; a circle of labelled wedges -> pie; commits on parallel branches -> \
+gitGraph; a square split into four quadrants -> quadrantChart; only if none fit, shapes \
+joined by arrows -> flowchart. flowchart is the fallback, NOT the default. A bar/line/ \
+scatter chart is data: transcribe its values as a table instead of redrawing it. \
+MERMAID PITFALLS: always quote node labels (A["label"]); write a literal quote as &quot; \
+and a literal # as #35; (backslash escapes do not work); keep node IDs short and bare; \
+lowercase `end` breaks a flowchart; a line break in a label is <br/>; edge labels are \
+A -->|yes| B; leave a space after an arrow (A --> oB parses as a circle edge); one \
+statement per line and one diagram type per block. If a drawing cannot be expressed \
+without breaking these, emit a nested list of nodes and connections instead of mermaid \
+that will not render. \
+Only when a drawing has no identifiable nodes and links at all (freehand sketch, \
+illustration, meaning-carrying layout), emit a minimal inline <svg> with a viewBox as a \
+last resort. \
 Output ONLY the Markdown transcription, never wrapped in an outer code fence."""
