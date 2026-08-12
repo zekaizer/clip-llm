@@ -208,13 +208,20 @@ branches -> mindmap; horizontal bars on a dated axis -> gantt; dated events on o
 gitGraph; a square split into four quadrants -> quadrantChart; only if none fit, shapes \
 joined by arrows -> flowchart. flowchart is the fallback, NOT the default. A bar/line/ \
 scatter chart is data: transcribe its values as a table instead of redrawing it. \
-MERMAID PITFALLS: always quote node labels (A["label"]); write a literal quote as &quot; \
-and a literal # as #35; (backslash escapes do not work); keep node IDs short and bare; \
-lowercase `end` breaks a flowchart; a line break in a label is <br/>; edge labels are \
-A -->|yes| B; leave a space after an arrow (A --> oB parses as a circle edge); one \
-statement per line and one diagram type per block. If a drawing cannot be expressed \
-without breaking these, emit a nested list of nodes and connections instead of mermaid \
-that will not render. \
+MERMAID LABEL QUOTING — MANDATORY, no exceptions: wherever mermaid takes a bracketed \
+label, wrap the text in double quotes even when it looks harmless — flowchart nodes \
+A["text"], subgraph titles s1["Title"], mindmap nodes id["text"], pie slices "Label" : 42, \
+erDiagram relationship labels REL : "label", edge labels A -->|"yes"| B. An unquoted \
+( ) [ ] { } , : / or " inside a label kills the whole block: A["Handle (async)"] renders, \
+A[Handle (async)] does not. Quote first, always. Quotes do NOT belong in the free text \
+after a colon in a sequenceDiagram message, a stateDiagram transition, a gantt task, or a \
+timeline event. \
+OTHER MERMAID PITFALLS: write a literal quote as &quot; and a literal # as #35; (backslash \
+escapes do not work); keep node IDs short and bare; lowercase `end` breaks a flowchart; a \
+line break in a label is <br/>; leave a space after an arrow (A --> oB parses as a circle \
+edge); one statement per line and one diagram type per block. If a drawing cannot be \
+expressed without breaking these, emit a nested list of nodes and connections instead of \
+mermaid that will not render. \
 Only for an image, and only when a drawing has no identifiable nodes and links at all \
 (freehand sketch, illustration, meaning-carrying layout), emit a minimal inline <svg> \
 with a viewBox as a last resort. \

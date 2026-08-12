@@ -223,19 +223,31 @@ const DEFAULT_TRANSCRIBE_PROMPT: &str =
      means an explicit ASCII-art drawing — boxes, arrows, or lines made of characters. An ordinary \
      indented list or outline is a list, NOT a diagram: leave it as a list. \
      - Everything else (prose, labels, captions, UI text) -> plain Markdown paragraphs. \
+     MERMAID LABEL QUOTING — MANDATORY, no exceptions, apply it before anything else. Wherever \
+     mermaid takes a bracketed label, wrap the text in double quotes, even when the text looks \
+     harmless: flowchart nodes A[\"text\"], B(\"text\"), C{\"text\"}; subgraph titles \
+     subgraph s1[\"Title\"]; mindmap nodes id[\"text\"]; pie slices \"Label\" : 42; erDiagram \
+     relationship labels CUSTOMER ||--o{ ORDER : \"places\". An unquoted ( ) [ ] { } , : / or \" \
+     inside a label ends the node early and kills the entire block, and most real labels contain \
+     one — A[\"Handle (async)\"] renders, A[Handle (async)] does not. Quote first, always; never \
+     decide per label whether quoting is needed. \
+     The ONLY place quotes do not belong is the free-text tail after a colon in a sequenceDiagram \
+     message, a stateDiagram transition, a gantt task, or a timeline event: there, leave the text \
+     bare, keep it on one line, and drop any semicolon. \
      DIAGRAM TYPE — identify the diagram by what it SHOWS and take the FIRST entry that \
      fits. Read the list in order; do not skip ahead to flowchart. The skeleton after each entry is \
-     its required syntax: \
+     its required syntax, and every label in it is quoted for the reason above: \
      - Vertical lifelines, one per participant, horizontal arrows between them, time running down \
      -> sequenceDiagram / participant A as Alice / A->>B: message / Note over A,B: text \
      - Rounded states joined by labelled transitions, a filled start dot or a terminal ring \
      -> stateDiagram-v2 / [*] --> Idle / Idle --> Busy : start / state \"long name\" as s1 \
      - Boxes of fields joined by cardinality marks (crow's foot, 1..*, 0..1) \
-     -> erDiagram / CUSTOMER ||--o{ ORDER : places (the relationship label is mandatory) \
+     -> erDiagram / CUSTOMER ||--o{ ORDER : \"places\" (the relationship label is mandatory) \
      - Boxes split into name / attribute / method compartments, or joined by inheritance triangles \
      -> classDiagram / Animal <|-- Dog / Animal : +int age \
      - One central topic with branches radiating outward \
-     -> mindmap / indentation alone defines the tree; no arrows, no edge syntax \
+     -> mindmap / root[\"Topic\"] then indented child[\"text\"]; indentation alone defines the tree; \
+     no arrows, no edge syntax \
      - Horizontal bars along a dated time axis \
      -> gantt / dateFormat YYYY-MM-DD / section Phase / Task :a1, 2024-01-01, 30d \
      - Dated events strung along a single line -> timeline / title X / 2024 : event \
@@ -245,21 +257,21 @@ const DEFAULT_TRANSCRIBE_PROMPT: &str =
      - A square split into four labelled quadrants by two axes \
      -> quadrantChart / x-axis Low --> High / quadrant-1 Do now / Item: [0.3, 0.6] \
      - Only if none of the above fits: shapes joined by arrows showing flow, dependency, or \
-     hierarchy -> flowchart / flowchart TD / A[\"Start\"] --> B{\"Choice?\"} / B -->|yes| C[\"Do\"] \
+     hierarchy -> flowchart / flowchart TD / A[\"Start\"] --> B{\"Choice?\"} / B -->|\"yes\"| C[\"Do\"] \
      flowchart is the fallback for unclassified diagrams, NOT the default — a drawing that matches \
      an entry above must use that entry's type. \
      A bar, line, or scatter chart is data, not a diagram: transcribe its values as a Markdown \
      table rather than redrawing it. \
      MERMAID PITFALLS — each of these breaks rendering, and a broken block is worse than a plain list: \
-     - Always quote node labels: A[\"text\"]. An unquoted parenthesis, bracket, brace, comma, or \
-     colon inside a label ends the node early. \
+     - Every bracketed label is quoted (see MERMAID LABEL QUOTING). Re-read the block you wrote and \
+     quote any label you left bare before emitting it. \
      - Inside a quoted label a literal double quote must be written &quot; and a literal # must be \
      written #35;. Backslash escapes do NOT work in mermaid. \
      - Node IDs are short bare identifiers (A, B, N1) with no spaces or punctuation; the human text \
      belongs in the label, never in the ID. \
      - Lowercase `end` is reserved and breaks a flowchart — write End, or keep it inside a label. \
      - A line break inside a label is <br/>; a real newline or \\n does not work. \
-     - Edge labels are written A -->|yes| B or A -- yes --> B. Nothing else parses. \
+     - Edge labels are written A -->|\"yes\"| B or A -- \"yes\" --> B. Nothing else parses. \
      - Leave a space after an arrow: A --> oB and A --> xB are read as circle/cross edge markers, \
      not as nodes named oB and xB. \
      - Declare the direction on a flowchart (flowchart TD or flowchart LR), put one statement per \
