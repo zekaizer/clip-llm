@@ -24,27 +24,13 @@ fn image_consuming_modes() -> &'static [ProcessMode] {
     })
 }
 
-/// Modes offered once the clipboard carries text: everything except the modes
-/// gated on image-only input ([`ProcessMode::requires_image_only`]). Same
-/// projection shape as [`image_consuming_modes`], preserving `ALL` order.
-fn text_modes() -> &'static [ProcessMode] {
-    static MODES: OnceLock<Vec<ProcessMode>> = OnceLock::new();
-    MODES.get_or_init(|| {
-        ProcessMode::ALL
-            .iter()
-            .copied()
-            .filter(|m| !m.requires_image_only())
-            .collect()
-    })
-}
-
 /// Modes offered for `content` — the single rule behind both the tab bar
 /// ([`StateMachine::available_modes`]) and the mode fallback on new content.
 fn modes_for(content: &ClipboardContent) -> &'static [ProcessMode] {
     if content.is_image_only() {
         image_consuming_modes()
     } else {
-        text_modes()
+        ProcessMode::ALL
     }
 }
 
@@ -337,7 +323,7 @@ impl StateMachine {
     /// Modes available for the current content.
     /// - No content: no modes available (tabs disabled).
     /// - Image-only: the image-consuming modes ([`image_consuming_modes`]).
-    /// - Text (with or without images): the text modes ([`text_modes`]).
+    /// - Text (with or without images): all modes.
     pub fn available_modes(&self) -> &[ProcessMode] {
         match &self.original_content {
             None => &[],
@@ -442,9 +428,8 @@ impl StateMachine {
         let old_state = self.state.clone();
 
         // The selected mode may not fit the new content — a text-only mode with an
-        // image-only clipboard, or an image-only mode (Transcribe) once text arrives.
-        // Fall back to the first mode the content actually supports; a mode that
-        // already fits (e.g. Explain on an image) is kept.
+        // image-only clipboard. Fall back to the first mode the content actually
+        // supports; a mode that already fits (e.g. Explain on an image) is kept.
         let modes = modes_for(&content);
         if !modes.contains(&self.mode)
             && let Some(&fallback) = modes.first()
@@ -1963,32 +1948,16 @@ mod tests {
         sm.handle(UiEvent::ContentReady { content: text_and_image_content(), auto_copy: true });
 
         assert_eq!(sm.mode(), ProcessMode::Translate);
-        // Transcribe is gated on image-only content, so text alongside the image hides it.
-        assert_eq!(
-            sm.available_modes(),
-            &[
-                ProcessMode::Translate,
-                ProcessMode::Rephrase,
-                ProcessMode::Summarize,
-                ProcessMode::Explain,
-            ]
-        );
+        assert_eq!(sm.available_modes(), ProcessMode::ALL);
     }
 
     #[test]
-    fn text_only_available_modes_exclude_transcribe() {
+    fn text_only_available_modes_all() {
         let mut sm = new_sm();
         start_processing(&mut sm, "hello");
 
-        assert_eq!(
-            sm.available_modes(),
-            &[
-                ProcessMode::Translate,
-                ProcessMode::Rephrase,
-                ProcessMode::Summarize,
-                ProcessMode::Explain,
-            ]
-        );
+        // Transcribe re-expresses text as well as images, so no mode is gated out.
+        assert_eq!(sm.available_modes(), ProcessMode::ALL);
     }
 
     #[test]
@@ -2000,26 +1969,25 @@ mod tests {
     }
 
     #[test]
-    fn transcribe_falls_back_when_content_carries_text() {
-        // Transcribe is only meaningful for an image-only clipboard; text content must
-        // drop back to a mode that can actually process it.
+    fn transcribe_survives_text_content() {
+        // Transcribe accepts any medium, so text content never forces it aside.
         let mut sm = StateMachine::new(ProcessMode::Transcribe);
         sm.handle(UiEvent::ContentReady { content: text_and_image_content(), auto_copy: true });
-        assert_eq!(sm.mode(), ProcessMode::Translate);
+        assert_eq!(sm.mode(), ProcessMode::Transcribe);
 
         let mut sm = StateMachine::new(ProcessMode::Transcribe);
         start_processing(&mut sm, "hello");
-        assert_eq!(sm.mode(), ProcessMode::Translate);
+        assert_eq!(sm.mode(), ProcessMode::Transcribe);
     }
 
     #[test]
-    fn mode_switch_to_transcribe_blocked_for_text_content() {
+    fn mode_switch_to_transcribe_allowed_for_text_content() {
         let mut sm = new_sm();
         start_processing(&mut sm, "hello");
 
         let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Transcribe));
-        assert!(effects.is_empty());
-        assert_eq!(sm.mode(), ProcessMode::Translate);
+        assert_eq!(sm.mode(), ProcessMode::Transcribe);
+        assert!(effects.iter().any(|e| matches!(e, UiEffect::SendProcess { .. })));
     }
 
     #[test]

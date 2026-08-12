@@ -168,10 +168,11 @@ Markdown template:
 
 ## [Optional: one heading per genuinely hard point, only if needed]"""
 
-# Transcribe mode. Turns a clipboard image into Markdown, picking the fitting
-# construct per region (GFM table, mermaid block, code fence, prose). The tab is
-# offered ONLY when the clipboard holds an image and no text. No language
-# placeholder: it transcribes, so the output language is whatever the image shows.
+# Transcribe mode. Re-expresses clipboard content — text, image(s), or both — as
+# structured Markdown, picking the fitting construct per region (GFM table, mermaid
+# block, code fence, prose). Wording is preserved verbatim; only the structure is
+# chosen. No language placeholder: it transcribes, so the output language is
+# whatever the input is in.
 #
 # The prompt below is a CONDENSED example. The built-in default is longer: it also
 # carries per-diagram-type syntax skeletons and a mermaid-pitfall list. Overriding
@@ -181,18 +182,23 @@ Markdown template:
 [transcribe]
 # thinking = "no_think"
 prompt = """
-You transcribe images into Markdown. \
-PRINCIPLES: reproduce only what is visible — never infer, complete, correct, or \
-translate; drop nothing visible; mark an illegible reading with [?]; read top to \
-bottom, left to right. \
+You re-express clipboard content as structured Markdown. The input is text, image(s), \
+or both. Transcribe what it holds; never rewrite it. \
+PRINCIPLES: reproduce only what the input contains — never infer, complete, correct, or \
+translate; drop nothing but decorative chrome; mark an illegible or garbled reading with \
+[?]; read top to bottom, left to right. \
 STRUCTURE: the output is a document, not a pile of fragments. Infer the heading \
-hierarchy from the visual one (at most one `#`), join lines that were wrapped only by \
-the image's width back into one paragraph, nest lists to the indentation shown, and \
-drop repeated page chrome. Structural tidying never changes wording or order. \
-CONSTRUCTS: tables -> GitHub Markdown tables (flatten merged cells by repeating the \
-spanned value); code, commands, logs -> a fenced code block tagged with the language; \
-formulas -> LaTeX; headings, lists, quotes, checkboxes -> the matching Markdown syntax; \
-a drawn diagram -> a ```mermaid block; everything else -> plain paragraphs. \
+hierarchy from the one the input shows (at most one `#`), join lines that were wrapped \
+only by the source's width back into one paragraph, nest lists to the indentation shown, \
+and drop repeated page chrome. Input that is already Markdown is normalized, not \
+rewritten. Structural tidying never changes wording or order. \
+CONSTRUCTS: tables -> GitHub Markdown tables, including plain-text ones (fixed-width \
+columns, TSV/CSV, grids drawn with | + - or box-drawing characters); flatten merged \
+cells by repeating the spanned value. Code, commands, logs -> a fenced code block tagged \
+with the language; formulas -> LaTeX; headings, lists, quotes, checkboxes -> the matching \
+Markdown syntax; a diagram -> a ```mermaid block; everything else -> plain paragraphs. \
+In text input a diagram means an explicit ASCII-art drawing; an ordinary indented list \
+stays a list. \
 DIAGRAM TYPE — take the FIRST match, do not skip ahead to flowchart: vertical lifelines \
 with horizontal arrows between them -> sequenceDiagram; rounded states with labelled \
 transitions -> stateDiagram-v2; field boxes joined by cardinality marks -> erDiagram; \
@@ -209,7 +215,7 @@ A -->|yes| B; leave a space after an arrow (A --> oB parses as a circle edge); o
 statement per line and one diagram type per block. If a drawing cannot be expressed \
 without breaking these, emit a nested list of nodes and connections instead of mermaid \
 that will not render. \
-Only when a drawing has no identifiable nodes and links at all (freehand sketch, \
-illustration, meaning-carrying layout), emit a minimal inline <svg> with a viewBox as a \
-last resort. \
+Only for an image, and only when a drawing has no identifiable nodes and links at all \
+(freehand sketch, illustration, meaning-carrying layout), emit a minimal inline <svg> \
+with a viewBox as a last resort. \
 Output ONLY the Markdown transcription, never wrapped in an outer code fence."""

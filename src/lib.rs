@@ -309,8 +309,8 @@ pub enum ProcessMode {
     Rephrase,
     Summarize,
     Explain,
-    /// Transcribe an image into Markdown, picking the representation that fits
-    /// what is shown (table, mermaid diagram, code fence, prose).
+    /// Re-express the input as structured Markdown, picking the representation
+    /// that fits what it holds (table, mermaid diagram, code fence, prose).
     Transcribe,
 }
 
@@ -385,18 +385,6 @@ impl ProcessMode {
         match self {
             Self::Summarize | Self::Explain | Self::Transcribe => true,
             Self::Translate | Self::Rephrase => false,
-        }
-    }
-
-    /// Whether this mode is offered *only* for an image-only clipboard. Transcribe
-    /// transcribes an image and has nothing to do with text that is already on
-    /// the clipboard, so its tab stays disabled unless the image stands alone.
-    /// Every other mode accepts text and is always offered. Exhaustive `match`
-    /// (no wildcard) so a new variant forces a deliberate choice here.
-    pub fn requires_image_only(self) -> bool {
-        match self {
-            Self::Transcribe => true,
-            Self::Translate | Self::Rephrase | Self::Summarize | Self::Explain => false,
         }
     }
 
@@ -608,23 +596,5 @@ mod tests {
         assert!(!ProcessMode::Rephrase.consumes_images());
     }
 
-    #[test]
-    fn requires_image_only_transcribe_alone() {
-        assert!(ProcessMode::Transcribe.requires_image_only());
-        // Every other mode accepts text, so none of them is image-gated.
-        for mode in ProcessMode::ALL.iter().filter(|&&m| m != ProcessMode::Transcribe) {
-            assert!(!mode.requires_image_only(), "{mode:?} must not be image-gated");
-        }
-    }
-
-    #[test]
-    fn image_gated_modes_also_consume_images() {
-        // An image-gated mode that ignored images would never see any input.
-        for mode in ProcessMode::ALL {
-            if mode.requires_image_only() {
-                assert!(mode.consumes_images(), "{mode:?} is image-gated but ignores images");
-            }
-        }
-    }
 }
 

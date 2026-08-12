@@ -6,7 +6,7 @@ System-wide LLM clipboard assistant. Captures text via global hotkey, sends it t
 
 - **Global hotkey** — `Ctrl+Shift+C` single-tap (read clipboard) / double-tap (copy selection + auto-paste result back), hold-cycle to switch mode
 - **Translate / Rephrase / Summarize / Explain / Transcribe** — five processing modes with per-mode response caching; tab order configurable (`[ui].tabs`)
-- **Transcribe** — turns a clipboard image into structured Markdown: GFM tables, mermaid blocks (diagram type matched to what the drawing shows, with syntax-pitfall guardrails), tagged code fences, LaTeX, prose — inline SVG only as a last resort for freeform drawings. Offered only when the clipboard holds an image and no text
+- **Transcribe** — re-expresses clipboard content (text, image, or both) as structured Markdown: GFM tables, mermaid blocks (diagram type matched to what the diagram shows, with syntax-pitfall guardrails), tagged code fences, LaTeX, prose — inline SVG only as a last resort for freeform drawings. Wording is preserved verbatim; only the structure is chosen
 - **Rephrase parameters** — style (Correct / Casual / Formal / Business / Technical) and length (Terse / Brief / Same / Detailed / Full)
 - **Vision support** — paste images from clipboard for summarization via multimodal API (`openai` provider)
 - **Thinking mode** — toggle Think / NoThink per mode with configurable per-mode defaults; model capability auto-detected at startup

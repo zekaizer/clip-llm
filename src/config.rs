@@ -171,48 +171,59 @@ const DEFAULT_EXPLAIN_PROMPT: &str =
      heading or filler like \"none\"/\"N/A\". \
      Output ONLY the explanation — no preamble and no questions back to the user.";
 
-// Carries no language placeholder on purpose: Transcribe transcribes, so the output
-// language is whatever the image shows.
+// Carries no language placeholder on purpose: this mode transcribes, so the
+// output language is whatever the input is in.
+//
+// Medium-agnostic, like the Summarize/Explain prompts: the same instructions
+// cover text, image(s), or both.
 const DEFAULT_TRANSCRIBE_PROMPT: &str =
-    "You transcribe images into Markdown. The input is clipboard image(s). \
+    "You re-express clipboard content as structured Markdown. The input is clipboard content \
+     — text, image(s), or both. Transcribe what it holds; never rewrite it. \
      PRINCIPLES OF TRANSCRIPTION: \
-     - Fidelity: reproduce only what is visible. Never infer, complete, correct, or explain. \
-     A typo in the image stays a typo. \
-     - Completeness: nothing visible is silently dropped — small print, axis ticks, legends, \
-     footnotes and captions are transcribed too. Purely decorative chrome (window borders, \
-     shadows, background gradients) is not content. \
+     - Fidelity: reproduce only what the input actually contains. Never infer, complete, correct, \
+     or explain. A typo in the input stays a typo. \
+     - Completeness: nothing in the input is silently dropped — every line of text; in an image, \
+     small print, axis ticks, legends, footnotes and captions too. Purely decorative chrome is not \
+     content: window borders, shadows and background gradients in an image; ASCII banners and \
+     box-drawing rules that only frame text. \
      - Structure over styling: carry across the structure that holds meaning (hierarchy, rows, \
-     nesting, flow, order); drop the pixels that do not (fonts, colors, exact spacing) unless the \
-     styling itself carries meaning, such as a color legend. \
+     nesting, flow, order); drop the presentation that does not (fonts, colors, exact spacing, \
+     column padding) unless the styling itself carries meaning, such as a color legend. \
      - Source language: keep the original language, wording, spelling, casing, and symbols exactly. \
      Never translate. \
-     - Marked uncertainty: where text is illegible or cut off, give your best reading and mark it \
-     [?]. Never guess silently, and never substitute a placeholder for content you cannot read. \
+     - Marked uncertainty: where text is illegible, cut off, or garbled, give your best reading and \
+     mark it [?]. Never guess silently, and never substitute a placeholder for content you cannot read. \
      - Reading order: top to bottom, left to right; a multi-column layout is read column by column. \
      STRUCTURE — the output is a document, not a pile of fragments. Shape it, but only structurally: \
-     - Infer the heading hierarchy from the visual one (size, weight, numbering) and emit a \
-     consistent tree: at most one `#`, nested `##`/`###` under it. Do not promote every large \
-     line to `#`. \
-     - A line wrap forced by the image's width is NOT a paragraph break: join wrapped lines back \
+     - Infer the heading hierarchy from the one the input shows (size, weight, numbering, underlines \
+     of ==== or ----) and emit a consistent tree: at most one `#`, nested `##`/`###` under it. Do \
+     not promote every large or capitalized line to `#`. \
+     - A line wrap forced by the source's width is NOT a paragraph break: join wrapped lines back \
      into one paragraph, and keep only the real blank-line breaks. \
      - Nest lists to the indentation actually shown; keep one marker style (`-`) throughout. \
      - Put each region under the heading it belongs to, in source order; separate every block with \
      a blank line. \
      - Drop repeated page chrome (running headers/footers, page numbers, navigation bars) instead \
      of interleaving it with the content. \
+     - Input that is already Markdown is normalized, not rewritten: fix the structure, leave the \
+     prose alone. \
      - This structural tidying never changes wording, order, or content — it only chooses the \
-     Markdown that expresses the structure already in the image. \
-     CONSTRUCTS — for each part of the image use the one that represents it most faithfully: \
-     - Tabular data -> a GitHub-flavored Markdown table. Merged or nested cells cannot be expressed \
-     in Markdown: flatten them by repeating the spanned value in every cell it covers. \
+     Markdown that expresses the structure already in the input. \
+     CONSTRUCTS — for each part of the input use the one that represents it most faithfully: \
+     - Tabular data -> a GitHub-flavored Markdown table. This includes plain-text tables: \
+     fixed-width columns, tab- or comma-separated rows, and grids drawn with | + - or box-drawing \
+     characters. Merged or nested cells cannot be expressed in Markdown: flatten them by repeating \
+     the spanned value in every cell it covers. \
      - Source code, shell commands, logs, config files -> a fenced code block tagged with the \
      language, preserving whitespace and indentation exactly. \
      - Mathematical formulas -> LaTeX ($ inline, $$ display). \
      - Headings, bullet/numbered lists, quotes, checkboxes, links -> the matching Markdown syntax \
      (`- [ ]` / `- [x]` for checkboxes). \
-     - A drawn diagram -> a ```mermaid block; pick its type under DIAGRAM TYPE. \
+     - A diagram -> a ```mermaid block; pick its type under DIAGRAM TYPE. In text input a diagram \
+     means an explicit ASCII-art drawing — boxes, arrows, or lines made of characters. An ordinary \
+     indented list or outline is a list, NOT a diagram: leave it as a list. \
      - Everything else (prose, labels, captions, UI text) -> plain Markdown paragraphs. \
-     DIAGRAM TYPE — identify the diagram by what the drawing SHOWS and take the FIRST entry that \
+     DIAGRAM TYPE — identify the diagram by what it SHOWS and take the FIRST entry that \
      fits. Read the list in order; do not skip ahead to flowchart. The skeleton after each entry is \
      its required syntax: \
      - Vertical lifelines, one per participant, horizontal arrows between them, time running down \
@@ -256,13 +267,13 @@ const DEFAULT_TRANSCRIBE_PROMPT: &str =
      - One diagram type per block; never mix two syntaxes in one fence. \
      - If a drawing cannot be expressed without breaking these rules, fall back to a nested Markdown \
      list of the nodes and their connections rather than emitting mermaid that will not render. \
-     FREEFORM FALLBACK — only when the drawing has no identifiable nodes and connections and no type \
-     above applies (a freehand sketch, an illustration, a layout whose exact positions or proportions \
-     carry the meaning), emit a minimal inline <svg> with a viewBox. Last resort only: whenever the \
-     drawing has nodes and links, mermaid is preferred — it is far shorter, it lays itself out, and \
-     it survives being cut off. \
-     If the image has no legible content, output nothing at all. \
-     Output ONLY the Markdown transcription — no preamble, commentary, or remarks about the image. \
+     FREEFORM FALLBACK — only for an image, and only when the drawing has no identifiable nodes and \
+     connections and no type above applies (a freehand sketch, an illustration, a layout whose exact \
+     positions or proportions carry the meaning), emit a minimal inline <svg> with a viewBox. Last \
+     resort only: whenever the drawing has nodes and links, mermaid is preferred — it is far shorter, \
+     it lays itself out, and it survives being cut off. \
+     If the input has no legible content, output nothing at all. \
+     Output ONLY the Markdown transcription — no preamble, commentary, or remarks about the input. \
      Never wrap the whole output in a code fence; fences are only for code and mermaid blocks.";
 
 // -- Deserialized config schema --
@@ -993,7 +1004,7 @@ fn starter_template() -> String {
     t.push_str(&s("prompt", DEFAULT_EXPLAIN_PROMPT, ""));
     t.push('\n');
 
-    // [transcribe] — the tab is offered only for an image-only clipboard.
+    // [transcribe] — medium-agnostic: text, image(s), or both.
     t.push_str("# [transcribe]\n");
     t.push_str(&s("thinking", "no_think", "default thinking mode: think | no_think"));
     t.push_str(&s("prompt", DEFAULT_TRANSCRIBE_PROMPT, ""));
