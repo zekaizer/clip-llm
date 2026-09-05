@@ -43,6 +43,12 @@ pub fn frame() -> egui::Frame {
         .shadow(egui::Shadow { offset: [0, 4], blur: 16, spread: 0, color: color::shadow() })
 }
 
+/// The frame with an opaque fill: the settings panel, whose form must stay
+/// legible over any desktop.
+pub fn frame_opaque() -> egui::Frame {
+    frame().fill(color::surface_opaque())
+}
+
 /// Draw a panel of exactly `panel_size` (frame incl. margin) and let `view`
 /// fill its slots. The frame is floored to that size so a short view still
 /// occupies it; a view that overflows (it should not — see `Body`) grows it.
@@ -194,4 +200,14 @@ fn resize_grip(ui: &mut egui::Ui, frame_rect: egui::Rect) -> GripAction {
         return GripAction::None;
     }
     GripAction::Resize((frame_rect.size() + delta).max(size::MIN_PANEL))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn opaque_frame_drops_the_alpha_the_overlay_frame_keeps() {
+        assert!(super::frame().fill.a() < 255, "the overlay frame stays translucent");
+        assert_eq!(super::frame_opaque().fill.a(), 255);
+        assert_eq!(super::frame_opaque().corner_radius, super::frame().corner_radius);
+    }
 }
