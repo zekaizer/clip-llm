@@ -266,7 +266,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }));
 
             // System tray icon (Windows: replaces taskbar icon).
-            clip_llm::platform::init_tray(&cc.egui_ctx, &tray_models);
+            clip_llm::platform::init_tray(&cc.egui_ctx, &tray_models, initial_model);
 
             // Listen-only OS keyboard watcher for the Ctrl+Shift release (commit)
             // signal that global-hotkey cannot observe. Accessibility was already

@@ -322,16 +322,17 @@ fn load_tray_icon() -> tray_icon::Icon {
 /// Initialize the system tray icon with a disabled version label and a Quit item.
 /// On macOS this is the only way to quit the app (Accessory policy = no Dock icon).
 /// The `TrayIcon` is intentionally leaked (process-lifetime resource).
-pub fn init_tray(ctx: &eframe::egui::Context, models: &[TrayModel]) {
+pub fn init_tray(ctx: &eframe::egui::Context, models: &[TrayModel], active: usize) {
     use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
     use tray_icon::TrayIconBuilder;
 
-    // "Model" submenu: one check item per selectable profile (radio-style, the
-    // first is active at startup), disabled rows for profiles that failed to
-    // build. Always present so the feature is discoverable with one profile,
-    // and repopulated by update_tray_models after a reload.
+    // "Model" submenu: one check item per selectable profile (radio-style,
+    // `active` = the startup profile from [ui].default_model), disabled rows
+    // for profiles that failed to build. Always present so the feature is
+    // discoverable with one profile, and repopulated by update_tray_models
+    // after a reload.
     let model_menu = Submenu::new("Model", true);
-    populate_model_menu(&model_menu, models, 0);
+    populate_model_menu(&model_menu, models, active);
     TRAY_MODEL_MENU.with(|m| *m.borrow_mut() = Some(model_menu.clone()));
 
     let about_item = MenuItem::new("About clip-llm", true, None);
@@ -357,7 +358,8 @@ pub fn init_tray(ctx: &eframe::egui::Context, models: &[TrayModel]) {
     let endpoint = cfg.api_endpoint().unwrap_or("(default)");
     let model = models
         .iter()
-        .find(|m| m.unavailable.is_none())
+        .filter(|m| m.unavailable.is_none())
+        .nth(active)
         .map(|m| m.label.as_str())
         .or(cfg.api_model())
         .unwrap_or("(default)");

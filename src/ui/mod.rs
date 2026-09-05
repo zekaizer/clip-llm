@@ -804,10 +804,15 @@ impl OverlayApp {
         self.model_names.iter().position(|l| l.trim() == name)
     }
 
-    /// Apply a model-profile choice from the tray or the overlay.
+    /// Apply a model-profile choice from the tray, the overlay or Settings.
     fn select_model(&mut self, ctx: &egui::Context, index: usize) {
         let effects = self.sm_handle(UiEvent::UserSelectModel(index));
         self.execute_effects(effects, ctx);
+        // Re-assert the tray's radio group regardless of whether the state
+        // machine changed anything: a native check item toggles itself on
+        // click, so clicking the already-active profile would otherwise leave
+        // it unchecked (or, if the tray was out of step, two items checked).
+        crate::platform::update_tray_model(self.sm.active_model());
     }
 
     // -- State machine dispatch --
