@@ -63,9 +63,13 @@ The project follows a 7-phase incremental plan defined in [docs/REQUIREMENTS.md]
 - `src/api/client.rs` — `LlmClient` (`ApiFlavor`: OpenAI chat vs xAI Responses), `SseParser`, vision probe
 - `src/api/response.rs` — `strip_think_blocks`, `ThinkBlockFilter` (streaming)
 - `src/api/auth/` — `TokenProvider` (static key vs OAuth); `oauth.rs` generic refresh grant, `grok.rs` Grok CLI credential-store adapter (`~/.grok/auth.json` read/refresh/write-back)
-- `src/ui/mod.rs` — `OverlayApp` (eframe::App adapter, effect execution, window management)
+- `src/ui/mod.rs` — `OverlayApp` (eframe::App adapter, effect execution, window management, panel size + grip persistence)
 - `src/ui/state_machine.rs` — pure state machine (`OverlayState`, `UiEvent`, `UiEffect`), unit-testable
-- `src/ui/overlay.rs` — egui rendering (`render()`, `render_tab_bar()`)
+- `src/ui/overlay.rs` — views: `render()` composes the panel slots per state, `render_tab_bar()`, settings panel
+- `src/ui/panel.rs` — fixed-size frame + `Slots` (header / status / body / footer) + resize grip
+- `src/ui/theme.rs` — design tokens (type scale, palette, spacing, geometry) — the only place literals live
+- `src/ui/widgets.rs` — shared components (pills, docked buttons, status row, scroll text)
+- UI policy (geometry, slots, tokens, interaction, verification checklist): [docs/UI-GUIDELINES.md](docs/UI-GUIDELINES.md)
 - `src/platform/` — platform abstraction trait + `cfg(target_os)` implementations (macOS/Windows)
 - `src/diagnostics.rs` — scenario runner for automated visual testing (`--features diagnostics`)
 
