@@ -10,6 +10,7 @@ pub use clipboard::ClipboardContent;
 pub mod diagnostics;
 pub mod hotkey;
 pub mod platform;
+pub mod settings;
 pub mod telemetry;
 pub mod ui;
 pub mod worker;

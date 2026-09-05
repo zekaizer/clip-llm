@@ -3,10 +3,10 @@ use eframe::egui;
 use super::state_machine::{CaptureSource, OverlayState};
 use crate::{ProcessMode, RephraseLength, RephraseParams, RephraseStyle, ThinkingMode};
 
-const OVERLAY_WIDTH: f32 = 480.0;
+pub(crate) const OVERLAY_WIDTH: f32 = 480.0;
 const MAX_RESULT_HEIGHT: f32 = 260.0;
 /// Space around the frame for shadow rendering.
-const SHADOW_PAD: f32 = 20.0;
+pub(crate) const SHADOW_PAD: f32 = 20.0;
 /// Accent color for selected tab underlines.
 fn accent_color() -> egui::Color32 {
     egui::Color32::from_rgba_unmultiplied(108, 166, 255, 200)
@@ -143,17 +143,7 @@ pub fn render(
 
     let mut action = OverlayAction::None;
 
-    let frame = egui::Frame::new()
-        .fill(egui::Color32::from_rgba_unmultiplied(30, 30, 30, 230))
-        .stroke(egui::Stroke::NONE)
-        .corner_radius(12)
-        .inner_margin(FRAME_MARGIN)
-        .shadow(egui::Shadow {
-            offset: [0, 4],
-            blur: 16,
-            spread: 0,
-            color: egui::Color32::from_black_alpha(100),
-        });
+    let frame = overlay_frame();
 
     // --- egui Area sizing fix ---
     // egui::Area stores the previous frame's content min_size and uses it as
@@ -334,6 +324,167 @@ pub fn render(
         desired_size: Some(desired),
         content_size: Some(content_size),
     }
+}
+
+/// The translucent rounded panel every overlay view is drawn in.
+fn overlay_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(egui::Color32::from_rgba_unmultiplied(30, 30, 30, 230))
+        .stroke(egui::Stroke::NONE)
+        .corner_radius(12)
+        .inner_margin(FRAME_MARGIN)
+        .shadow(egui::Shadow {
+            offset: [0, 4],
+            blur: 16,
+            spread: 0,
+            color: egui::Color32::from_black_alpha(100),
+        })
+}
+
+/// What the user did in the settings panel this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsAction {
+    None,
+    Save,
+    Cancel,
+    OpenConfig,
+    StartDrag,
+}
+
+/// Render the settings panel (tray "Settings…") in the overlay window. Edits
+/// go straight into `form`; the caller acts on the returned action.
+pub fn render_settings(
+    ctx: &egui::Context,
+    form: &mut crate::settings::SettingsForm,
+    config_path: Option<&str>,
+) -> (SettingsAction, OverlayOutput) {
+    let mut action = SettingsAction::None;
+    let label = |text: &str| egui::RichText::new(text).color(egui::Color32::from_gray(200)).size(13.0);
+    let hint = |text: &str| egui::RichText::new(text).color(egui::Color32::from_gray(120)).size(11.0);
+
+    let area_resp = egui::Area::new("settings".into())
+        .fixed_pos(egui::pos2(SHADOW_PAD, SHADOW_PAD))
+        .constrain(false)
+        .sense(egui::Sense::drag())
+        .show(ctx, |ui| {
+            overlay_frame().show(ui, |ui| {
+                ui.set_width(OVERLAY_WIDTH);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Settings").color(egui::Color32::WHITE).size(15.0));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if docked_action_button(ui, "\u{2715}", "Close without saving (Esc)") {
+                            action = SettingsAction::Cancel;
+                        }
+                    });
+                });
+                if let Some(path) = config_path {
+                    ui.label(hint(path));
+                }
+                ui.add_space(6.0);
+                ui.add(egui::Separator::default().spacing(4.0));
+                ui.add_space(6.0);
+
+                if form.model_names.len() > 1 {
+                    ui.label(label("Model at startup"));
+                    ui.horizontal_wrapped(|ui| {
+                        for (i, name) in form.model_names.iter().enumerate() {
+                            ui.radio_value(&mut form.default_model, i, name.as_str());
+                        }
+                    });
+                    ui.add_space(6.0);
+                }
+
+                egui::Grid::new("settings_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label(label("Primary language"));
+                        ui.add(egui::TextEdit::singleline(&mut form.primary).desired_width(200.0));
+                        ui.end_row();
+                        ui.label(label("Secondary language"));
+                        ui.add(egui::TextEdit::singleline(&mut form.secondary).desired_width(200.0));
+                        ui.end_row();
+                        ui.label(label("Mode at startup"));
+                        ui.horizontal(|ui| {
+                            egui::ComboBox::from_id_salt("default_mode")
+                                .selected_text(form.default_mode.label())
+                                .show_ui(ui, |ui| {
+                                    for &mode in ProcessMode::ALL {
+                                        ui.selectable_value(&mut form.default_mode, mode, mode.label());
+                                    }
+                                });
+                            ui.label(hint("restart"));
+                        });
+                        ui.end_row();
+                        ui.label(label("Double-tap window (ms)"));
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(&mut form.double_tap_ms).desired_width(70.0));
+                            ui.label(hint("restart"));
+                        });
+                        ui.end_row();
+                    });
+                ui.add_space(4.0);
+                ui.checkbox(&mut form.single_tap_pinned, label("Single-tap result starts pinned"));
+                ui.checkbox(&mut form.double_tap_pinned, label("Double-tap result starts pinned"));
+                ui.add_space(6.0);
+
+                ui.label(label("Thinking per mode"));
+                ui.horizontal_wrapped(|ui| {
+                    for (mode, thinking) in form.thinking.iter_mut() {
+                        let selected = match thinking {
+                            None => "Default",
+                            Some(ThinkingMode::Think) => "Think",
+                            Some(ThinkingMode::NoThink) => "No Think",
+                        };
+                        ui.label(hint(mode.label()));
+                        egui::ComboBox::from_id_salt(("thinking", *mode))
+                            .width(90.0)
+                            .selected_text(selected)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(thinking, None, "Default");
+                                ui.selectable_value(thinking, Some(ThinkingMode::Think), "Think");
+                                ui.selectable_value(thinking, Some(ThinkingMode::NoThink), "No Think");
+                            });
+                    }
+                });
+                ui.add_space(8.0);
+                ui.label(hint(
+                    "Prompts, API endpoints and model profiles are edited in the file (Open Config).",
+                ));
+                if let Some(err) = &form.error {
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(err).color(egui::Color32::from_rgb(230, 100, 100)).size(12.0));
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        action = SettingsAction::Save;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        action = SettingsAction::Cancel;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Open Config").clicked() {
+                            action = SettingsAction::OpenConfig;
+                        }
+                    });
+                });
+            });
+        });
+
+    if area_resp.response.drag_started() {
+        action = SettingsAction::StartDrag;
+    }
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        action = SettingsAction::Cancel;
+    }
+
+    let content_size = area_resp.response.rect.size();
+    let desired = content_size + egui::vec2(SHADOW_PAD * 2.0, SHADOW_PAD * 2.0);
+    (
+        action,
+        OverlayOutput { action: OverlayAction::None, desired_size: Some(desired), content_size: Some(content_size) },
+    )
 }
 
 /// Render `add_contents` inside a row whose height is pinned to exactly
@@ -1027,6 +1178,29 @@ fn render_tab_bar(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The settings panel renders headlessly with a real form, sizes itself to
+    /// the overlay width, and reports no action on an idle frame.
+    #[test]
+    fn settings_panel_renders_and_sizes() {
+        let ctx = egui::Context::default();
+        let mut form = crate::settings::SettingsForm::from_config(
+            &crate::config::Config::default(),
+            vec!["a".into(), "b".into()],
+            1,
+        );
+        form.error = Some("Both language names are required.".into());
+        let mut result = None;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            result = Some(render_settings(ctx, &mut form, Some("/tmp/config.toml")));
+        });
+        let (action, output) = result.unwrap();
+        assert_eq!(action, SettingsAction::None);
+        let size = output.desired_size.expect("panel must report a size");
+        assert!(size.x >= OVERLAY_WIDTH, "{size:?}");
+        assert!(size.y > 200.0, "form rows must occupy real height: {size:?}");
+        assert_eq!(form.default_model, 1, "rendering must not mutate the form");
+    }
 
     /// Render `render()` once inside a headless (no window, no display —
     /// nothing pops up on screen) egui frame and return its output. Reuses

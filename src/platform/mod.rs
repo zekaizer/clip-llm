@@ -127,6 +127,8 @@ static TRAY_QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// "Reload Config" clicked; consumed by `poll_tray_events` on the main thread,
 /// which owns the config swap and the worker notification.
 static TRAY_RELOAD_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// "Settings…" clicked; the panel is opened by the UI on the main thread.
+static TRAY_SETTINGS_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// A tray menu action the main thread must carry out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +137,8 @@ pub enum TrayAction {
     SelectModel(usize),
     /// "Reload Config" was clicked.
     ReloadConfig,
+    /// "Settings…" was clicked.
+    OpenSettings,
 }
 /// Model profile index picked in the tray "Model" submenu, consumed by
 /// `poll_tray_events` on the main thread. `NO_MODEL_SELECTED` = nothing pending.
@@ -329,6 +333,8 @@ pub fn init_tray(ctx: &eframe::egui::Context, models: &[TrayModel]) {
     let config_id = config_item.id().clone();
     let reload_item = MenuItem::new("Reload Config", true, None);
     let reload_id = reload_item.id().clone();
+    let settings_item = MenuItem::new("Settings\u{2026}", true, None);
+    let settings_id = settings_item.id().clone();
     let launch_at_login_enabled = NativePlatform.launch_at_login_enabled();
     TRAY_LAUNCH_AT_LOGIN_STATE.store(launch_at_login_enabled, Ordering::SeqCst);
     let launch_at_login_item =
@@ -403,6 +409,7 @@ pub fn init_tray(ctx: &eframe::egui::Context, models: &[TrayModel]) {
 
     let menu = Menu::new();
     menu.append(&about_item).expect("failed to build tray menu");
+    menu.append(&settings_item).expect("failed to build tray menu");
     menu.append(&config_item).expect("failed to build tray menu");
     menu.append(&reload_item).expect("failed to build tray menu");
     if let Some(model_menu) = &model_menu {
@@ -458,6 +465,11 @@ pub fn init_tray(ctx: &eframe::egui::Context, models: &[TrayModel]) {
                 } else if event.id() == &config_id {
                     // Spawning an editor process needs no main-thread round-trip.
                     open_config_file();
+                } else if event.id() == &settings_id {
+                    TRAY_SETTINGS_REQUESTED.store(true, Ordering::SeqCst);
+                    #[cfg(target_os = "windows")]
+                    windows::show_no_activate();
+                    ctx.request_repaint();
                 } else if event.id() == &reload_id {
                     // The swap touches the worker and UI state, so it runs on
                     // the main thread inside poll_tray_events.
@@ -507,7 +519,7 @@ pub fn init_tray(ctx: &eframe::egui::Context, models: &[TrayModel]) {
 /// Open the config file in a text editor, writing a commented starter template
 /// first when no file exists yet (see `config::ensure_config_file`). Runs on
 /// the tray menu handler thread.
-fn open_config_file() {
+pub fn open_config_file() {
     let Some(path) = crate::config::ensure_config_file() else {
         tracing::warn!("open config: no usable config path");
         return;
@@ -546,6 +558,9 @@ pub fn poll_tray_events(ctx: &eframe::egui::Context) -> Option<TrayAction> {
     };
     if TRAY_RELOAD_REQUESTED.swap(false, Ordering::SeqCst) {
         action = action.or(Some(TrayAction::ReloadConfig));
+    }
+    if TRAY_SETTINGS_REQUESTED.swap(false, Ordering::SeqCst) {
+        action = action.or(Some(TrayAction::OpenSettings));
     }
     if TRAY_LAUNCH_AT_LOGIN_REVERT.swap(false, Ordering::SeqCst) {
         // Re-query reality rather than assuming "not target" — a concurrent

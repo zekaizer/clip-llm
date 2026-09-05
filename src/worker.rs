@@ -800,6 +800,7 @@ pub fn spawn_worker(
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<WorkerCommand>,
     resp_tx: mpsc::Sender<WorkerResponse>,
     clients: Vec<LlmClient>,
+    initial_model: usize,
     ctx: eframe::egui::Context,
 ) -> thread::JoinHandle<()> {
     assert!(!clients.is_empty(), "spawn_worker needs at least one model profile");
@@ -825,6 +826,9 @@ pub fn spawn_worker(
             // re-probes on demand if a request beats the probe, and the `OnceCell`
             // caches the verdict either way.
             let mut pool = ModelPool::new(clients);
+            if !pool.select(initial_model) {
+                warn!("worker: [ui].default_model index #{initial_model} out of range; using the first profile");
+            }
             spawn_probe(pool.active().clone(), pool.active_index(), &resp_tx, &ctx);
 
             let mut cancel_tx: Option<tokio::sync::oneshot::Sender<()>> = None;

@@ -97,6 +97,8 @@ double_tap_pinned = false
 # Tab-bar order; the first entry is the mode selected at startup. Reorders
 # only — modes left out are appended in built-in order, never hidden.
 # tabs = ["translate", "rephrase", "summarize", "explain", "transcribe"]
+# Model profile active at startup: a [[models]] name or the [api] model. Unset = first.
+# default_model = "groq-qwen"
 
 # Language names substituted into {primary_lang} / {secondary_lang}.
 [languages]

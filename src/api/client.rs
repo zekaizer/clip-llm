@@ -761,6 +761,13 @@ impl ProfileSet {
     pub fn labels(&self) -> Vec<String> {
         self.clients.iter().map(|c| c.label().to_string()).collect()
     }
+
+    /// Pool index of the profile named `name`; 0 (the default) when `name` is
+    /// `None` or matches nothing.
+    pub fn index_of(&self, name: Option<&str>) -> usize {
+        name.and_then(|n| self.clients.iter().position(|c| c.label() == n))
+            .unwrap_or(0)
+    }
 }
 
 /// Build a client per profile. The first (default) profile must build — its
@@ -1768,6 +1775,14 @@ mod tests {
             token_budget: Some(4000),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn profile_set_index_of_falls_back_to_first() {
+        let set = build_profiles(&[openai_spec("a"), openai_spec("b")]).unwrap();
+        assert_eq!(set.index_of(Some("b")), 1);
+        assert_eq!(set.index_of(Some("zzz")), 0);
+        assert_eq!(set.index_of(None), 0);
     }
 
     #[test]

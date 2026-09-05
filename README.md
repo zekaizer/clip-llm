@@ -78,7 +78,13 @@ startup clip-llm reads, in order of precedence:
 If no file is found — or it is malformed — the built-in defaults are used. Every
 key is optional; you only specify what you want to change.
 
-After editing the file, pick **Reload Config** from the tray menu: prompts,
+The tray's **Settings…** opens an in-app panel for the everyday knobs —
+startup model profile, language pair, startup mode, double-tap window, pin
+defaults and per-mode thinking. Saving rewrites only those keys in
+`config.toml` (comments and everything else stay as they were) and applies the
+result at once. Prompts, API endpoints and model profiles stay file-only.
+
+After editing the file by hand, pick **Reload Config** from the tray menu: prompts,
 languages, `[generation]`, `[ui]` pin defaults, per-mode thinking and the model
 profiles' connection settings apply at once (the tray *Status → Config* row
 reports the outcome; a broken file is rejected and the previous settings stay

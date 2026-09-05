@@ -173,6 +173,9 @@ pub struct OverlayApp {
     /// Labels of the selectable model profiles in worker pool order; more than
     /// one makes the Result status label a "switch model" control.
     model_names: Vec<String>,
+    /// Open settings panel (tray "Settings…"); it borrows the overlay window
+    /// while the state machine stays Hidden.
+    settings: Option<crate::settings::SettingsForm>,
     /// Tap events from coordinator thread (hotkey detection runs off-UI).
     tap_rx: mpsc::Receiver<TapEvent>,
     /// Cached desired_size to avoid redundant send_viewport_cmd calls.
@@ -316,6 +319,7 @@ impl OverlayApp {
             pending_taskbar_exclude: false,
             startup_notice: None,
             model_names: Vec::new(),
+            settings: None,
             tap_rx,
             last_desired_size: None,
             last_content_size: None,
@@ -370,6 +374,7 @@ impl OverlayApp {
             pending_taskbar_exclude: false,
             startup_notice: None,
             model_names: Vec::new(),
+            settings: None,
             tap_rx,
             last_desired_size: None,
             last_content_size: None,
@@ -413,8 +418,98 @@ impl OverlayApp {
         self
     }
 
+    /// Profile active at startup (`[ui].default_model`); the worker pool starts
+    /// on the same index.
+    pub fn with_active_model(mut self, index: usize) -> Self {
+        self.sm.set_active_model(index);
+        self
+    }
+
     fn model_count(&self) -> usize {
         self.model_names.len().max(1)
+    }
+
+    // -- Settings panel --
+
+    /// Tray "Settings…": show the panel in the overlay window. Any overlay
+    /// session in progress is closed first — the panel takes the window.
+    fn open_settings(&mut self, ctx: &egui::Context) {
+        if self.settings.is_some() {
+            return;
+        }
+        if !matches!(self.sm.state(), OverlayState::Hidden) {
+            let effects = self.sm_handle(UiEvent::UserClose);
+            self.execute_effects(effects, ctx);
+        }
+        self.settings = Some(crate::settings::SettingsForm::from_config(
+            &crate::config::get(),
+            self.model_names.clone(),
+            self.sm.active_model(),
+        ));
+        self.capture_mouse_position();
+        self.last_sent_pos = None;
+        self.result_latch = None;
+        self.last_desired_size = None;
+        // Centered on the cursor's monitor from an estimated size; the real
+        // size lands on the first frame and only grows the window in place.
+        let estimated = egui::vec2(overlay::OVERLAY_WIDTH + overlay::SHADOW_PAD * 2.0, 460.0);
+        let pos = self.calculate_centered_position(estimated).map(|p| (p.x, p.y));
+        if self.platform.show_window(pos) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        }
+        ctx.request_repaint();
+    }
+
+    fn close_settings(&mut self, ctx: &egui::Context) {
+        if self.settings.take().is_none() {
+            return;
+        }
+        ctx.memory_mut(|m| m.reset_areas());
+        self.hide_window(ctx);
+        self.spawn_position = None;
+        self.last_sent_pos = None;
+        self.last_desired_size = None;
+    }
+
+    /// Validate, write the file, apply it (reload) and switch the model if the
+    /// startup profile changed. Errors stay in the panel.
+    fn save_settings(&mut self, ctx: &egui::Context) {
+        let Some(form) = self.settings.as_mut() else { return };
+        let saved = form
+            .to_patch()
+            .and_then(|patch| crate::settings::save(&patch).map(|path| (patch, path)));
+        match saved {
+            Err(msg) => form.error = Some(msg),
+            Ok((patch, path)) => {
+                info!("settings saved to {}", path.display());
+                self.close_settings(ctx);
+                self.reload_config(ctx);
+                if let Some(index) = patch
+                    .default_model
+                    .as_deref()
+                    .and_then(|name| self.model_names.iter().position(|n| n == name))
+                {
+                    self.select_model(ctx, index);
+                }
+            }
+        }
+    }
+
+    /// Render the settings panel for this frame and act on its result.
+    fn render_settings_panel(&mut self, ctx: &egui::Context) -> overlay::OverlayOutput {
+        let path = crate::config::candidate_path().map(|p| p.display().to_string());
+        let Some(form) = self.settings.as_mut() else {
+            return overlay::OverlayOutput { action: overlay::OverlayAction::None, desired_size: None, content_size: None };
+        };
+        let (action, output) = overlay::render_settings(ctx, form, path.as_deref());
+        match action {
+            overlay::SettingsAction::None => {}
+            overlay::SettingsAction::StartDrag => ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag),
+            overlay::SettingsAction::Cancel => self.close_settings(ctx),
+            overlay::SettingsAction::OpenConfig => crate::platform::open_config_file(),
+            overlay::SettingsAction::Save => self.save_settings(ctx),
+        }
+        output
     }
 
     /// Tray "Reload Config": re-read the file, swap it in, rebuild the model
@@ -704,6 +799,12 @@ impl OverlayApp {
                     break;
                 }
             };
+            // A hotkey takes the window back from the settings panel; unsaved
+            // edits are dropped (the panel is a modal-free side view).
+            if self.settings.take().is_some() {
+                ctx.memory_mut(|m| m.reset_areas());
+                self.last_desired_size = None;
+            }
             // Set spawn_position from coordinator's first-press capture.
             // This runs before sm.handle() so CaptureMousePosition effect
             // (which skips if already set) preserves the first-press position.
@@ -1509,6 +1610,18 @@ impl eframe::App for OverlayApp {
             }
         });
 
+        if self.settings.is_some() && matches!(self.sm.state(), OverlayState::Hidden) {
+            let output = self.render_settings_panel(ctx);
+            self.update_viewport(ctx, output.desired_size, output.content_size);
+            match crate::platform::poll_tray_events(ctx) {
+                Some(crate::platform::TrayAction::SelectModel(index)) => self.select_model(ctx, index),
+                Some(crate::platform::TrayAction::ReloadConfig) => self.reload_config(ctx),
+                Some(crate::platform::TrayAction::OpenSettings) => {}
+                None => {}
+            }
+            return;
+        }
+
         let elapsed = self.processing_elapsed();
         let output = overlay::render(
             self.sm.state(),
@@ -1568,6 +1681,7 @@ impl eframe::App for OverlayApp {
         match crate::platform::poll_tray_events(ctx) {
             Some(crate::platform::TrayAction::SelectModel(index)) => self.select_model(ctx, index),
             Some(crate::platform::TrayAction::ReloadConfig) => self.reload_config(ctx),
+            Some(crate::platform::TrayAction::OpenSettings) => self.open_settings(ctx),
             None => {}
         }
 

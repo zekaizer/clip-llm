@@ -204,6 +204,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => return Err(e.into()),
     };
     let model_names = profiles.labels();
+    let initial_model = profiles.index_of(clip_llm::config::get().ui_default_model());
     let mut tray_models: Vec<TrayModel> = model_names
         .iter()
         .map(|label| TrayModel { label: label.clone(), unavailable: None })
@@ -275,7 +276,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             // Worker thread: async LLM calls. Spawned here (not before
             // run_native) so it gets the egui Context and can wake the UI loop
             // when the one-shot startup probe completes.
-            let _worker = spawn_worker(cmd_rx, resp_tx, clients, cc.egui_ctx.clone());
+            let _worker = spawn_worker(cmd_rx, resp_tx, clients, initial_model, cc.egui_ctx.clone());
 
             #[cfg(feature = "diagnostics")]
             let app = OverlayApp::new(
@@ -286,7 +287,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let app = OverlayApp::new(cmd_tx, resp_rx, clipboard, tap_rx, modifier_state);
             let app = app
                 .with_startup_notice(startup_notice)
-                .with_model_names(model_names);
+                .with_model_names(model_names)
+                .with_active_model(initial_model);
 
             Ok(Box::new(app))
         }),
