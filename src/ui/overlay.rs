@@ -798,20 +798,25 @@ fn render_profiles(
             } else {
                 profile.name.trim().to_string()
             };
-            ui.label(egui::RichText::new(name).size(font::LABEL).color(color::text_soft()));
-            ui.label(hint_text(&profile.summary()));
-            if profile.from_api_section {
-                ui.label(hint_text("[api]")).on_hover_text(
-                    "Stored in the [api] section; empty fields fall back to CLIP_LLM_* variables",
-                );
-            }
-            if let Some(text) = &probed {
-                ui.label(hint_text(text)).on_hover_text("Detected by the startup/switch probe");
-            }
+            // Edit is placed first, from the right, so the descriptive labels
+            // get only what is left and truncate instead of running under it.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.add(small_button("Edit \u{203a}")).clicked() {
                     form.editing = Some(i);
                 }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new(name).size(font::LABEL).color(color::text_soft()));
+                    ui.label(hint_text(&profile.summary()));
+                    if profile.from_api_section {
+                        ui.label(hint_text("[api]")).on_hover_text(
+                            "Stored in the [api] section; empty fields fall back to CLIP_LLM_* variables",
+                        );
+                    }
+                    if let Some(text) = &probed {
+                        ui.add(egui::Label::new(hint_text(text)).truncate())
+                            .on_hover_text(format!("Detected by the startup/switch probe: {text}"));
+                    }
+                });
             });
         });
     }
