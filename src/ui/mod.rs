@@ -1855,6 +1855,7 @@ impl OverlayApp {
 
 impl eframe::App for OverlayApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        theme::color::apply(ctx);
         if !self.zoom_applied {
             self.zoom_applied = true;
             ctx.set_zoom_factor(self.saved_zoom);

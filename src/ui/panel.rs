@@ -36,11 +36,11 @@ pub struct PanelOutput {
 /// are drawn in.
 pub fn frame() -> egui::Frame {
     egui::Frame::new()
-        .fill(color::SURFACE)
+        .fill(color::surface())
         .stroke(egui::Stroke::NONE)
         .corner_radius(size::FRAME_RADIUS)
         .inner_margin(size::FRAME_MARGIN)
-        .shadow(egui::Shadow { offset: [0, 4], blur: 16, spread: 0, color: color::SHADOW })
+        .shadow(egui::Shadow { offset: [0, 4], blur: 16, spread: 0, color: color::shadow() })
 }
 
 /// Draw a panel of exactly `panel_size` (frame incl. margin) and let `view`
@@ -169,9 +169,9 @@ fn resize_grip(ui: &mut egui::Ui, frame_rect: egui::Rect) -> GripAction {
         .on_hover_cursor(egui::CursorIcon::ResizeSouthEast)
         .on_hover_text("Drag to resize \u{b7} double-click for the default size");
     let tone = if resp.hovered() || resp.dragged() {
-        color::TEXT_SECONDARY
+        color::text_secondary()
     } else {
-        color::TEXT_DISABLED
+        color::text_disabled()
     };
     // Three dots along the corner diagonal, the usual grip glyph.
     let painter = ui.painter();

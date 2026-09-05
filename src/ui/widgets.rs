@@ -8,11 +8,11 @@ use eframe::egui;
 use super::theme::{color, font, size, space};
 
 pub(super) fn hint_text(text: &str) -> egui::RichText {
-    egui::RichText::new(text).color(color::TEXT_MUTED).size(font::MICRO)
+    egui::RichText::new(text).color(color::text_muted()).size(font::MICRO)
 }
 
 pub(super) fn row_label(ui: &mut egui::Ui, text: &str) {
-    ui.label(egui::RichText::new(text).color(color::TEXT_SOFT).size(font::LABEL));
+    ui.label(egui::RichText::new(text).color(color::text_soft()).size(font::LABEL));
 }
 
 /// Small caps-style group title with a rule under it.
@@ -20,7 +20,7 @@ pub(super) fn section_header(ui: &mut egui::Ui, text: &str) {
     ui.add_space(space::XS);
     ui.label(
         egui::RichText::new(text.to_ascii_uppercase())
-            .color(color::TEXT_MUTED)
+            .color(color::text_muted())
             .size(font::MICRO),
     );
     ui.add(egui::Separator::default().spacing(space::SM));
@@ -45,14 +45,14 @@ pub(super) fn pill_with_tip(ui: &mut egui::Ui, text: &str, selected: bool, tip: 
 
 pub(super) fn pill_styled(ui: &mut egui::Ui, text: &str, selected: bool, tone: PillTone) -> egui::Response {
     let rich = egui::RichText::new(text).size(font::CAPTION).color(if selected {
-        color::TEXT
+        color::text()
     } else {
-        color::TEXT_SECONDARY
+        color::text_secondary()
     });
     let fill = match (selected, tone) {
-        (true, PillTone::Accent) => color::ACCENT_FILL,
-        (true, PillTone::Quiet) => color::SURFACE_RAISED,
-        (false, _) => color::SURFACE_SUBTLE,
+        (true, PillTone::Accent) => color::accent_fill(),
+        (true, PillTone::Quiet) => color::surface_raised(),
+        (false, _) => color::surface_subtle(),
     };
     let button = egui::Button::new(rich)
         .fill(fill)
@@ -64,7 +64,7 @@ pub(super) fn pill_styled(ui: &mut egui::Ui, text: &str, selected: bool, tone: P
 
 /// Flat, low-emphasis button for secondary actions.
 pub(super) fn small_button(text: &str) -> egui::Button<'static> {
-    egui::Button::new(egui::RichText::new(text).size(font::CAPTION).color(color::TEXT_SECONDARY))
+    egui::Button::new(egui::RichText::new(text).size(font::CAPTION).color(color::text_secondary()))
         .fill(egui::Color32::TRANSPARENT)
         .stroke(egui::Stroke::NONE)
         .corner_radius(size::RADIUS)
@@ -199,7 +199,7 @@ fn paint_fade(ui: &egui::Ui, viewport: egui::Rect, top: bool) {
     };
     let (edge, inner) = if top { (band.min.y, band.max.y) } else { (band.max.y, band.min.y) };
     let mut mesh = egui::Mesh::default();
-    let opaque = color::SURFACE;
+    let opaque = color::surface();
     let clear = egui::Color32::TRANSPARENT;
     mesh.colored_vertex(egui::pos2(band.min.x, edge), opaque);
     mesh.colored_vertex(egui::pos2(band.max.x, edge), opaque);
@@ -219,7 +219,7 @@ pub(super) fn think_toggle(ui: &mut egui::Ui, expanded: bool) -> bool {
     let icon = if expanded { "\u{25bc}" } else { "\u{25b6}" };
     let btn = egui::Button::new(
         egui::RichText::new(format!("{icon} Thinking"))
-            .color(color::TEXT_SECONDARY)
+            .color(color::text_secondary())
             .size(font::LABEL),
     )
     .fill(egui::Color32::TRANSPARENT);
@@ -238,7 +238,7 @@ pub(super) fn think_block(ui: &mut egui::Ui, content: &str) {
             ui.add(
                 egui::Label::new(
                     egui::RichText::new(content)
-                        .color(color::TEXT_MUTED)
+                        .color(color::text_muted())
                         .size(font::LABEL),
                 )
                 .wrap_mode(egui::TextWrapMode::Wrap),
@@ -270,7 +270,7 @@ pub(super) fn elapsed_label(ui: &mut egui::Ui, elapsed: Option<std::time::Durati
     if let Some(d) = elapsed {
         ui.label(
             egui::RichText::new(format!("{:.1}s", d.as_secs_f32()))
-                .color(color::TEXT_MUTED)
+                .color(color::text_muted())
                 .size(font::CAPTION),
         );
     }
@@ -282,9 +282,9 @@ pub(super) fn cancel_button(ui: &mut egui::Ui) -> bool {
     let cancel_btn = egui::Button::new(
         egui::RichText::new("Cancel")
             .size(font::CAPTION)
-            .color(color::DANGER),
+            .color(color::danger()),
     )
-    .fill(color::DANGER_FILL)
+    .fill(color::danger_fill())
     .corner_radius(size::RADIUS);
     ui.add(cancel_btn).clicked()
 }
@@ -298,9 +298,9 @@ pub(super) fn docked_action_button(ui: &mut egui::Ui, icon: &str, tooltip: &str)
         .read_response(ui.next_auto_id())
         .is_some_and(|r| r.hovered());
     let (fg, bg) = if hovered {
-        (color::TEXT, color::SURFACE_HOVER)
+        (color::text(), color::surface_hover())
     } else {
-        (color::TEXT_SECONDARY, color::SURFACE_SUBTLE)
+        (color::text_secondary(), color::surface_subtle())
     };
     let btn = egui::Button::new(egui::RichText::new(icon).size(font::LABEL).color(fg))
         .min_size(egui::vec2(size::ACTION_BTN, size::ACTION_BTN))
@@ -323,7 +323,7 @@ pub(super) fn pill_row<T: Copy + PartialEq>(
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(label)
-                .color(color::TEXT_MUTED)
+                .color(color::text_muted())
                 .size(font::CAPTION),
         );
         for &item in all {
@@ -331,13 +331,13 @@ pub(super) fn pill_row<T: Copy + PartialEq>(
             let text = egui::RichText::new(get_label(item))
                 .size(font::CAPTION)
                 .color(if is_selected {
-                    color::TEXT
+                    color::text()
                 } else {
-                    color::TEXT_MUTED
+                    color::text_muted()
                 });
             let button = egui::Button::new(text)
                 .fill(if is_selected {
-                    color::SURFACE_RAISED
+                    color::surface_raised()
                 } else {
                     egui::Color32::TRANSPARENT
                 })

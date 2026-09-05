@@ -261,11 +261,11 @@ fn view_capturing(
             (None, CaptureSource::Selection) => "Copying selection...",
             (None, CaptureSource::Clipboard) => "Reading clipboard...",
         };
-        status_row(ui, picking_text.is_none(), theme::text(label, font::LABEL, color::TEXT), elapsed);
+        status_row(ui, picking_text.is_none(), theme::text(label, font::LABEL, color::text()), elapsed);
     });
     slots.body(|body| {
         if let Some(text) = picking_text {
-            body.fill_text("picking", text, color::TEXT, false);
+            body.fill_text("picking", text, color::text(), false);
         }
     });
     slots.footer(|ui| {
@@ -290,22 +290,22 @@ fn view_processing(
         if let Some(notice) = streaming.retry_notice {
             // A silent retry is indistinguishable from a slow first attempt,
             // so say so (WARNING = degraded, not failed).
-            status_row(ui, true, theme::text(notice, font::LABEL, color::WARNING), elapsed);
+            status_row(ui, true, theme::text(notice, font::LABEL, color::warning()), elapsed);
         } else if streaming.think_started && streaming.text.is_empty() {
-            status_row(ui, true, theme::text("Thinking...", font::LABEL, color::TEXT_MUTED), elapsed);
+            status_row(ui, true, theme::text("Thinking...", font::LABEL, color::text_muted()), elapsed);
         } else if streaming.think_started {
             // Think done, answer streaming: the collapsed header Result will
             // show, locked.
-            let label = theme::text("\u{25b6} Thinking", font::LABEL, color::TEXT_MUTED);
+            let label = theme::text("\u{25b6} Thinking", font::LABEL, color::text_muted());
             status_row(ui, false, label, elapsed);
         } else {
-            let label = theme::text(mode.processing_label(), font::LABEL, color::TEXT);
+            let label = theme::text(mode.processing_label(), font::LABEL, color::text());
             status_row(ui, true, label, elapsed);
         }
     });
     slots.body(|body| {
         if !streaming.text.is_empty() {
-            body.fill_text(("streaming", mode), streaming.text, color::TEXT, true);
+            body.fill_text(("streaming", mode), streaming.text, color::text(), true);
         }
     });
     slots.footer(|ui| {
@@ -327,9 +327,9 @@ fn view_error(
     action: &mut OverlayAction,
 ) {
     slots.status(|ui| {
-        status_row(ui, false, theme::text("\u{2715} Request failed", font::LABEL, color::DANGER), None);
+        status_row(ui, false, theme::text("\u{2715} Request failed", font::LABEL, color::danger()), None);
     });
-    slots.body(|body| body.fill_text("error", message, color::TEXT, false));
+    slots.body(|body| body.fill_text("error", message, color::text(), false));
     slots.footer(|ui| {
         actions_right(ui, |ui| {
             if can_retry && docked_action_button(ui, "\u{21bb}", "Retry") {
@@ -371,7 +371,7 @@ fn view_result(
             *action = OverlayAction::ToggleThink;
         }
         if let Some(status) = footer.completion_status {
-            let label = theme::text(status, font::LABEL, color::TEXT_MUTED);
+            let label = theme::text(status, font::LABEL, color::text_muted());
             if footer.model_switchable {
                 // The label names the model that answered, so it doubles as
                 // the "ask another model" control when profiles exist.
@@ -391,14 +391,14 @@ fn view_result(
         // The partial reply is shown below, so say it is incomplete and why (#65).
         if let Some(reason) = streaming.incomplete {
             let banner = format!("\u{26a0} Incomplete — {reason}");
-            body.ui.label(theme::text(banner, font::LABEL, color::WARNING));
+            body.ui.label(theme::text(banner, font::LABEL, color::warning()));
             body.ui.add_space(space::SM);
         }
         if streaming.think_expanded && let Some(content) = streaming.think_content {
             think_block(body.ui, content);
             body.ui.add_space(space::SM);
         }
-        body.fill_text(("result", mode), text, color::TEXT, false);
+        body.fill_text(("result", mode), text, color::text(), false);
     });
     slots.footer(|ui| {
         render_source_badge(ui, footer.source, footer.source_files);
@@ -487,7 +487,7 @@ pub fn render_settings<'t>(
 
                 // Header: title, file name (full path on hover), close.
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Settings").color(color::TEXT).size(font::TITLE).strong());
+                    ui.label(egui::RichText::new("Settings").color(color::text()).size(font::TITLE).strong());
                     if let Some(path) = config_path {
                         let name = std::path::Path::new(path)
                             .file_name()
@@ -659,9 +659,9 @@ fn render_settings_footer(
     // Footer: status line, then actions.
         ui.add_space(space::XS);
         if let Some(err) = &form.error {
-            ui.label(egui::RichText::new(err).color(color::DANGER).size(font::CAPTION));
+            ui.label(egui::RichText::new(err).color(color::danger()).size(font::CAPTION));
         } else if let Some(notice) = &form.notice {
-            ui.label(egui::RichText::new(notice).color(color::SUCCESS).size(font::CAPTION));
+            ui.label(egui::RichText::new(notice).color(color::success()).size(font::CAPTION));
         }
         ui.horizontal(|ui| {
             if ui
@@ -673,9 +673,9 @@ fn render_settings_footer(
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let save = egui::Button::new(
-                    egui::RichText::new("Save").color(color::TEXT).size(font::LABEL),
+                    egui::RichText::new("Save").color(color::text()).size(font::LABEL),
                 )
-                .fill(if dirty { color::ACCENT } else { color::RULE })
+                .fill(if dirty { color::accent() } else { color::rule() })
                 .stroke(egui::Stroke::NONE)
                 .corner_radius(size::RADIUS)
                 .min_size(egui::vec2(80.0, 28.0));
@@ -684,9 +684,9 @@ fn render_settings_footer(
                 }
                 let close_label = if dirty { "Cancel" } else { "Done" };
                 let close = egui::Button::new(
-                    egui::RichText::new(close_label).color(color::TEXT_SOFT).size(font::LABEL),
+                    egui::RichText::new(close_label).color(color::text_soft()).size(font::LABEL),
                 )
-                .fill(color::SURFACE_RAISED)
+                .fill(color::surface_raised())
                 .stroke(egui::Stroke::NONE)
                 .corner_radius(size::RADIUS)
                 .min_size(egui::vec2(80.0, 28.0));
@@ -722,7 +722,7 @@ fn render_profiles(
             } else {
                 profile.name.trim().to_string()
             };
-            ui.label(egui::RichText::new(name).size(font::LABEL).color(color::TEXT_SOFT));
+            ui.label(egui::RichText::new(name).size(font::LABEL).color(color::text_soft()));
             ui.label(hint_text(&profile.summary()));
             if profile.from_api_section {
                 ui.label(hint_text("[api]")).on_hover_text(
@@ -768,7 +768,7 @@ fn render_profile_page<'t>(
         } else {
             form.profiles[i].name.trim().to_string()
         };
-        ui.label(egui::RichText::new(title).size(font::LABEL).color(color::TEXT));
+        ui.label(egui::RichText::new(title).size(font::LABEL).color(color::text()));
         if form.profiles[i].from_api_section {
             ui.label(hint_text("[api] section \u{b7} empty fields fall back to CLIP_LLM_* variables"));
         }
@@ -881,10 +881,10 @@ fn render_profile_page<'t>(
                 ui.label(hint_text("testing\u{2026}"));
             }
             ProfileTestView::Done(Ok(msg)) => {
-                ui.label(egui::RichText::new(msg).size(font::CAPTION).color(color::SUCCESS));
+                ui.label(egui::RichText::new(msg).size(font::CAPTION).color(color::success()));
             }
             ProfileTestView::Done(Err(msg)) => {
-                ui.label(egui::RichText::new(msg).size(font::CAPTION).color(color::DANGER));
+                ui.label(egui::RichText::new(msg).size(font::CAPTION).color(color::danger()));
             }
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -943,7 +943,7 @@ fn render_source_badge(ui: &mut egui::Ui, source: CaptureSource, files: &[String
     ui.label(
         egui::RichText::new(icon)
             .size(font::CAPTION)
-            .color(color::TEXT_MUTED),
+            .color(color::text_muted()),
     )
     .on_hover_text(tip);
 }
@@ -976,7 +976,7 @@ fn render_rephrase_params(
             egui::vec2(1.5, rect.height() - 4.0),
         ),
         0.75,
-        color::ACCENT_DIM,
+        color::accent_dim(),
     );
 }
 
@@ -1009,11 +1009,11 @@ fn render_tab_bar(
             let text = egui::RichText::new(mode.label())
                 .size(font::LABEL)
                 .color(if !is_available {
-                    color::TEXT_DISABLED
+                    color::text_disabled()
                 } else if is_selected {
-                    color::TEXT
+                    color::text()
                 } else {
-                    color::TEXT_MUTED
+                    color::text_muted()
                 });
 
             let button = egui::Button::new(text)
@@ -1033,12 +1033,12 @@ fn render_tab_bar(
             let underline_color = if is_selected {
                 // Distinguish the uncommitted cycling preview from the committed mode.
                 if cycling {
-                    Some(color::ACCENT_PREVIEW)
+                    Some(color::accent_preview())
                 } else {
-                    Some(color::ACCENT)
+                    Some(color::accent())
                 }
             } else if response.hovered() && is_available {
-                Some(color::ACCENT_DIM)
+                Some(color::accent_dim())
             } else {
                 None
             };
@@ -1063,7 +1063,7 @@ fn render_tab_bar(
             let close = egui::Button::new(
                 egui::RichText::new("\u{2715}")
                     .size(font::LABEL)
-                    .color(color::TEXT_SECONDARY),
+                    .color(color::text_secondary()),
             )
             .fill(egui::Color32::TRANSPARENT)
             .stroke(egui::Stroke::NONE)
@@ -1076,13 +1076,13 @@ fn render_tab_bar(
             // focus loss instead of auto-hiding.
             let pin = egui::Button::new(
                 egui::RichText::new("\u{1F4CC}").size(font::LABEL).color(if pinned {
-                    color::TEXT
+                    color::text()
                 } else {
-                    color::TEXT_SECONDARY
+                    color::text_secondary()
                 }),
             )
             .fill(if pinned {
-                color::SURFACE_RAISED
+                color::surface_raised()
             } else {
                 egui::Color32::TRANSPARENT
             })
@@ -1106,14 +1106,14 @@ fn render_tab_bar(
                     let text = egui::RichText::new(tm.label())
                         .size(font::MICRO)
                         .color(if is_selected {
-                            color::TEXT
+                            color::text()
                         } else {
-                            color::TEXT_MUTED
+                            color::text_muted()
                         });
 
                     let button = egui::Button::new(text)
                         .fill(if is_selected {
-                            color::SURFACE_HOVER
+                            color::surface_hover()
                         } else {
                             egui::Color32::TRANSPARENT
                         })

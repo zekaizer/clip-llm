@@ -476,6 +476,17 @@ struct UiConfig {
     /// UI zoom factor, 0.5–3.0 (default 1.0). Cmd/Ctrl +/−/0 change it at
     /// runtime and the app writes the result back.
     zoom: Option<f32>,
+    /// `"dark"` (default), `"light"`, or `"system"` (follow the OS appearance).
+    theme: Option<String>,
+}
+
+/// `[ui].theme` — which palette the overlay uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeChoice {
+    Dark,
+    Light,
+    /// Follow the OS appearance.
+    System,
 }
 
 /// `[ui].position` — where the overlay appears on a trigger.
@@ -801,6 +812,15 @@ impl Config {
     /// `[ui].zoom` clamped to 0.5–3.0; 1.0 when unset or not a number.
     pub fn ui_zoom(&self) -> f32 {
         self.ui.zoom.filter(|z| z.is_finite()).map_or(1.0, |z| z.clamp(0.5, 3.0))
+    }
+
+    /// `[ui].theme`; unknown values mean dark (the long-standing look).
+    pub fn ui_theme(&self) -> ThemeChoice {
+        match self.ui.theme.as_deref().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+            Some("light") => ThemeChoice::Light,
+            Some("system") => ThemeChoice::System,
+            _ => ThemeChoice::Dark,
+        }
     }
 
     /// Tab-bar display order (`[ui].tabs`). Order-only semantics: listed modes
@@ -1268,6 +1288,7 @@ fn starter_template() -> String {
     t.push_str(&r("panel_size", "[512, 380]", "overlay size in points; the resize grip writes this, double-click it to reset"));
     t.push_str(&s("position", "cursor", "\"cursor\" = centered on the trigger point; \"remembered\" = where you last left it (panel_position is written for you)"));
     t.push_str(&r("zoom", "1.0", "UI scale 0.5-3.0; Cmd/Ctrl +/- change it at runtime and it is written back"));
+    t.push_str(&s("theme", "dark", "\"dark\" | \"light\" | \"system\" (follow the OS appearance)"));
     t.push('\n');
 
     // [languages] — substituted into {primary_lang} / {secondary_lang}.
@@ -1995,6 +2016,17 @@ X-Test = "1"
         let odd: Config = toml::from_str("[ui]\nposition = \"corner\"\nzoom = 9.0\n").unwrap();
         assert_eq!(odd.ui_placement(), PanelPlacement::Cursor);
         assert_eq!(odd.ui_zoom(), 3.0, "clamped");
+    }
+
+    #[test]
+    fn ui_theme_defaults_to_dark() {
+        assert_eq!(Config::default().ui_theme(), ThemeChoice::Dark);
+        let c: Config = toml::from_str("[ui]\ntheme = \" System \"\n").unwrap();
+        assert_eq!(c.ui_theme(), ThemeChoice::System);
+        let l: Config = toml::from_str("[ui]\ntheme = \"light\"\n").unwrap();
+        assert_eq!(l.ui_theme(), ThemeChoice::Light);
+        let odd: Config = toml::from_str("[ui]\ntheme = \"sepia\"\n").unwrap();
+        assert_eq!(odd.ui_theme(), ThemeChoice::Dark);
     }
 
     #[test]

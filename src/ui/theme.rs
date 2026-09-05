@@ -1,6 +1,7 @@
 //! Design tokens — the single source of truth for the overlay's type scale,
-//! palette, spacing and geometry (docs/UI-GUIDELINES.md §3). Views reference
-//! these roles; a literal size or color outside this module is a bug.
+//! palettes (dark and light), spacing and geometry (docs/UI-GUIDELINES.md §3).
+//! Views reference these roles; a literal size or color outside this module
+//! is a bug.
 
 use eframe::egui::{self, Color32};
 
@@ -18,55 +19,112 @@ pub mod font {
     pub const MICRO: f32 = 11.0;
 }
 
-/// Palette by role.
+/// Palette by role. Two palettes exist, dark and light; which one the
+/// functions return follows the egui theme (`[ui].theme`), selected once per
+/// frame by `apply` before anything is drawn.
 pub mod color {
-    use super::Color32;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::{egui, Color32};
+
+    static LIGHT: AtomicBool = AtomicBool::new(false);
+
+    /// Select this frame's palette from the context's resolved theme.
+    pub fn apply(ctx: &egui::Context) {
+        LIGHT.store(ctx.theme() == egui::Theme::Light, Ordering::Relaxed);
+    }
+
+    fn pick(dark: Color32, light: Color32) -> Color32 {
+        if LIGHT.load(Ordering::Relaxed) { light } else { dark }
+    }
+
+    const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Color32 {
+        Color32::from_rgba_unmultiplied_const(r, g, b, a)
+    }
 
     // Text tones.
     /// Content and selected controls.
-    pub const TEXT: Color32 = Color32::WHITE;
+    pub fn text() -> Color32 {
+        pick(Color32::WHITE, Color32::from_gray(25))
+    }
     /// Form labels.
-    pub const TEXT_SOFT: Color32 = Color32::from_gray(200);
+    pub fn text_soft() -> Color32 {
+        pick(Color32::from_gray(200), Color32::from_gray(60))
+    }
     /// Idle interactive controls (icons, text buttons).
-    pub const TEXT_SECONDARY: Color32 = Color32::from_gray(165);
+    pub fn text_secondary() -> Color32 {
+        pick(Color32::from_gray(165), Color32::from_gray(95))
+    }
     /// Captions, hints, unselected tabs, Think content.
-    pub const TEXT_MUTED: Color32 = Color32::from_gray(130);
+    pub fn text_muted() -> Color32 {
+        pick(Color32::from_gray(130), Color32::from_gray(120))
+    }
     /// Unavailable controls, the idle grip.
-    pub const TEXT_DISABLED: Color32 = Color32::from_gray(95);
+    pub fn text_disabled() -> Color32 {
+        pick(Color32::from_gray(95), Color32::from_gray(175))
+    }
 
     // Accent.
     /// Selected-tab underline.
-    pub const ACCENT: Color32 = Color32::from_rgba_unmultiplied_const(108, 166, 255, 200);
+    pub fn accent() -> Color32 {
+        pick(rgba(108, 166, 255, 200), rgba(30, 100, 220, 220))
+    }
     /// Uncommitted cycling preview underline — between dim and full.
-    pub const ACCENT_PREVIEW: Color32 = Color32::from_rgba_unmultiplied_const(108, 166, 255, 140);
+    pub fn accent_preview() -> Color32 {
+        pick(rgba(108, 166, 255, 140), rgba(30, 100, 220, 150))
+    }
     /// Hover underline, the rephrase indent rule.
-    pub const ACCENT_DIM: Color32 = Color32::from_rgba_unmultiplied_const(108, 166, 255, 80);
+    pub fn accent_dim() -> Color32 {
+        pick(rgba(108, 166, 255, 80), rgba(30, 100, 220, 90))
+    }
     /// Fill of a selected accent pill (an explicit choice).
-    pub const ACCENT_FILL: Color32 = Color32::from_rgba_unmultiplied_const(70, 95, 140, 220);
+    pub fn accent_fill() -> Color32 {
+        pick(rgba(70, 95, 140, 220), rgba(170, 200, 245, 230))
+    }
 
     // Semantic.
     /// Errors, Cancel.
-    pub const DANGER: Color32 = Color32::from_rgb(255, 110, 110);
+    pub fn danger() -> Color32 {
+        pick(Color32::from_rgb(255, 110, 110), Color32::from_rgb(200, 40, 40))
+    }
     /// Behind Cancel.
-    pub const DANGER_FILL: Color32 = Color32::from_rgba_unmultiplied_const(80, 30, 30, 180);
+    pub fn danger_fill() -> Color32 {
+        pick(rgba(80, 30, 30, 180), rgba(250, 205, 205, 220))
+    }
     /// Degraded but running: retry pending, incomplete answer.
-    pub const WARNING: Color32 = Color32::from_rgb(240, 175, 60);
+    pub fn warning() -> Color32 {
+        pick(Color32::from_rgb(240, 175, 60), Color32::from_rgb(170, 110, 0))
+    }
     /// Confirmations.
-    pub const SUCCESS: Color32 = Color32::from_rgb(120, 200, 140);
+    pub fn success() -> Color32 {
+        pick(Color32::from_rgb(120, 200, 140), Color32::from_rgb(25, 130, 65))
+    }
 
     // Surfaces.
     /// The panel frame.
-    pub const SURFACE: Color32 = Color32::from_rgba_unmultiplied_const(30, 30, 30, 230);
+    pub fn surface() -> Color32 {
+        pick(rgba(30, 30, 30, 230), rgba(248, 248, 248, 235))
+    }
     /// A selected neutral control (pin, quiet pill, param pill).
-    pub const SURFACE_RAISED: Color32 = Color32::from_rgba_unmultiplied_const(60, 60, 60, 200);
+    pub fn surface_raised() -> Color32 {
+        pick(rgba(60, 60, 60, 200), rgba(205, 205, 205, 220))
+    }
     /// A hovered docked button.
-    pub const SURFACE_HOVER: Color32 = Color32::from_rgba_unmultiplied_const(50, 50, 50, 200);
+    pub fn surface_hover() -> Color32 {
+        pick(rgba(50, 50, 50, 200), rgba(215, 215, 215, 220))
+    }
     /// An idle pill or docked button.
-    pub const SURFACE_SUBTLE: Color32 = Color32::from_rgba_unmultiplied_const(50, 50, 50, 110);
+    pub fn surface_subtle() -> Color32 {
+        pick(rgba(50, 50, 50, 110), rgba(215, 215, 215, 120))
+    }
     /// Separator rules inside the settings form.
-    pub const RULE: Color32 = Color32::from_gray(55);
+    pub fn rule() -> Color32 {
+        pick(Color32::from_gray(55), Color32::from_gray(205))
+    }
     /// The frame's drop shadow.
-    pub const SHADOW: Color32 = Color32::from_black_alpha(100);
+    pub fn shadow() -> Color32 {
+        pick(Color32::from_black_alpha(100), Color32::from_black_alpha(60))
+    }
 }
 
 /// Gaps between elements.

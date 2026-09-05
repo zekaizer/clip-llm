@@ -223,14 +223,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         build_native_options(),
         Box::new(move |cc| {
             configure_fonts(&cc.egui_ctx);
-            // Transparent background for the overlay viewport (one-time setup).
-            cc.egui_ctx.set_visuals(egui::Visuals {
-                window_fill: egui::Color32::TRANSPARENT,
-                panel_fill: egui::Color32::TRANSPARENT,
-                window_stroke: egui::Stroke::NONE,
-                window_shadow: egui::Shadow::NONE,
-                window_corner_radius: egui::CornerRadius::same(12),
-                ..egui::Visuals::dark()
+            // Transparent background for the overlay viewport, in both egui
+            // themes (one-time setup); the theme itself follows [ui].theme
+            // and the app's palette follows the theme (ui::theme::color).
+            for theme in [egui::Theme::Dark, egui::Theme::Light] {
+                cc.egui_ctx.style_mut_of(theme, |style| {
+                    style.visuals.window_fill = egui::Color32::TRANSPARENT;
+                    style.visuals.panel_fill = egui::Color32::TRANSPARENT;
+                    style.visuals.window_stroke = egui::Stroke::NONE;
+                    style.visuals.window_shadow = egui::Shadow::NONE;
+                    style.visuals.window_corner_radius = egui::CornerRadius::same(12);
+                });
+            }
+            cc.egui_ctx.set_theme(match clip_llm::config::get().ui_theme() {
+                clip_llm::config::ThemeChoice::Dark => egui::ThemePreference::Dark,
+                clip_llm::config::ThemeChoice::Light => egui::ThemePreference::Light,
+                clip_llm::config::ThemeChoice::System => egui::ThemePreference::System,
             });
 
             // Forward hotkey events to coordinator thread (no request_repaint here —
