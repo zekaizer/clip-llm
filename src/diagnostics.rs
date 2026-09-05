@@ -424,13 +424,15 @@ impl DiagScenarioRunner {
                 resize_to: None,
             },
             Scenario {
-                name: "resized",
-                input: "Resize me: the long mock reply must scroll inside the user-sized panel.",
+                name: "resized_min",
+                input: "Resize me: the long mock reply must scroll inside the smallest panel.",
                 mode: ProcessMode::Translate,
                 switch_to: None,
                 settings: false,
                 settings_edit: false,
-                resize_to: Some((640.0, 420.0)),
+                // Far below the minimum: captures the clamped smallest layout,
+                // where the header row is tightest.
+                resize_to: Some((100.0, 100.0)),
             },
             Scenario {
                 name: "settings",
