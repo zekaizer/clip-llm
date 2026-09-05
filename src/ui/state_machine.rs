@@ -135,6 +135,9 @@ pub enum UiEvent {
     UserSelectModel(usize),
     /// User started dragging the overlay.
     UserStartDrag,
+    /// User dragged the resize grip; `width`/`height` is the new outer size
+    /// of the panel (frame including its margin, excluding the shadow pad).
+    UserResize { width: f32, height: f32 },
     /// Window gained focus.
     FocusGained,
     /// Window lost focus (after having been focused at least once).
@@ -206,6 +209,8 @@ pub struct StateMachine {
     thinking_supported: bool,
     /// True after the user drags the overlay; suppresses auto-repositioning.
     user_repositioned: bool,
+    /// Panel size set via the resize grip; `None` = auto-size to content.
+    user_size: Option<(f32, f32)>,
     /// True once the window has received focus after show_window.
     has_been_focused: bool,
     /// Current focus level, mirrored from FocusGained/FocusLost edges. Lets
@@ -251,6 +256,7 @@ impl StateMachine {
             next_request_id: 0,
             current_request_id: 0,
             user_repositioned: false,
+            user_size: None,
             has_been_focused: false,
             is_focused: false,
             cache: HashMap::new(),
@@ -321,6 +327,12 @@ impl StateMachine {
 
     pub fn user_repositioned(&self) -> bool {
         self.user_repositioned
+    }
+
+    /// Panel size chosen by the user via the resize grip, `None` while the
+    /// overlay auto-sizes to its content. Cleared on every new trigger.
+    pub fn user_size(&self) -> Option<(f32, f32)> {
+        self.user_size
     }
 
     pub fn auto_copy(&self) -> bool {
@@ -405,6 +417,14 @@ impl StateMachine {
                 self.user_repositioned = true;
                 vec![]
             }
+            UiEvent::UserResize { .. } if matches!(self.state, OverlayState::Hidden) => vec![],
+            UiEvent::UserResize { width, height } => {
+                self.user_size = Some((width, height));
+                // The grip anchors the top-left; re-centering on the new size
+                // would slide the grip out from under the cursor.
+                self.user_repositioned = true;
+                vec![]
+            }
             UiEvent::FocusGained => {
                 self.is_focused = true;
                 self.has_been_focused = true;
@@ -451,6 +471,7 @@ impl StateMachine {
         self.think_content = None;
         self.auto_copy = true; // capture is the double-tap (auto-copy) path
         self.user_repositioned = false;
+        self.user_size = None;
         self.has_been_focused = false;
         self.pinned = false; // each new trigger starts unpinned
         self.state = OverlayState::Capturing;
@@ -509,6 +530,7 @@ impl StateMachine {
         self.current_request_id = self.next_request_id;
         self.state = OverlayState::Processing;
         self.user_repositioned = false;
+        self.user_size = None;
         self.has_been_focused = false;
         // Default pin state per trigger type, from config
         // ([ui].single_tap_pinned / double_tap_pinned; both default false =
@@ -654,6 +676,7 @@ impl StateMachine {
         self.is_focused = false;
         self.auto_copy = false;
         self.user_repositioned = false;
+        self.user_size = None;
         self.pinned = false;
     }
 
@@ -2753,5 +2776,42 @@ mod tests {
             auto_copy: true,
         });
         assert_eq!(sm.capture_source(), CaptureSource::Selection);
+    }
+
+    #[test]
+    fn user_resize_records_size_and_pins_position() {
+        let mut sm = new_sm();
+        start_processing(&mut sm, "hello");
+        assert_eq!(sm.user_size(), None);
+
+        let effects = sm.handle(UiEvent::UserResize { width: 600.0, height: 400.0 });
+
+        assert!(effects.is_empty());
+        assert_eq!(sm.user_size(), Some((600.0, 400.0)));
+        // A resize anchors the top-left, so auto re-centering must stop too.
+        assert!(sm.user_repositioned());
+    }
+
+    #[test]
+    fn user_size_resets_on_next_trigger_and_hide() {
+        let mut sm = new_sm();
+        start_processing(&mut sm, "hello");
+        sm.handle(UiEvent::UserResize { width: 600.0, height: 400.0 });
+
+        start_processing(&mut sm, "again");
+        assert_eq!(sm.user_size(), None, "single-tap trigger must reset the size");
+
+        sm.handle(UiEvent::UserResize { width: 600.0, height: 400.0 });
+        sm.handle(UiEvent::CaptureStarted { source: CaptureSource::Selection });
+        assert_eq!(sm.user_size(), None, "double-tap trigger must reset the size");
+
+        sm.handle(UiEvent::UserCancel);
+        start_processing(&mut sm, "third");
+        sm.handle(UiEvent::UserResize { width: 600.0, height: 400.0 });
+        sm.handle(UiEvent::UserClose);
+        assert_eq!(sm.user_size(), None, "hiding must reset the size");
+
+        sm.handle(UiEvent::UserResize { width: 600.0, height: 400.0 });
+        assert_eq!(sm.user_size(), None, "ignored while hidden");
     }
 }
