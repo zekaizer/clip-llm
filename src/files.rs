@@ -156,12 +156,16 @@ fn decode_png_rgba(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     let rgba = match info.color_type {
         png::ColorType::Rgba => px.to_vec(),
         png::ColorType::Rgb => px
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .flat_map(|c| [c[0], c[1], c[2], 255])
             .collect(),
         png::ColorType::Grayscale => px.iter().flat_map(|&g| [g, g, g, 255]).collect(),
         png::ColorType::GrayscaleAlpha => px
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .flat_map(|c| [c[0], c[0], c[0], c[1]])
             .collect(),
         // normalize_to_color8 expands palettes, so this cannot occur.

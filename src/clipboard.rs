@@ -762,8 +762,8 @@ mod tests {
 
         let (resized, new_w, new_h) = downscale_rgba(&pixels, width, height).unwrap();
 
-        for chunk in resized.chunks_exact(4) {
-            assert_eq!(chunk, color);
+        for chunk in resized.as_chunks::<4>().0 {
+            assert_eq!(*chunk, color);
         }
         assert_eq!(resized.len(), (new_w * new_h * 4) as usize);
     }
