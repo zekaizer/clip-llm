@@ -110,11 +110,13 @@ pub(super) fn fixed_height_row(ui: &mut egui::Ui, height: f32, add_contents: imp
 }
 
 /// Vertically scrollable, word-wrapped body text, shrinking to the content's
-/// natural height up to `max_height`. Text continuing past the top or bottom
-/// edge is marked with a fade into the frame (#29) — egui's floating
-/// scrollbar only shows on hover, so a full panel would otherwise read as
-/// complete. ↑/↓ scroll by a line, PageUp/PageDown/Space by a page, Home/End
-/// to either end (UI-GUIDELINES §4). Views draw body text through
+/// natural height up to `max_height`. Rows continuing past the top or bottom
+/// edge fade out (#29) — egui's floating scrollbar only shows on hover, so a
+/// full panel would otherwise read as complete. The fade lowers the text's
+/// own alpha row by row: painting a gradient over the text would composite
+/// a second time over the translucent frame and show as a darker box on any
+/// light desktop. ↑/↓ scroll by a line, PageUp/PageDown/Space by a page,
+/// Home/End to either end (UI-GUIDELINES §4). Views draw body text through
 /// `panel::Body::fill_text`, which supplies the height.
 pub(super) fn scroll_text(
     ui: &mut egui::Ui,
@@ -124,7 +126,7 @@ pub(super) fn scroll_text(
     max_height: f32,
     stick_to_bottom: bool,
 ) {
-    let out = egui::ScrollArea::vertical()
+    egui::ScrollArea::vertical()
         .id_salt(id_salt)
         .max_height(max_height)
         // egui's ScrollArea defaults to a 64px `min_scrolled_size` floor once
@@ -143,20 +145,81 @@ pub(super) fn scroll_text(
             {
                 ui.scroll_with_delta(egui::vec2(0.0, step));
             }
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(text).color(text_color).size(font::BODY),
-                )
-                .wrap_mode(egui::TextWrapMode::Wrap),
-            );
+            // The content ui starts at the (scrolled) content top; its clip
+            // rect is the viewport plus egui's small clip margin.
+            let viewport = ui.clip_rect().shrink(ui.visuals().clip_rect_margin);
+            let offset = viewport.top() - ui.cursor().top();
+            let font_id = egui::FontId::proportional(font::BODY);
+            let wrap_width = ui.available_width();
+            let plain = egui::text::LayoutJob::simple(text.to_owned(), font_id.clone(), text_color, wrap_width);
+            let galley = ui.fonts_mut(|f| f.layout_job(plain));
+            let faded = faded_job(text, &galley, font_id, text_color, wrap_width, offset, viewport.height());
+            let galley = ui.fonts_mut(|f| f.layout_job(faded));
+            ui.add(egui::Label::new(galley).wrap_mode(egui::TextWrapMode::Wrap));
         });
-    let (top, bottom) = fade_edges(out.content_size.y, out.inner_rect.height(), out.state.offset.y);
-    if top {
-        paint_fade(ui, out.inner_rect, true);
+}
+
+/// `text` laid out like `galley` (same font, wrap width and rows), with the
+/// rows inside the top/bottom `size::FADE_HEIGHT` of the viewport dimmed in
+/// proportion to how deep into that band they sit — only along an edge that
+/// actually hides more content (`fade_edges`). `offset` is the scroll offset,
+/// `viewport_height` the visible height.
+fn faded_job(
+    text: &str,
+    galley: &egui::Galley,
+    font_id: egui::FontId,
+    color: egui::Color32,
+    wrap_width: f32,
+    offset: f32,
+    viewport_height: f32,
+) -> egui::text::LayoutJob {
+    let (fade_top, fade_bottom) = fade_edges(galley.size().y, viewport_height, offset);
+    let mut job = egui::text::LayoutJob {
+        text: text.to_owned(),
+        wrap: egui::text::TextWrapping { max_width: wrap_width, ..Default::default() },
+        ..Default::default()
+    };
+    let mut chars = text.char_indices();
+    let mut byte = 0usize;
+    for row in &galley.rows {
+        let start = byte;
+        for _ in 0..row.char_count_including_newline() {
+            if let Some((i, c)) = chars.next() {
+                byte = i + c.len_utf8();
+            }
+        }
+        if start == byte {
+            continue;
+        }
+        let mid = (row.min_y() + row.max_y()) / 2.0 - offset;
+        let alpha = row_alpha(mid, viewport_height, fade_top, fade_bottom);
+        job.sections.push(egui::text::LayoutSection {
+            leading_space: 0.0,
+            byte_range: start..byte,
+            format: egui::TextFormat { font_id: font_id.clone(), color: color.gamma_multiply(alpha), ..Default::default() },
+        });
     }
-    if bottom {
-        paint_fade(ui, out.inner_rect, false);
+    if byte < text.len() {
+        job.sections.push(egui::text::LayoutSection {
+            leading_space: 0.0,
+            byte_range: byte..text.len(),
+            format: egui::TextFormat { font_id, color, ..Default::default() },
+        });
     }
+    job
+}
+
+/// Opacity of a row whose center sits `mid` below the viewport top: 1 in the
+/// middle, ramping to 0 at a faded edge.
+fn row_alpha(mid: f32, viewport_height: f32, fade_top: bool, fade_bottom: bool) -> f32 {
+    let mut alpha: f32 = 1.0;
+    if fade_top {
+        alpha = alpha.min((mid / size::FADE_HEIGHT).clamp(0.0, 1.0));
+    }
+    if fade_bottom {
+        alpha = alpha.min(((viewport_height - mid) / size::FADE_HEIGHT).clamp(0.0, 1.0));
+    }
+    alpha
 }
 
 /// Vertical scroll delta (egui sign: positive moves the content down, i.e.
@@ -185,30 +248,6 @@ pub(super) fn fade_edges(content_height: f32, viewport_height: f32, offset_y: f3
     (offset_y > 1.0, hidden_below > 1.0)
 }
 
-/// A `size::FADE_HEIGHT` gradient from transparent into the frame color
-/// along the `top` or bottom edge of `viewport`, painted over the text.
-fn paint_fade(ui: &egui::Ui, viewport: egui::Rect, top: bool) {
-    let h = size::FADE_HEIGHT.min(viewport.height());
-    let band = if top {
-        egui::Rect::from_min_size(viewport.min, egui::vec2(viewport.width(), h))
-    } else {
-        egui::Rect::from_min_size(
-            egui::pos2(viewport.min.x, viewport.max.y - h),
-            egui::vec2(viewport.width(), h),
-        )
-    };
-    let (edge, inner) = if top { (band.min.y, band.max.y) } else { (band.max.y, band.min.y) };
-    let mut mesh = egui::Mesh::default();
-    let opaque = color::surface();
-    let clear = egui::Color32::TRANSPARENT;
-    mesh.colored_vertex(egui::pos2(band.min.x, edge), opaque);
-    mesh.colored_vertex(egui::pos2(band.max.x, edge), opaque);
-    mesh.colored_vertex(egui::pos2(band.max.x, inner), clear);
-    mesh.colored_vertex(egui::pos2(band.min.x, inner), clear);
-    mesh.add_triangle(0, 1, 2);
-    mesh.add_triangle(0, 2, 3);
-    ui.painter().add(egui::Shape::mesh(mesh));
-}
 
 
 /// The clickable "▶/▼ Thinking" toggle (icon + label; size deliberately the
@@ -352,7 +391,7 @@ pub(super) fn pill_row<T: Copy + PartialEq>(
 
 #[cfg(test)]
 mod tests {
-    use super::{fade_edges, keyboard_scroll_step};
+    use super::{fade_edges, keyboard_scroll_step, row_alpha};
     use eframe::egui;
 
     fn input_with(key: egui::Key) -> egui::InputState {
@@ -378,6 +417,22 @@ mod tests {
         assert_eq!(keyboard_scroll_step(&mut input_with(egui::Key::Space), 200.0), Some(-200.0));
         assert!(keyboard_scroll_step(&mut input_with(egui::Key::End), 200.0).unwrap() < -1000.0);
         assert_eq!(keyboard_scroll_step(&mut input_with(egui::Key::Tab), 200.0), None);
+    }
+
+    #[test]
+    fn row_alpha_ramps_only_at_faded_edges() {
+        // Nothing hidden: fully opaque everywhere.
+        assert_eq!(row_alpha(5.0, 200.0, false, false), 1.0);
+        // Bottom hidden: a row at the very bottom edge vanishes, one a band
+        // height above it is opaque, one mid-band is half.
+        assert_eq!(row_alpha(200.0, 200.0, false, true), 0.0);
+        assert_eq!(row_alpha(200.0 - 28.0, 200.0, false, true), 1.0);
+        assert!((row_alpha(200.0 - 14.0, 200.0, false, true) - 0.5).abs() < 1e-6);
+        // Top hidden: mirrored.
+        assert_eq!(row_alpha(0.0, 200.0, true, false), 0.0);
+        assert_eq!(row_alpha(28.0, 200.0, true, false), 1.0);
+        // The bottom row is unaffected by a top fade.
+        assert_eq!(row_alpha(190.0, 200.0, true, false), 1.0);
     }
 
     #[test]
