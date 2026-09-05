@@ -489,7 +489,7 @@ pub fn render_settings<'t>(
         .constrain(false)
         .sense(egui::Sense::drag())
         .show(ctx, |ui| {
-            panel::frame().show(ui, |ui| {
+            panel::frame_opaque().show(ui, |ui| {
                 ui.set_width(size::SETTINGS_WIDTH);
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 4.0);
                 ui.spacing_mut().slider_width = 220.0;

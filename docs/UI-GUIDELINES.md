@@ -83,6 +83,7 @@ degraded-but-running notices (retry pending, incomplete result) · `success`
 confirmations.
 
 **Surfaces**: `surface` the frame (also the color body text fades into) ·
+`surface_opaque` the settings panel frame (no translucency) ·
 `surface_raised` a selected neutral control · `surface_hover` hovered docked
 button · `surface_subtle` idle pill or docked button · `rule` form separators
 · `shadow` the frame's drop shadow.

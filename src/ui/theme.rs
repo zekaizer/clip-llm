@@ -105,6 +105,11 @@ pub mod color {
     pub fn surface() -> Color32 {
         pick(rgba(30, 30, 30, 230), rgba(248, 248, 248, 235))
     }
+    /// The settings panel frame: `surface` without the translucency, so the
+    /// form stays legible over any desktop.
+    pub fn surface_opaque() -> Color32 {
+        pick(Color32::from_rgb(30, 30, 30), Color32::from_rgb(248, 248, 248))
+    }
     /// A selected neutral control (pin, quiet pill, param pill).
     pub fn surface_raised() -> Color32 {
         pick(rgba(60, 60, 60, 200), rgba(205, 205, 205, 220))
