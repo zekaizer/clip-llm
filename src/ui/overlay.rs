@@ -374,12 +374,15 @@ fn view_result(
             let label = theme::text(status, font::LABEL, color::text_muted());
             if footer.model_switchable {
                 // The label names the model that answered, so it doubles as
-                // the "ask another model" control when profiles exist.
+                // the "ask another model" control when profiles exist; the
+                // ⇄ button next to it says so without hovering.
+                let tip = "Switch to the next model profile and re-run";
                 let resp = ui
                     .add(egui::Label::new(label).sense(egui::Sense::click()))
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .on_hover_text("Switch to the next model profile and re-run");
-                if resp.clicked() {
+                    .on_hover_text(tip);
+                let switch = ui.add(small_button("\u{21c4}")).on_hover_text(tip);
+                if resp.clicked() || switch.clicked() {
                     *action = OverlayAction::CycleModel;
                 }
             } else {
