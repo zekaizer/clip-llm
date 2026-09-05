@@ -500,6 +500,40 @@ fn set_scalar<V: Into<toml_edit::Value>>(table: &mut toml_edit::Table, key: &str
 /// Apply `patch` to the file at `path` (which must exist) and write it back
 /// atomically. Returns the path on success.
 pub fn save_to(path: &Path, patch: &SettingsPatch) -> Result<PathBuf, String> {
+    edit_file(path, |doc| apply_patch(doc, patch))
+}
+
+/// Write `[ui].panel_size` (points, rounded) to the file at `path`, or
+/// remove the key for `None` (back to the built-in default).
+pub fn save_panel_size_to(path: &Path, size: Option<(f32, f32)>) -> Result<PathBuf, String> {
+    edit_file(path, |doc| apply_panel_size(doc, size))
+}
+
+/// `save_panel_size_to` on the active config file, creating the starter file
+/// first when none exists yet.
+pub fn save_panel_size(size: Option<(f32, f32)>) -> Result<PathBuf, String> {
+    let path = crate::config::ensure_config_file().ok_or("no writable config path")?;
+    save_panel_size_to(&path, size)
+}
+
+pub fn apply_panel_size(doc: &mut toml_edit::Document, size: Option<(f32, f32)>) {
+    let ui = section(doc, "ui");
+    match size {
+        Some((w, h)) => {
+            let mut arr = toml_edit::Array::new();
+            arr.push(w.round() as i64);
+            arr.push(h.round() as i64);
+            set_scalar(ui, "panel_size", toml_edit::Value::Array(arr));
+        }
+        None => {
+            ui.remove("panel_size");
+        }
+    }
+}
+
+/// Parse the TOML file at `path`, let `edit` change the document in place
+/// (comments and ordering survive — ADR-0001), and write it back atomically.
+fn edit_file(path: &Path, edit: impl FnOnce(&mut toml_edit::Document)) -> Result<PathBuf, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     // The parse error's Display renders the offending line — which may hold an
@@ -507,7 +541,7 @@ pub fn save_to(path: &Path, patch: &SettingsPatch) -> Result<PathBuf, String> {
     let mut doc: toml_edit::Document = text
         .parse()
         .map_err(|_| format!("{} is not valid TOML; fix it by hand first", path.display()))?;
-    apply_patch(&mut doc, patch);
+    edit(&mut doc);
     let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, doc.to_string())
         .map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
@@ -841,6 +875,23 @@ model = "gone"
         apply_patch(&mut doc, &patch);
         let cfg: Config = toml::from_str(&doc.to_string()).unwrap();
         assert_eq!(cfg.ui_default_model(), Some("keep"));
+    }
+
+    #[test]
+    fn apply_panel_size_writes_rounded_points_and_none_removes_the_key() {
+        let mut doc: toml_edit::Document =
+            "# keep me\n[ui]\nsingle_tap_pinned = true\n".parse().unwrap();
+        apply_panel_size(&mut doc, Some((640.4, 419.6)));
+        let text = doc.to_string();
+        assert!(text.contains("panel_size = [640, 420]"), "{text}");
+        assert!(text.contains("# keep me") && text.contains("single_tap_pinned = true"), "{text}");
+        let cfg: crate::config::Config = toml::from_str(&text).unwrap();
+        assert_eq!(cfg.ui_panel_size(), Some((640.0, 420.0)));
+
+        apply_panel_size(&mut doc, None);
+        let text = doc.to_string();
+        assert!(!text.contains("panel_size"), "{text}");
+        assert!(text.contains("single_tap_pinned = true"), "{text}");
     }
 
     #[test]

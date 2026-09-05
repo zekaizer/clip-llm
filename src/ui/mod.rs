@@ -138,6 +138,15 @@ fn format_retry_label(
 /// within `OVERLAY_WIDTH`.
 const MODEL_LABEL_MAX_CHARS: usize = 24;
 
+/// Remember the grip's result in `[ui].panel_size` (`None` = back to the
+/// default). A failed write only costs the user the size on next launch.
+fn persist_panel_size(size: Option<(f32, f32)>) {
+    match crate::settings::save_panel_size(size) {
+        Ok(path) => debug!("panel size {size:?} saved to {}", path.display()),
+        Err(e) => warn!("panel size not saved: {e}"),
+    }
+}
+
 /// `[ui].panel_size`, or the built-in default, clamped to the minimum.
 fn panel_size_from_config() -> egui::Vec2 {
     crate::config::get()
@@ -1584,9 +1593,13 @@ impl OverlayApp {
             }
             overlay::OverlayAction::ResetSize => {
                 self.set_panel_size(ctx, theme::size::DEFAULT_PANEL);
+                persist_panel_size(None);
                 UiEvent::UserResize
             }
-            overlay::OverlayAction::ResizeDone => return,
+            overlay::OverlayAction::ResizeDone => {
+                persist_panel_size(Some((self.panel_size.x, self.panel_size.y)));
+                return;
+            }
             overlay::OverlayAction::SwitchMode(mode) => UiEvent::UserSwitchMode(mode),
             overlay::OverlayAction::ToggleThink => {
                 self.think_expanded = !self.think_expanded;
