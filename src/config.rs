@@ -935,6 +935,29 @@ impl Config {
         self.transcribe.prompt.as_deref().unwrap_or(DEFAULT_TRANSCRIBE_PROMPT)
     }
 
+    /// Whether the file overrides this mode's built-in system prompt: `prompt`
+    /// for translate/summarize/explain/transcribe; `base` or any `style` /
+    /// `length` entry for rephrase. A `thinking` key alone is not an override.
+    pub fn has_prompt_override(&self, mode: ProcessMode) -> bool {
+        match mode {
+            ProcessMode::Translate => self.translate.prompt.is_some(),
+            ProcessMode::Rephrase => {
+                let style = &self.rephrase.style;
+                let length = &self.rephrase.length;
+                self.rephrase.base.is_some()
+                    || [&style.correct, &style.casual, &style.formal, &style.business, &style.technical]
+                        .iter()
+                        .any(|v| v.is_some())
+                    || [&length.terse, &length.brief, &length.same, &length.detailed, &length.full]
+                        .iter()
+                        .any(|v| v.is_some())
+            }
+            ProcessMode::Summarize => self.summarize.prompt.is_some(),
+            ProcessMode::Explain => self.explain.prompt.is_some(),
+            ProcessMode::Transcribe => self.transcribe.prompt.is_some(),
+        }
+    }
+
     /// Builds the Rephrase prompt by substituting the `{style}` / `{length}`
     /// tokens in the base template in a single pass.
     pub fn rephrase_prompt(&self, style: RephraseStyle, length: RephraseLength) -> String {
@@ -1871,6 +1894,22 @@ X-Test = "1"
         assert_eq!(config.rephrase_base(), DEFAULT_REPHRASE_BASE);
         assert_eq!(config.explain_prompt(), DEFAULT_EXPLAIN_PROMPT);
         assert_eq!(config.transcribe_prompt(), DEFAULT_TRANSCRIBE_PROMPT);
+    }
+
+    #[test]
+    fn has_prompt_override_per_mode() {
+        let config: Config = toml::from_str(
+            "[translate]\nprompt = \"X\"\n[rephrase.length]\nterse = \"L\"\n[summarize]\nthinking = \"think\"\n",
+        )
+        .unwrap();
+        assert!(config.has_prompt_override(ProcessMode::Translate));
+        assert!(config.has_prompt_override(ProcessMode::Rephrase), "a style/length entry counts");
+        assert!(
+            !config.has_prompt_override(ProcessMode::Summarize),
+            "thinking alone is not a prompt override"
+        );
+        assert!(!config.has_prompt_override(ProcessMode::Explain));
+        assert!(!Config::default().has_prompt_override(ProcessMode::Rephrase));
     }
 
     #[test]

@@ -183,6 +183,17 @@ impl ProfileForm {
     }
 }
 
+/// Where a mode's system prompt comes from, as the panel shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptSource {
+    /// No override in the file: the built-in prompt.
+    BuiltIn,
+    /// Overridden in the file.
+    Custom,
+    /// Overridden in the file; Save drops the override.
+    ResetRequested,
+}
+
 /// Editable state behind the settings panel. Text fields stay strings until
 /// [`SettingsForm::to_patch`] validates them.
 #[derive(Debug, Clone, PartialEq)]
@@ -196,6 +207,8 @@ pub struct SettingsForm {
     pub double_tap_pinned: bool,
     /// Per-mode thinking override in display order; `None` = built-in default.
     pub thinking: Vec<(ProcessMode, Option<ThinkingMode>)>,
+    /// Where each mode's system prompt comes from, in display order.
+    pub prompts: Vec<(ProcessMode, PromptSource)>,
     /// Model profiles in config order and the one to start with.
     pub profiles: Vec<ProfileForm>,
     pub default_model: usize,
@@ -226,6 +239,8 @@ pub struct SettingsPatch {
     pub single_tap_pinned: bool,
     pub double_tap_pinned: bool,
     pub thinking: Vec<(ProcessMode, Option<ThinkingMode>)>,
+    /// Modes whose prompt override is dropped from the file (back to built-in).
+    pub reset_prompts: Vec<ProcessMode>,
     /// `None` when there is only one profile (key left alone).
     pub default_model: Option<String>,
     /// Every profile, config order: the `[api]` one (if any) plus `[[models]]`.
@@ -257,6 +272,17 @@ impl SettingsForm {
             single_tap_pinned: config.ui_single_tap_pinned(),
             double_tap_pinned: config.ui_double_tap_pinned(),
             thinking: tabs.iter().map(|&m| (m, config.mode_default_thinking(m))).collect(),
+            prompts: tabs
+                .iter()
+                .map(|&m| {
+                    let source = if config.has_prompt_override(m) {
+                        PromptSource::Custom
+                    } else {
+                        PromptSource::BuiltIn
+                    };
+                    (m, source)
+                })
+                .collect(),
             profiles,
             default_model,
             editing: None,
@@ -320,6 +346,12 @@ impl SettingsForm {
             single_tap_pinned: self.single_tap_pinned,
             double_tap_pinned: self.double_tap_pinned,
             thinking: self.thinking.clone(),
+            reset_prompts: self
+                .prompts
+                .iter()
+                .filter(|(_, source)| *source == PromptSource::ResetRequested)
+                .map(|(mode, _)| *mode)
+                .collect(),
             default_model,
             profiles,
         })
@@ -355,6 +387,10 @@ pub fn apply_patch(doc: &mut toml_edit::Document, patch: &SettingsPatch) {
 
     apply_profiles(doc, &patch.profiles);
 
+    for mode in &patch.reset_prompts {
+        remove_keys(doc, &mode_key(*mode), prompt_keys(*mode));
+    }
+
     for (mode, thinking) in &patch.thinking {
         let key = mode_key(*mode);
         match thinking {
@@ -365,21 +401,32 @@ pub fn apply_patch(doc: &mut toml_edit::Document, patch: &SettingsPatch) {
                 };
                 set_scalar(section(doc, &key), "thinking", name);
             }
-            // Built-in default: drop the override, and the section too when
-            // nothing else lives in it, so no empty `[mode]` header is left.
-            None => {
-                let now_empty = doc
-                    .get_mut(&key)
-                    .and_then(toml_edit::Item::as_table_mut)
-                    .map(|t| {
-                        t.remove("thinking");
-                        t.is_empty()
-                    });
-                if now_empty == Some(true) {
-                    doc.remove(&key);
-                }
-            }
+            // Built-in default: drop the override.
+            None => remove_keys(doc, &key, &["thinking"]),
         }
+    }
+}
+
+/// Keys of a mode's section that hold its prompt override (rephrase splits
+/// its prompt over `base` and the `style` / `length` tables).
+fn prompt_keys(mode: ProcessMode) -> &'static [&'static str] {
+    match mode {
+        ProcessMode::Rephrase => &["base", "style", "length"],
+        _ => &["prompt"],
+    }
+}
+
+/// Remove `keys` from the top-level `[section]` table, and the table itself
+/// once nothing else lives in it, so no empty `[section]` header is left.
+fn remove_keys(doc: &mut toml_edit::Document, section: &str, keys: &[&str]) {
+    let now_empty = doc.get_mut(section).and_then(toml_edit::Item::as_table_mut).map(|t| {
+        for key in keys {
+            t.remove(key);
+        }
+        t.is_empty()
+    });
+    if now_empty == Some(true) {
+        doc.remove(section);
     }
 }
 
@@ -586,6 +633,7 @@ mod tests {
                 (ProcessMode::Explain, Some(ThinkingMode::NoThink)),
                 (ProcessMode::Transcribe, None),
             ],
+            reset_prompts: vec![],
             default_model: Some("groq".into()),
             profiles: vec![],
         }
@@ -926,5 +974,67 @@ model = "gone"
             assert_eq!(cfg.mode_default_thinking(mode), Some(ThinkingMode::Think), "{mode:?}");
         }
         let _ = all_default_thinking();
+    }
+
+    #[test]
+    fn from_config_marks_overridden_prompts() {
+        let cfg: Config =
+            toml::from_str("[translate]\nprompt = \"X\"\n[rephrase.style]\ncasual = \"C\"\n").unwrap();
+        let form = SettingsForm::from_config(&cfg, None);
+        assert_eq!(form.prompts.len(), ProcessMode::ALL.len());
+        assert!(form.prompts.contains(&(ProcessMode::Translate, PromptSource::Custom)));
+        assert!(form.prompts.contains(&(ProcessMode::Rephrase, PromptSource::Custom)));
+        assert!(form.prompts.contains(&(ProcessMode::Summarize, PromptSource::BuiltIn)));
+    }
+
+    #[test]
+    fn to_patch_collects_only_reset_requests() {
+        let mut form = SettingsForm::from_config(&Config::default(), None);
+        for (mode, source) in form.prompts.iter_mut() {
+            *source = match mode {
+                ProcessMode::Translate => PromptSource::ResetRequested,
+                ProcessMode::Summarize => PromptSource::Custom,
+                _ => PromptSource::BuiltIn,
+            };
+        }
+        assert_eq!(form.to_patch().unwrap().reset_prompts, vec![ProcessMode::Translate]);
+    }
+
+    #[test]
+    fn apply_patch_reset_drops_the_prompt_and_an_emptied_section() {
+        // `prompt` goes, and with `thinking` back to default the section goes too.
+        let mut patch = sample_patch();
+        patch.reset_prompts = vec![ProcessMode::Summarize];
+        let mut doc: toml_edit::Document = DOC.parse().unwrap();
+        apply_patch(&mut doc, &patch);
+        let out = doc.to_string();
+        assert!(!out.contains("prompt = \"P\""), "{out}");
+        assert!(!out.contains("[summarize]"), "{out}");
+        assert!(out.contains("# top comment stays"), "{out}");
+
+        // A kept thinking override keeps the section; only the prompt key goes.
+        let mut patch = sample_patch();
+        patch.reset_prompts = vec![ProcessMode::Summarize];
+        patch.thinking = vec![(ProcessMode::Summarize, Some(ThinkingMode::Think))];
+        let mut doc: toml_edit::Document = DOC.parse().unwrap();
+        apply_patch(&mut doc, &patch);
+        let out = doc.to_string();
+        assert!(!out.contains("prompt = \"P\""), "{out}");
+        assert!(out.contains("[summarize]\nthinking = \"think\""), "{out}");
+    }
+
+    #[test]
+    fn apply_patch_reset_rephrase_drops_base_style_and_length() {
+        let mut patch = sample_patch();
+        patch.reset_prompts = vec![ProcessMode::Rephrase];
+        let mut doc: toml_edit::Document =
+            "[rephrase]\nbase = \"B\"\n\n[rephrase.style]\ncasual = \"C\"\n\n[rephrase.length]\nterse = \"T\"\n"
+                .parse()
+                .unwrap();
+        apply_patch(&mut doc, &patch);
+        let out = doc.to_string();
+        assert!(!out.contains("[rephrase") && !out.contains("base ="), "{out}");
+        let cfg: Config = toml::from_str(&out).expect("edited file must stay valid TOML");
+        assert!(!cfg.has_prompt_override(ProcessMode::Rephrase));
     }
 }

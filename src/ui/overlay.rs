@@ -668,9 +668,57 @@ fn render_settings_body(
                     ui.end_row();
                 }
             });
+        ui.add_space(space::MD);
+
+        render_prompt_rows(ui, form);
         ui.add_space(space::LG);
 
         render_settings_footer(ui, form, action, dirty);
+}
+
+/// "Prompts": one row per mode whose system prompt config.toml overrides, with
+/// the way back to the built-in. Modes on the built-in prompt take no row —
+/// the panel cannot author a prompt, so there is nothing to show for them.
+fn render_prompt_rows(ui: &mut egui::Ui, form: &mut crate::settings::SettingsForm) {
+    use crate::settings::PromptSource;
+    section_header(ui, "Prompts");
+    if form.prompts.iter().all(|(_, source)| *source == PromptSource::BuiltIn) {
+        ui.label(hint_text("Every mode uses its built-in prompt. Override one in config.toml to customize it."));
+        return;
+    }
+    egui::Grid::new("settings_prompts")
+        .num_columns(2)
+        .spacing([16.0, 4.0])
+        .show(ui, |ui| {
+            for (mode, source) in form.prompts.iter_mut() {
+                if *source == PromptSource::BuiltIn {
+                    continue;
+                }
+                row_label(ui, mode.label());
+                ui.horizontal(|ui| match *source {
+                    PromptSource::Custom => {
+                        pill_styled(ui, "Custom", true, PillTone::Accent)
+                            .on_hover_text("Overridden in config.toml");
+                        if ui
+                            .add(small_button("Reset to default"))
+                            .on_hover_text("Save drops the override; the built-in prompt applies")
+                            .clicked()
+                        {
+                            *source = PromptSource::ResetRequested;
+                        }
+                    }
+                    PromptSource::ResetRequested => {
+                        pill_styled(ui, "Default", true, PillTone::Quiet)
+                            .on_hover_text("The override is dropped when you Save");
+                        if ui.add(small_button("Keep custom")).clicked() {
+                            *source = PromptSource::Custom;
+                        }
+                    }
+                    PromptSource::BuiltIn => {}
+                });
+                ui.end_row();
+            }
+        });
 }
 
 /// Status line, then Open Config / Cancel-or-Done / Save.
