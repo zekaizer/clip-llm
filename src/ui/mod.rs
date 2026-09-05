@@ -609,6 +609,7 @@ impl OverlayApp {
     /// Render the settings panel for this frame and act on its result.
     fn render_settings_panel(&mut self, ctx: &egui::Context) -> overlay::OverlayOutput {
         let path = crate::config::candidate_path().map(|p| p.display().to_string());
+        self.sync_settings_model();
         // Collect a finished connection test before rendering.
         if let Some((index, rx)) = &self.profile_test {
             match rx.try_recv() {
@@ -662,6 +663,16 @@ impl OverlayApp {
             overlay::SettingsAction::Cancel => self.close_settings(ctx),
             overlay::SettingsAction::OpenConfig => crate::platform::open_config_file(),
             overlay::SettingsAction::Save => self.save_settings(ctx),
+            overlay::SettingsAction::SelectModel(i) => match self.pool_index_of_profile(i) {
+                Some(index) => self.select_model(ctx, index),
+                None => {
+                    if let Some(form) = self.settings.as_mut() {
+                        form.error = Some(
+                            "This profile is not available (it failed to start); fix it and Save first.".into(),
+                        );
+                    }
+                }
+            },
             overlay::SettingsAction::ResetPanelSize => {
                 // The overlay is hidden behind the panel: no anchor needed.
                 self.panel_size = theme::size::DEFAULT_PANEL;
@@ -774,6 +785,23 @@ impl OverlayApp {
         self.model_names = labels;
         self.sm.set_active_model(active);
         crate::platform::update_tray_models(&tray, active);
+    }
+
+    /// Keep the settings panel's model radio on the profile that is actually
+    /// active (tray and ⇄ switches included), matched by profile name.
+    fn sync_settings_model(&mut self) {
+        let Some(active) = self.model_names.get(self.sm.active_model()) else { return };
+        if let Some(form) = self.settings.as_mut()
+            && let Some(i) = form.profiles.iter().position(|p| p.name.trim() == active.trim())
+        {
+            form.default_model = i;
+        }
+    }
+
+    /// The pool index of the settings form's profile `i`, if it built.
+    fn pool_index_of_profile(&self, i: usize) -> Option<usize> {
+        let name = self.settings.as_ref()?.profiles.get(i)?.name.trim().to_string();
+        self.model_names.iter().position(|l| l.trim() == name)
     }
 
     /// Apply a model-profile choice from the tray or the overlay.
@@ -1161,6 +1189,12 @@ impl OverlayApp {
                     self.execute_effects(effects, ctx);
                 }
                 crate::diagnostics::ScenarioAction::OpenSettings => self.open_settings(ctx),
+                crate::diagnostics::ScenarioAction::SelectModel(index) => {
+                    // A tray-style switch while the panel is open: its radio
+                    // must follow (pseudo-state "SettingsSwitched").
+                    self.select_model(ctx, index);
+                    self.diag_transition("SettingsSwitched");
+                }
                 crate::diagnostics::ScenarioAction::EditSettingsSample => {
                     if let Some(form) = self.settings.as_mut() {
                         form.secondary = "Klingon".into();

@@ -106,8 +106,12 @@ buttons, `FRAME_RADIUS` 12 for the panel.
   tooltip; the tooltip names the shortcut where one exists.
 - Focus loss hides the panel unless pinned (`📌`) or still processing.
   Error stays until dismissed the same way Result does.
-- Disabled controls stay visible in `TEXT_DISABLED` with a tooltip that says
+- Disabled controls stay visible in `text_disabled` with a tooltip that says
   why (never silently swallow a click).
+- One source of truth per fact: the Settings model radio shows the profile
+  that is *active now* (kept in step with tray and ⇄ switches) and switches
+  on click; Save turns the active profile into the startup default. A control
+  never displays a value the app is not actually using.
 
 ## 5. Feedback
 

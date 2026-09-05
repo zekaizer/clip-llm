@@ -13,7 +13,7 @@ System-wide LLM clipboard assistant. Captures text via global hotkey, sends it t
 - **Thinking mode** — toggle Think / NoThink per mode with configurable per-mode defaults. The knob that switches thinking off (`reasoning_effort`, `chat_template_kwargs`, `/no_think`) is probed per model profile by checking that the reply really carries no reasoning, and can be forced with `thinking_control`
 - **Floating overlay** — fixed-size panel (drag the corner grip to resize; the size is remembered) with streaming response and docked action buttons (copy/paste, retry, copy-debug). Layout and design language: [docs/UI-GUIDELINES.md](docs/UI-GUIDELINES.md)
 - **Two API providers** — `openai`: vLLM or any `/v1/chat/completions` endpoint; `grok-oauth`: xAI's Responses API through the official Grok CLI's sign-in (no API key — tokens auto-refresh and write back to `~/.grok/auth.json`)
-- **Model profiles** — several backends in one config (`[[models]]`); switch from the tray's *Model* submenu or by clicking the model name under a result, which re-runs the same text on the new model
+- **Model profiles** — several backends in one config (`[[models]]`); switch from the tray's *Model* submenu, the ⇄ button (or model name) under a result — which re-runs the same text on the new model — or the radio in Settings › Models, which also shows the active profile; Save keeps the active profile as the startup default (`[ui].default_model`)
 - **Single binary, cross-platform** — macOS & Windows 11, no runtime dependencies
 
 ## Install

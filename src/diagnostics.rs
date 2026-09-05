@@ -241,7 +241,9 @@ impl DiagCollector {
         tctx.post_frames = self.ring.iter().filter(|f| f.frame >= tctx.frame).cloned().collect();
         // "Resized" changes the size on purpose; hidden/settings states are
         // not overlay geometry.
-        let visible = |s: &str| !matches!(s, "Hidden" | "Settings" | "SettingsEdited" | "Resized" | "Scrolled");
+        let visible = |s: &str| {
+            !matches!(s, "Hidden" | "Settings" | "SettingsEdited" | "SettingsSwitched" | "Resized" | "Scrolled")
+        };
         if !(visible(tctx.from) && visible(tctx.to)) {
             return;
         }
@@ -340,6 +342,9 @@ struct Scenario {
     /// After the result arrives, press PageDown this many times (pseudo-state
     /// "Scrolled") and capture again — shows the top fade and a mid-scroll body.
     scroll_pages: u8,
+    /// Settings scenario: switch to this pool index once the panel is up, as
+    /// the tray would (pseudo-state "SettingsSwitched").
+    select_model: Option<usize>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -390,6 +395,7 @@ impl DiagScenarioRunner {
                 resize_to: None,
                 capture_first: false,
                 scroll_pages: 0,
+                select_model: None,
             },
             Scenario {
                 name: "long_text",
@@ -412,6 +418,7 @@ impl DiagScenarioRunner {
                 resize_to: None,
                 capture_first: false,
                 scroll_pages: 0,
+                select_model: None,
             },
             Scenario {
                 name: "mode_switch",
@@ -423,6 +430,7 @@ impl DiagScenarioRunner {
                 resize_to: None,
                 capture_first: false,
                 scroll_pages: 0,
+                select_model: None,
             },
             Scenario {
                 name: "error_display",
@@ -434,6 +442,7 @@ impl DiagScenarioRunner {
                 resize_to: None,
                 capture_first: false,
                 scroll_pages: 0,
+                select_model: None,
             },
             Scenario {
                 name: "korean_text",
@@ -445,6 +454,7 @@ impl DiagScenarioRunner {
                 resize_to: None,
                 capture_first: false,
                 scroll_pages: 0,
+                select_model: None,
             },
             Scenario {
                 name: "rephrase_mode",
@@ -456,6 +466,7 @@ impl DiagScenarioRunner {
                 resize_to: None,
                 capture_first: false,
                 scroll_pages: 0,
+                select_model: None,
             },
             Scenario {
                 name: "summarize_mode",
@@ -475,6 +486,7 @@ impl DiagScenarioRunner {
                 resize_to: None,
                 capture_first: false,
                 scroll_pages: 0,
+                select_model: None,
             },
             Scenario {
                 name: "long_single_line",
@@ -486,6 +498,7 @@ impl DiagScenarioRunner {
                 resize_to: None,
                 capture_first: false,
                 scroll_pages: 0,
+                select_model: None,
             },
             Scenario {
                 name: "capturing",
@@ -497,6 +510,7 @@ impl DiagScenarioRunner {
                 resize_to: None,
                 capture_first: true,
                 scroll_pages: 0,
+                select_model: None,
             },
             Scenario {
                 name: "scrolled",
@@ -508,6 +522,7 @@ impl DiagScenarioRunner {
                 resize_to: None,
                 capture_first: false,
                 scroll_pages: 1,
+                select_model: None,
             },
             Scenario {
                 name: "resized_min",
@@ -521,6 +536,7 @@ impl DiagScenarioRunner {
                 resize_to: Some((100.0, 100.0)),
                 capture_first: false,
                 scroll_pages: 0,
+                select_model: None,
             },
             Scenario {
                 name: "settings",
@@ -532,6 +548,19 @@ impl DiagScenarioRunner {
                 resize_to: None,
                 capture_first: false,
                 scroll_pages: 0,
+                select_model: None,
+            },
+            Scenario {
+                name: "settings_switched",
+                input: "",
+                mode: ProcessMode::Translate,
+                switch_to: None,
+                settings: true,
+                settings_edit: false,
+                resize_to: None,
+                capture_first: false,
+                scroll_pages: 0,
+                select_model: Some(1),
             },
             Scenario {
                 name: "settings_edited",
@@ -543,6 +572,7 @@ impl DiagScenarioRunner {
                 resize_to: None,
                 capture_first: false,
                 scroll_pages: 0,
+                select_model: None,
             },
         ]);
         // DIAG_SCENARIO=a,b keeps only the named scenarios.
@@ -626,6 +656,11 @@ impl DiagScenarioRunner {
                         self.phase = RunnerPhase::WaitingForSwitchResult;
                         return ScenarioAction::EditSettingsSample;
                     }
+                    if let Some(index) = self.scenarios.front().and_then(|s| s.select_model) {
+                        info!("diag: switching the model profile to #{index}");
+                        self.phase = RunnerPhase::WaitingForSwitchResult;
+                        return ScenarioAction::SelectModel(index);
+                    }
                     if let Some((w, h)) = self.scenarios.front().and_then(|s| s.resize_to) {
                         info!("diag: resizing the panel to {w}x{h}");
                         self.phase = RunnerPhase::WaitingForSwitchResult;
@@ -643,7 +678,7 @@ impl DiagScenarioRunner {
             }
 
             RunnerPhase::WaitingForSwitchResult => {
-                if matches!(overlay_state, "Result" | "Error" | "SettingsEdited" | "Resized" | "Scrolled") {
+                if matches!(overlay_state, "Result" | "Error" | "SettingsEdited" | "SettingsSwitched" | "Resized" | "Scrolled") {
                     self.delay_until = Instant::now() + RESULT_DISPLAY;
                     self.phase = RunnerPhase::WaitingToHide;
                 }
@@ -698,6 +733,8 @@ pub enum ScenarioAction {
     BeginCapture { text: String },
     /// Press PageDown `pages` times in the body (pseudo-state "Scrolled").
     ScrollBody { pages: u8 },
+    /// Switch the active model profile like the tray does.
+    SelectModel(usize),
     /// All scenarios complete — app should exit.
     Quit,
 }

@@ -451,6 +451,8 @@ pub enum SettingsAction {
     TestProfile(usize),
     /// Back to the default overlay size (removes `[ui].panel_size`).
     ResetPanelSize,
+    /// Make the profile at this form index the active model now.
+    SelectModel(usize),
 }
 
 /// Connection-test state shown inside a profile editor.
@@ -557,9 +559,9 @@ fn render_settings_body(
 ) {
     section_header(ui, "Models");
     ui.label(hint_text(
-        "\u{25cf} marks the profile used at startup. Switch at runtime from the tray Model menu or by clicking the model name under a result.",
+        "\u{25cf} is the active profile \u{2014} pick another to switch now (the tray Model menu and \u{21c4} under a result do the same). Save also makes it the profile used at startup.",
     ));
-    render_profiles(ui, form, caps);
+    render_profiles(ui, form, caps, action);
     ui.add_space(space::MD);
 
         section_header(ui, "Languages");
@@ -719,24 +721,28 @@ fn render_settings_footer(
         });
 }
 
-/// Profile list: startup radio, name, summary, `[api]` tag, Edit (opens the
-/// profile sub-page) and an "Add profile" row.
+/// Profile list: active-profile radio (switches immediately; the adapter
+/// keeps it in step with tray/⇄ switches), name, summary, `[api]` tag, Edit
+/// (opens the profile sub-page) and an "Add profile" row.
 fn render_profiles(
     ui: &mut egui::Ui,
     form: &mut crate::settings::SettingsForm,
     caps: &impl Fn(&str) -> Option<String>,
+    action: &mut SettingsAction,
 ) {
     use crate::settings::ProfileForm;
     for i in 0..form.profiles.len() {
         let probed = caps(form.profiles[i].name.trim());
         ui.horizontal(|ui| {
-            let startup = form.default_model == i;
+            let active = form.default_model == i;
             if ui
-                .add(egui::RadioButton::new(startup, ""))
-                .on_hover_text("Use this profile at startup")
+                .add(egui::RadioButton::new(active, ""))
+                .on_hover_text("Switch to this profile now; Save keeps it for startup")
                 .clicked()
+                && !active
             {
                 form.default_model = i;
+                *action = SettingsAction::SelectModel(i);
             }
             let profile = &form.profiles[i];
             let name = if profile.name.trim().is_empty() {
