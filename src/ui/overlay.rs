@@ -351,16 +351,26 @@ pub enum SettingsAction {
     StartDrag,
 }
 
+/// Panel width in settings mode — wider than the overlay so the per-mode
+/// thinking table and language pickers fit on one line each.
+pub(crate) const SETTINGS_WIDTH: f32 = 560.0;
+
 /// Render the settings panel (tray "Settings…") in the overlay window. Edits
-/// go straight into `form`; the caller acts on the returned action.
+/// go straight into `form`; `baseline` is the form as opened (or last saved)
+/// and drives the dirty state. The caller acts on the returned action.
 pub fn render_settings(
     ctx: &egui::Context,
     form: &mut crate::settings::SettingsForm,
+    baseline: Option<&crate::settings::SettingsForm>,
     config_path: Option<&str>,
 ) -> (SettingsAction, OverlayOutput) {
+    use crate::settings::SettingsForm;
     let mut action = SettingsAction::None;
-    let label = |text: &str| egui::RichText::new(text).color(egui::Color32::from_gray(200)).size(13.0);
-    let hint = |text: &str| egui::RichText::new(text).color(egui::Color32::from_gray(120)).size(11.0);
+    let dirty = baseline.is_none_or(|b: &SettingsForm| form.to_patch().ok() != b.to_patch().ok());
+    // A fresh edit supersedes the last save's banner.
+    if dirty && form.error.is_none() {
+        form.notice = None;
+    }
 
     let area_resp = egui::Area::new("settings".into())
         .fixed_pos(egui::pos2(SHADOW_PAD, SHADOW_PAD))
@@ -368,104 +378,170 @@ pub fn render_settings(
         .sense(egui::Sense::drag())
         .show(ctx, |ui| {
             overlay_frame().show(ui, |ui| {
-                ui.set_width(OVERLAY_WIDTH);
+                ui.set_width(SETTINGS_WIDTH);
+                ui.spacing_mut().item_spacing = egui::vec2(8.0, 4.0);
+                ui.spacing_mut().slider_width = 220.0;
+
+                // Header: title, file name (full path on hover), close.
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Settings").color(egui::Color32::WHITE).size(15.0));
+                    ui.label(egui::RichText::new("Settings").color(egui::Color32::WHITE).size(16.0).strong());
+                    if let Some(path) = config_path {
+                        let name = std::path::Path::new(path)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path.to_string());
+                        ui.add_space(4.0);
+                        ui.label(hint_text(&name)).on_hover_text(path);
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if docked_action_button(ui, "\u{2715}", "Close without saving (Esc)") {
+                        if docked_action_button(ui, "\u{2715}", "Close (Esc)") {
                             action = SettingsAction::Cancel;
                         }
                     });
                 });
-                if let Some(path) = config_path {
-                    ui.label(hint(path));
-                }
-                ui.add_space(6.0);
-                ui.add(egui::Separator::default().spacing(4.0));
-                ui.add_space(6.0);
+                ui.add_space(2.0);
 
                 if form.model_names.len() > 1 {
-                    ui.label(label("Model at startup"));
+                    section_header(ui, "Model at startup");
                     ui.horizontal_wrapped(|ui| {
-                        for (i, name) in form.model_names.iter().enumerate() {
-                            ui.radio_value(&mut form.default_model, i, name.as_str());
+                        for i in 0..form.model_names.len() {
+                            let name = form.model_names[i].clone();
+                            if pill(ui, &name, form.default_model == i) {
+                                form.default_model = i;
+                            }
                         }
                     });
                     ui.add_space(6.0);
                 }
 
-                egui::Grid::new("settings_grid")
+                section_header(ui, "Languages");
+                egui::Grid::new("settings_languages")
                     .num_columns(2)
-                    .spacing([12.0, 6.0])
+                    .spacing([16.0, 6.0])
                     .show(ui, |ui| {
-                        ui.label(label("Primary language"));
-                        ui.add(egui::TextEdit::singleline(&mut form.primary).desired_width(200.0));
+                        row_label(ui, "Primary");
+                        language_picker(ui, "primary_lang", &mut form.primary);
                         ui.end_row();
-                        ui.label(label("Secondary language"));
-                        ui.add(egui::TextEdit::singleline(&mut form.secondary).desired_width(200.0));
-                        ui.end_row();
-                        ui.label(label("Mode at startup"));
+                        row_label(ui, "Secondary");
                         ui.horizontal(|ui| {
-                            egui::ComboBox::from_id_salt("default_mode")
-                                .selected_text(form.default_mode.label())
-                                .show_ui(ui, |ui| {
-                                    for &mode in ProcessMode::ALL {
-                                        ui.selectable_value(&mut form.default_mode, mode, mode.label());
-                                    }
-                                });
-                            ui.label(hint("restart"));
-                        });
-                        ui.end_row();
-                        ui.label(label("Double-tap window (ms)"));
-                        ui.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(&mut form.double_tap_ms).desired_width(70.0));
-                            ui.label(hint("restart"));
+                            language_picker(ui, "secondary_lang", &mut form.secondary);
+                            if ui
+                                .add(small_button("\u{21c4} swap"))
+                                .on_hover_text("Swap primary and secondary")
+                                .clicked()
+                            {
+                                std::mem::swap(&mut form.primary, &mut form.secondary);
+                            }
                         });
                         ui.end_row();
                     });
-                ui.add_space(4.0);
-                ui.checkbox(&mut form.single_tap_pinned, label("Single-tap result starts pinned"));
-                ui.checkbox(&mut form.double_tap_pinned, label("Double-tap result starts pinned"));
                 ui.add_space(6.0);
 
-                ui.label(label("Thinking per mode"));
-                ui.horizontal_wrapped(|ui| {
-                    for (mode, thinking) in form.thinking.iter_mut() {
-                        let selected = match thinking {
-                            None => "Default",
-                            Some(ThinkingMode::Think) => "Think",
-                            Some(ThinkingMode::NoThink) => "No Think",
-                        };
-                        ui.label(hint(mode.label()));
-                        egui::ComboBox::from_id_salt(("thinking", *mode))
-                            .width(90.0)
-                            .selected_text(selected)
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(thinking, None, "Default");
-                                ui.selectable_value(thinking, Some(ThinkingMode::Think), "Think");
-                                ui.selectable_value(thinking, Some(ThinkingMode::NoThink), "No Think");
+                section_header(ui, "Behavior");
+                egui::Grid::new("settings_behavior")
+                    .num_columns(2)
+                    .spacing([16.0, 6.0])
+                    .show(ui, |ui| {
+                        row_label(ui, "Mode at startup *");
+                        ui.horizontal_wrapped(|ui| {
+                            for &mode in ProcessMode::ALL {
+                                if pill(ui, mode.label(), form.default_mode == mode) {
+                                    form.default_mode = mode;
+                                }
+                            }
+                        });
+                        ui.end_row();
+                        row_label(ui, "Double-tap window *");
+                        let mut ms: u64 = form.double_tap_ms.trim().parse().unwrap_or(350).clamp(100, 2000);
+                        if ui
+                            .add(egui::Slider::new(&mut ms, 100..=1000).suffix(" ms").step_by(10.0))
+                            .on_hover_text("How long a first tap waits for a second one (lower = snappier single tap)")
+                            .changed()
+                        {
+                            form.double_tap_ms = ms.to_string();
+                        }
+                        ui.end_row();
+                        row_label(ui, "Keep result open");
+                        ui.horizontal(|ui| {
+                            let tip = "Pinned results stay open when the overlay loses focus";
+                            if pill_with_tip(ui, "after single-tap", form.single_tap_pinned, tip) {
+                                form.single_tap_pinned = !form.single_tap_pinned;
+                            }
+                            if pill_with_tip(ui, "after double-tap", form.double_tap_pinned, tip) {
+                                form.double_tap_pinned = !form.double_tap_pinned;
+                            }
+                        });
+                        ui.end_row();
+                    });
+                ui.label(hint_text("* applies after a restart"));
+                ui.add_space(6.0);
+
+                section_header(ui, "Thinking");
+                egui::Grid::new("settings_thinking")
+                    .num_columns(2)
+                    .spacing([16.0, 4.0])
+                    .show(ui, |ui| {
+                        for (mode, thinking) in form.thinking.iter_mut() {
+                            row_label(ui, mode.label());
+                            ui.horizontal(|ui| {
+                                // "Default" selected is the quiet state (gray);
+                                // an explicit override is what earns the accent.
+                                let built_in = mode.default_thinking().label();
+                                if pill_styled(ui, "Default", thinking.is_none(), PillTone::Quiet)
+                                    .on_hover_text(format!("Built-in default for {}: {built_in}", mode.label()))
+                                    .clicked()
+                                {
+                                    *thinking = None;
+                                }
+                                for (value, text) in
+                                    [(ThinkingMode::Think, "Think"), (ThinkingMode::NoThink, "No Think")]
+                                {
+                                    if pill(ui, text, *thinking == Some(value)) {
+                                        *thinking = Some(value);
+                                    }
+                                }
                             });
-                    }
-                });
-                ui.add_space(8.0);
-                ui.label(hint(
-                    "Prompts, API endpoints and model profiles are edited in the file (Open Config).",
-                ));
+                            ui.end_row();
+                        }
+                    });
+                ui.add_space(10.0);
+
+                // Footer: status line, then actions.
+                ui.add_space(2.0);
                 if let Some(err) = &form.error {
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new(err).color(egui::Color32::from_rgb(230, 100, 100)).size(12.0));
+                    ui.label(egui::RichText::new(err).color(egui::Color32::from_rgb(235, 110, 110)).size(12.0));
+                } else if let Some(notice) = &form.notice {
+                    ui.label(egui::RichText::new(notice).color(egui::Color32::from_rgb(120, 200, 140)).size(12.0));
                 }
-                ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Save").clicked() {
-                        action = SettingsAction::Save;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        action = SettingsAction::Cancel;
+                    if ui
+                        .add(small_button("Open Config\u{2026}"))
+                        .on_hover_text("Prompts, API endpoints and model profiles are edited in the file")
+                        .clicked()
+                    {
+                        action = SettingsAction::OpenConfig;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Open Config").clicked() {
-                            action = SettingsAction::OpenConfig;
+                        let save = egui::Button::new(
+                            egui::RichText::new("Save").color(egui::Color32::WHITE).size(13.0),
+                        )
+                        .fill(if dirty { accent_color() } else { egui::Color32::from_gray(55) })
+                        .stroke(egui::Stroke::NONE)
+                        .corner_radius(6.0)
+                        .min_size(egui::vec2(80.0, 28.0));
+                        if ui.add_enabled(dirty, save).on_hover_text("\u{2318}S / Ctrl+S").clicked() {
+                            action = SettingsAction::Save;
+                        }
+                        let close_label = if dirty { "Cancel" } else { "Done" };
+                        let close = egui::Button::new(
+                            egui::RichText::new(close_label).color(egui::Color32::from_gray(220)).size(13.0),
+                        )
+                        .fill(egui::Color32::from_rgba_unmultiplied(60, 60, 60, 200))
+                        .stroke(egui::Stroke::NONE)
+                        .corner_radius(6.0)
+                        .min_size(egui::vec2(80.0, 28.0));
+                        if ui.add(close).clicked() {
+                            action = SettingsAction::Cancel;
                         }
                     });
                 });
@@ -475,8 +551,13 @@ pub fn render_settings(
     if area_resp.response.drag_started() {
         action = SettingsAction::StartDrag;
     }
-    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+    // Escape closes an open dropdown first, the panel second.
+    let popup_open = egui::Popup::is_any_open(ctx);
+    if !popup_open && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         action = SettingsAction::Cancel;
+    }
+    if dirty && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
+        action = SettingsAction::Save;
     }
 
     let content_size = area_resp.response.rect.size();
@@ -485,6 +566,98 @@ pub fn render_settings(
         action,
         OverlayOutput { action: OverlayAction::None, desired_size: Some(desired), content_size: Some(content_size) },
     )
+}
+
+fn hint_text(text: &str) -> egui::RichText {
+    egui::RichText::new(text).color(egui::Color32::from_gray(120)).size(11.0)
+}
+
+fn row_label(ui: &mut egui::Ui, text: &str) {
+    ui.label(egui::RichText::new(text).color(egui::Color32::from_gray(200)).size(13.0));
+}
+
+/// Small caps-style group title with a rule under it.
+fn section_header(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(2.0);
+    ui.label(
+        egui::RichText::new(text.to_ascii_uppercase())
+            .color(egui::Color32::from_gray(130))
+            .size(11.0),
+    );
+    ui.add(egui::Separator::default().spacing(4.0));
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PillTone {
+    /// Selected = accent fill (an explicit choice).
+    Accent,
+    /// Selected = neutral fill (the built-in default is in effect).
+    Quiet,
+}
+
+/// Selectable pill in the tab-bar/param-pill style. Returns true on click.
+fn pill(ui: &mut egui::Ui, text: &str, selected: bool) -> bool {
+    pill_styled(ui, text, selected, PillTone::Accent).clicked()
+}
+
+fn pill_with_tip(ui: &mut egui::Ui, text: &str, selected: bool, tip: &str) -> bool {
+    pill_styled(ui, text, selected, PillTone::Accent).on_hover_text(tip).clicked()
+}
+
+fn pill_styled(ui: &mut egui::Ui, text: &str, selected: bool, tone: PillTone) -> egui::Response {
+    let rich = egui::RichText::new(text).size(12.0).color(if selected {
+        egui::Color32::WHITE
+    } else {
+        egui::Color32::from_gray(150)
+    });
+    let fill = match (selected, tone) {
+        (true, PillTone::Accent) => egui::Color32::from_rgba_unmultiplied(70, 95, 140, 220),
+        (true, PillTone::Quiet) => egui::Color32::from_rgba_unmultiplied(85, 85, 85, 220),
+        (false, _) => egui::Color32::from_rgba_unmultiplied(50, 50, 50, 120),
+    };
+    let button = egui::Button::new(rich)
+        .fill(fill)
+        .stroke(egui::Stroke::NONE)
+        .corner_radius(6.0)
+        .min_size(egui::vec2(0.0, 24.0));
+    ui.add(button)
+}
+
+/// Flat, low-emphasis button for secondary actions.
+fn small_button(text: &str) -> egui::Button<'static> {
+    egui::Button::new(egui::RichText::new(text).size(12.0).color(egui::Color32::from_gray(170)))
+        .fill(egui::Color32::TRANSPARENT)
+        .stroke(egui::Stroke::NONE)
+        .corner_radius(6.0)
+}
+
+/// Dropdown of common languages plus a free-text field for anything else.
+fn language_picker(ui: &mut egui::Ui, id: &str, value: &mut String) {
+    let common = crate::settings::COMMON_LANGUAGES;
+    let is_common = common.iter().any(|l| l.eq_ignore_ascii_case(value.trim()));
+    let selected = if is_common { value.trim().to_string() } else { "Other\u{2026}".to_string() };
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_id_salt(id)
+            .width(140.0)
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                for lang in common {
+                    if ui.selectable_label(value.trim().eq_ignore_ascii_case(lang), *lang).clicked() {
+                        *value = (*lang).to_string();
+                    }
+                }
+                if ui.selectable_label(!is_common, "Other\u{2026}").clicked() && is_common {
+                    value.clear();
+                }
+            });
+        if !is_common {
+            ui.add(
+                egui::TextEdit::singleline(value)
+                    .desired_width(150.0)
+                    .hint_text("language name"),
+            );
+        }
+    });
 }
 
 /// Render `add_contents` inside a row whose height is pinned to exactly
@@ -1192,12 +1365,12 @@ mod tests {
         form.error = Some("Both language names are required.".into());
         let mut result = None;
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            result = Some(render_settings(ctx, &mut form, Some("/tmp/config.toml")));
+            result = Some(render_settings(ctx, &mut form, None, Some("/tmp/config.toml")));
         });
         let (action, output) = result.unwrap();
         assert_eq!(action, SettingsAction::None);
         let size = output.desired_size.expect("panel must report a size");
-        assert!(size.x >= OVERLAY_WIDTH, "{size:?}");
+        assert!(size.x >= SETTINGS_WIDTH, "{size:?}");
         assert!(size.y > 200.0, "form rows must occupy real height: {size:?}");
         assert_eq!(form.default_model, 1, "rendering must not mutate the form");
     }

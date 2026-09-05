@@ -98,6 +98,22 @@ fn format_reload_status(outcome: &ReloadOutcome) -> String {
     }
 }
 
+/// Banner shown in the settings panel after a save.
+fn settings_notice(outcome: &ReloadOutcome) -> String {
+    match outcome {
+        ReloadOutcome::Applied { models_changed: true, .. } => {
+            "Saved. Restart to apply the model profiles.".to_string()
+        }
+        ReloadOutcome::Applied { restart_needed, .. } if !restart_needed.is_empty() => {
+            format!("Saved. Restart to apply {}.", restart_needed.join(", "))
+        }
+        ReloadOutcome::Applied { .. } => "Saved and applied.".to_string(),
+        ReloadOutcome::Failed(reason) => {
+            format!("Saved, but reloading failed ({reason}) \u{2014} restart to apply.")
+        }
+    }
+}
+
 /// Status text for an automatic retry, shown in place of the Processing label.
 fn format_retry_label(
     attempt: u32,
@@ -176,6 +192,8 @@ pub struct OverlayApp {
     /// Open settings panel (tray "Settings…"); it borrows the overlay window
     /// while the state machine stays Hidden.
     settings: Option<crate::settings::SettingsForm>,
+    /// The form as opened / last saved; the panel's dirty state is form != baseline.
+    settings_baseline: Option<crate::settings::SettingsForm>,
     /// Tap events from coordinator thread (hotkey detection runs off-UI).
     tap_rx: mpsc::Receiver<TapEvent>,
     /// Cached desired_size to avoid redundant send_viewport_cmd calls.
@@ -320,6 +338,7 @@ impl OverlayApp {
             startup_notice: None,
             model_names: Vec::new(),
             settings: None,
+            settings_baseline: None,
             tap_rx,
             last_desired_size: None,
             last_content_size: None,
@@ -375,6 +394,7 @@ impl OverlayApp {
             startup_notice: None,
             model_names: Vec::new(),
             settings: None,
+            settings_baseline: None,
             tap_rx,
             last_desired_size: None,
             last_content_size: None,
@@ -429,6 +449,26 @@ impl OverlayApp {
         self.model_names.len().max(1)
     }
 
+    /// State label for diagnostics: the settings panel is a pseudo-state on
+    /// top of the (Hidden) state machine.
+    #[cfg(feature = "diagnostics")]
+    fn diag_state_name(&self) -> &'static str {
+        if self.settings.is_some() {
+            "Settings"
+        } else {
+            self.sm.variant_name()
+        }
+    }
+
+    /// Announce a state change to the diagnostics collector and scenario
+    /// runner (screenshot on settle).
+    #[cfg(feature = "diagnostics")]
+    fn diag_transition(&mut self, to: &'static str) {
+        self.diag.on_state_transition(self.prev_state_name, to);
+        self.prev_state_name = to;
+        let _ = self.diag_state_tx.send(to);
+    }
+
     // -- Settings panel --
 
     /// Tray "Settings…": show the panel in the overlay window. Any overlay
@@ -441,26 +481,31 @@ impl OverlayApp {
             let effects = self.sm_handle(UiEvent::UserClose);
             self.execute_effects(effects, ctx);
         }
-        self.settings = Some(crate::settings::SettingsForm::from_config(
+        let form = crate::settings::SettingsForm::from_config(
             &crate::config::get(),
             self.model_names.clone(),
             self.sm.active_model(),
-        ));
+        );
+        self.settings_baseline = Some(form.clone());
+        self.settings = Some(form);
         self.capture_mouse_position();
         self.last_sent_pos = None;
         self.result_latch = None;
         self.last_desired_size = None;
         // Centered on the cursor's monitor from an estimated size; the real
         // size lands on the first frame and only grows the window in place.
-        let estimated = egui::vec2(overlay::OVERLAY_WIDTH + overlay::SHADOW_PAD * 2.0, 460.0);
+        let estimated = egui::vec2(overlay::SETTINGS_WIDTH + overlay::SHADOW_PAD * 2.0, 520.0);
         let pos = self.calculate_centered_position(estimated).map(|p| (p.x, p.y));
         if self.platform.show_window(pos) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         }
+        #[cfg(feature = "diagnostics")]
+        self.diag_transition("Settings");
         ctx.request_repaint();
     }
 
     fn close_settings(&mut self, ctx: &egui::Context) {
+        self.settings_baseline = None;
         if self.settings.take().is_none() {
             return;
         }
@@ -469,29 +514,40 @@ impl OverlayApp {
         self.spawn_position = None;
         self.last_sent_pos = None;
         self.last_desired_size = None;
+        #[cfg(feature = "diagnostics")]
+        self.diag_transition("Hidden");
     }
 
     /// Validate, write the file, apply it (reload) and switch the model if the
-    /// startup profile changed. Errors stay in the panel.
+    /// startup profile changed. The panel stays open and reports the outcome;
+    /// errors stay next to the buttons.
     fn save_settings(&mut self, ctx: &egui::Context) {
         let Some(form) = self.settings.as_mut() else { return };
         let saved = form
             .to_patch()
             .and_then(|patch| crate::settings::save(&patch).map(|path| (patch, path)));
-        match saved {
-            Err(msg) => form.error = Some(msg),
-            Ok((patch, path)) => {
-                info!("settings saved to {}", path.display());
-                self.close_settings(ctx);
-                self.reload_config(ctx);
-                if let Some(index) = patch
-                    .default_model
-                    .as_deref()
-                    .and_then(|name| self.model_names.iter().position(|n| n == name))
-                {
-                    self.select_model(ctx, index);
-                }
+        let (patch, path) = match saved {
+            Err(msg) => {
+                form.error = Some(msg);
+                form.notice = None;
+                return;
             }
+            Ok(ok) => ok,
+        };
+        info!("settings saved to {}", path.display());
+        let outcome = self.perform_reload();
+        crate::platform::update_tray_config(&format_reload_status(&outcome));
+        if let Some(index) = patch
+            .default_model
+            .as_deref()
+            .and_then(|name| self.model_names.iter().position(|n| n == name))
+        {
+            self.select_model(ctx, index);
+        }
+        if let Some(form) = self.settings.as_mut() {
+            form.error = None;
+            form.notice = Some(settings_notice(&outcome));
+            self.settings_baseline = Some(form.clone());
         }
     }
 
@@ -501,7 +557,8 @@ impl OverlayApp {
         let Some(form) = self.settings.as_mut() else {
             return overlay::OverlayOutput { action: overlay::OverlayAction::None, desired_size: None, content_size: None };
         };
-        let (action, output) = overlay::render_settings(ctx, form, path.as_deref());
+        let (action, output) =
+            overlay::render_settings(ctx, form, self.settings_baseline.as_ref(), path.as_deref());
         match action {
             overlay::SettingsAction::None => {}
             overlay::SettingsAction::StartDrag => ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag),
@@ -516,8 +573,23 @@ impl OverlayApp {
     /// clients when the profile set is unchanged, and report via the tray
     /// Config row (plus the overlay notice on failure).
     fn reload_config(&mut self, ctx: &egui::Context) {
+        let outcome = self.perform_reload();
+        let line = format_reload_status(&outcome);
+        info!("{line}");
+        crate::platform::update_tray_config(&line);
+        if matches!(outcome, ReloadOutcome::Failed(_)) {
+            // Failure needs attention now; success is visible in the tray row.
+            self.capture_mouse_position();
+            let effects = self.sm_handle(UiEvent::ClipboardError(line));
+            self.execute_effects(effects, ctx);
+        }
+    }
+
+    /// Re-read the file, swap it in and rebuild the model clients when the
+    /// profile set is unchanged. Pure of UI; callers report the outcome.
+    fn perform_reload(&mut self) -> ReloadOutcome {
         let previous = crate::config::get();
-        let outcome = match crate::config::reload() {
+        match crate::config::reload() {
             Err(reason) => ReloadOutcome::Failed(reason),
             Ok(path) => {
                 let current = crate::config::get();
@@ -546,15 +618,6 @@ impl OverlayApp {
                 };
                 ReloadOutcome::Applied { path, restart_needed, models_changed }
             }
-        };
-        let line = format_reload_status(&outcome);
-        info!("{line}");
-        crate::platform::update_tray_config(&line);
-        if matches!(outcome, ReloadOutcome::Failed(_)) {
-            // Failure needs attention now; success is visible in the tray row.
-            self.capture_mouse_position();
-            let effects = self.sm_handle(UiEvent::ClipboardError(line));
-            self.execute_effects(effects, ctx);
         }
     }
 
@@ -731,11 +794,7 @@ impl OverlayApp {
                     #[cfg(feature = "diagnostics")]
                     {
                         let to = self.sm.variant_name();
-                        self.diag
-                            .on_state_transition(self.prev_state_name, to);
-                        self.prev_state_name = to;
-                        // Notify scenario runner thread of state change.
-                        let _ = self.diag_state_tx.send(to);
+                        self.diag_transition(to);
                     }
                     self.think_expanded = false;
                     // Clear the debug snapshot on every area reset. For a worker
@@ -989,6 +1048,21 @@ impl OverlayApp {
                     let effects = self.sm_handle(UiEvent::UserClose);
                     self.execute_effects(effects, ctx);
                 }
+                crate::diagnostics::ScenarioAction::OpenSettings => self.open_settings(ctx),
+                crate::diagnostics::ScenarioAction::EditSettingsSample => {
+                    if let Some(form) = self.settings.as_mut() {
+                        form.secondary = "Klingon".into();
+                        form.default_mode = crate::ProcessMode::Summarize;
+                        form.single_tap_pinned = true;
+                        if let Some(t) = form.thinking.iter_mut().find(|(m, _)| *m == crate::ProcessMode::Summarize) {
+                            t.1 = Some(crate::ThinkingMode::Think);
+                        }
+                        form.error = Some("Double-tap window must be 100\u{2013}2000 ms.".into());
+                        ctx.memory_mut(|m| m.reset_areas());
+                        self.diag_transition("SettingsEdited");
+                    }
+                }
+                crate::diagnostics::ScenarioAction::CloseSettings => self.close_settings(ctx),
                 crate::diagnostics::ScenarioAction::Quit => {
                     info!("diag: all scenarios finished, exiting");
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1610,52 +1684,47 @@ impl eframe::App for OverlayApp {
             }
         });
 
-        if self.settings.is_some() && matches!(self.sm.state(), OverlayState::Hidden) {
-            let output = self.render_settings_panel(ctx);
-            self.update_viewport(ctx, output.desired_size, output.content_size);
-            match crate::platform::poll_tray_events(ctx) {
-                Some(crate::platform::TrayAction::SelectModel(index)) => self.select_model(ctx, index),
-                Some(crate::platform::TrayAction::ReloadConfig) => self.reload_config(ctx),
-                Some(crate::platform::TrayAction::OpenSettings) => {}
-                None => {}
-            }
-            return;
-        }
-
-        let elapsed = self.processing_elapsed();
-        let output = overlay::render(
-            self.sm.state(),
-            self.sm.mode(),
-            overlay::StreamingState {
-                text: self.sm.streaming_text(),
-                think_started: self.sm.think_started(),
-                retry_notice: self.sm.retry_notice(),
-                think_content: self.sm.think_content(),
-                think_expanded: self.think_expanded,
-                incomplete: self.sm.result_incomplete(),
-            },
-            self.sm.available_modes(),
-            self.preview_mode,
-            self.pending_content.as_ref().and_then(|c| c.text.as_deref()),
-            self.sm.rephrase_params(),
-            overlay::ThinkingState {
-                mode: self.sm.effective_thinking_mode(),
-                supported: self.sm.thinking_supported(),
-            },
-            self.sm.pinned(),
-            self.sm.auto_copy(),
-            self.sm.capture_source(),
-            self.sm.content_files(),
-            self.copy_confirmed_at.is_some(),
-            elapsed,
-            self.last_debug.is_some(),
-            self.last_debug.as_ref().and_then(format_completion_status),
-            self.model_count() > 1,
-            self.result_latch.map(|l| l.min_content_height),
-            ctx,
-        );
-
-        self.handle_overlay_action(ctx, output.action);
+        let output = if self.settings.is_some() && matches!(self.sm.state(), OverlayState::Hidden) {
+            // The settings panel borrows the window while the state machine
+            // stays Hidden; it has no overlay action to translate.
+            self.render_settings_panel(ctx)
+        } else {
+            let elapsed = self.processing_elapsed();
+            let mut output = overlay::render(
+                self.sm.state(),
+                self.sm.mode(),
+                overlay::StreamingState {
+                    text: self.sm.streaming_text(),
+                    think_started: self.sm.think_started(),
+                    retry_notice: self.sm.retry_notice(),
+                    think_content: self.sm.think_content(),
+                    think_expanded: self.think_expanded,
+                    incomplete: self.sm.result_incomplete(),
+                },
+                self.sm.available_modes(),
+                self.preview_mode,
+                self.pending_content.as_ref().and_then(|c| c.text.as_deref()),
+                self.sm.rephrase_params(),
+                overlay::ThinkingState {
+                    mode: self.sm.effective_thinking_mode(),
+                    supported: self.sm.thinking_supported(),
+                },
+                self.sm.pinned(),
+                self.sm.auto_copy(),
+                self.sm.capture_source(),
+                self.sm.content_files(),
+                self.copy_confirmed_at.is_some(),
+                elapsed,
+                self.last_debug.is_some(),
+                self.last_debug.as_ref().and_then(format_completion_status),
+                self.model_count() > 1,
+                self.result_latch.map(|l| l.min_content_height),
+                ctx,
+            );
+            let action = std::mem::replace(&mut output.action, overlay::OverlayAction::None);
+            self.handle_overlay_action(ctx, action);
+            output
+        };
         self.update_viewport(ctx, output.desired_size, output.content_size);
 
         // Diagnostics: record frame data + flush stale screenshots.
@@ -1664,7 +1733,7 @@ impl eframe::App for OverlayApp {
             use crate::diagnostics::FrameSnapshot;
             self.diag.record_frame(FrameSnapshot {
                 frame: self.diag.frame_counter(),
-                state: self.sm.variant_name(),
+                state: self.diag_state_name(),
                 mode: self.sm.mode().label(),
                 content_size: output.content_size.map(|v| [v.x, v.y]),
                 desired_size: output.desired_size.map(|v| [v.x, v.y]),
@@ -2325,6 +2394,19 @@ mod tests {
         assert_eq!(app.req_ok, 1);
         assert_eq!(app.req_err, 0);
         assert!(app.last_debug.is_some(), "current completion's debug snapshot must surface");
+    }
+
+    #[test]
+    fn settings_notice_lines() {
+        let path = std::path::PathBuf::from("/x/config.toml");
+        let ok = ReloadOutcome::Applied { path: path.clone(), restart_needed: vec![], models_changed: false };
+        assert_eq!(settings_notice(&ok), "Saved and applied.");
+        let restart = ReloadOutcome::Applied { path, restart_needed: vec!["[ui].tabs"], models_changed: false };
+        assert_eq!(settings_notice(&restart), "Saved. Restart to apply [ui].tabs.");
+        assert_eq!(
+            settings_notice(&ReloadOutcome::Failed("invalid TOML")),
+            "Saved, but reloading failed (invalid TOML) \u{2014} restart to apply."
+        );
     }
 
     // --- format_reload_status: tray Config row after "Reload Config" ---

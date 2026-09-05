@@ -28,7 +28,15 @@ pub struct SettingsForm {
     pub default_model: usize,
     /// Validation/save error shown in the panel.
     pub error: Option<String>,
+    /// Outcome of the last save, shown in the panel until the next edit.
+    pub notice: Option<String>,
 }
+
+/// Languages offered in the picker; anything else is typed in.
+pub const COMMON_LANGUAGES: &[&str] = &[
+    "Korean", "English", "Japanese", "Chinese", "German", "French", "Spanish", "Portuguese",
+    "Vietnamese", "Thai", "Indonesian",
+];
 
 /// Validated settings, ready to write.
 #[derive(Debug, Clone, PartialEq)]
@@ -64,6 +72,7 @@ impl SettingsForm {
             model_names,
             default_model,
             error: None,
+            notice: None,
         }
     }
 
