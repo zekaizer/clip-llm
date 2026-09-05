@@ -8,9 +8,9 @@ use eframe::egui::{self, Color32};
 pub mod font {
     /// Settings title.
     pub const TITLE: f32 = 16.0;
-    /// Content: picked text, the answer, error messages, status labels.
+    /// Content: picked text, the answer, error messages.
     pub const BODY: f32 = 15.0;
-    /// Tabs, the Think toggle, form row labels.
+    /// Tabs, every status-row label, the Think toggle, form row labels.
     pub const LABEL: f32 = 13.0;
     /// Pills, footer status, hints, text buttons.
     pub const CAPTION: f32 = 12.0;

@@ -58,9 +58,10 @@ Rules:
 role is added to the theme, never inlined.
 
 **Type scale** (`theme::font`): `TITLE` 16 (settings title), `BODY` 15
-(content: picked text, answer, error, status label), `LABEL` 13 (tabs,
-Think toggle, row labels), `CAPTION` 12 (pills, footer status, hints,
-buttons), `MICRO` 11 (section headers, thinking pills).
+(content: picked text, answer, error message), `LABEL` 13 (tabs, every
+status-row label — so the row keeps one weight across states — Think toggle,
+row labels), `CAPTION` 12 (pills, hints, buttons, elapsed time), `MICRO` 11
+(section headers, thinking pills).
 
 **Text tones** (`theme::color`): `TEXT` content and selected controls ·
 `TEXT_SOFT` form labels · `TEXT_SECONDARY` idle interactive controls ·
@@ -87,6 +88,9 @@ buttons, `FRAME_RADIUS` 12 for the panel.
 - **Escape** closes (a dropdown first, in Settings). **Enter** runs the
   primary action in Result. **Cmd/Ctrl+C** copies the whole answer unless a
   selection exists. **Cmd/Ctrl+S** saves in Settings.
+- **←/→** step through the available tabs, **Cmd/Ctrl+1…5** jump to a tab
+  (Result and Error). **↑/↓**, **PageUp/PageDown/Space**, **Home/End** scroll
+  the body text.
 - Dragging anywhere on the panel moves it; dragging the grip resizes it.
 - A state with an in-flight operation always offers **Cancel**; Error always
   offers **Retry** when content exists. Actions are icon buttons with a

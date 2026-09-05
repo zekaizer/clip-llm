@@ -261,7 +261,7 @@ fn view_capturing(
             (None, CaptureSource::Selection) => "Copying selection...",
             (None, CaptureSource::Clipboard) => "Reading clipboard...",
         };
-        status_row(ui, picking_text.is_none(), theme::text(label, font::BODY, color::TEXT), elapsed);
+        status_row(ui, picking_text.is_none(), theme::text(label, font::LABEL, color::TEXT), elapsed);
     });
     slots.body(|body| {
         if let Some(text) = picking_text {
@@ -290,16 +290,16 @@ fn view_processing(
         if let Some(notice) = streaming.retry_notice {
             // A silent retry is indistinguishable from a slow first attempt,
             // so say so (WARNING = degraded, not failed).
-            status_row(ui, true, theme::text(notice, font::BODY, color::WARNING), elapsed);
+            status_row(ui, true, theme::text(notice, font::LABEL, color::WARNING), elapsed);
         } else if streaming.think_started && streaming.text.is_empty() {
-            status_row(ui, true, theme::text("Thinking...", font::BODY, color::TEXT_MUTED), elapsed);
+            status_row(ui, true, theme::text("Thinking...", font::LABEL, color::TEXT_MUTED), elapsed);
         } else if streaming.think_started {
             // Think done, answer streaming: the collapsed header Result will
             // show, locked.
             let label = theme::text("\u{25b6} Thinking", font::LABEL, color::TEXT_MUTED);
             status_row(ui, false, label, elapsed);
         } else {
-            let label = theme::text(mode.processing_label(), font::BODY, color::TEXT);
+            let label = theme::text(mode.processing_label(), font::LABEL, color::TEXT);
             status_row(ui, true, label, elapsed);
         }
     });
@@ -327,7 +327,7 @@ fn view_error(
     action: &mut OverlayAction,
 ) {
     slots.status(|ui| {
-        status_row(ui, false, theme::text("\u{2715} Request failed", font::BODY, color::DANGER), None);
+        status_row(ui, false, theme::text("\u{2715} Request failed", font::LABEL, color::DANGER), None);
     });
     slots.body(|body| body.fill_text("error", message, color::TEXT, false));
     slots.footer(|ui| {
@@ -371,7 +371,7 @@ fn view_result(
             *action = OverlayAction::ToggleThink;
         }
         if let Some(status) = footer.completion_status {
-            let label = theme::text(status, font::CAPTION, color::TEXT_MUTED);
+            let label = theme::text(status, font::LABEL, color::TEXT_MUTED);
             if footer.model_switchable {
                 // The label names the model that answered, so it doubles as
                 // the "ask another model" control when profiles exist.
