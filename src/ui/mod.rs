@@ -645,6 +645,7 @@ impl OverlayApp {
             form,
             self.settings_baseline.as_ref(),
             path.as_deref(),
+            self.panel_size,
             test,
             caps,
         );
@@ -654,6 +655,11 @@ impl OverlayApp {
             overlay::SettingsAction::Cancel => self.close_settings(ctx),
             overlay::SettingsAction::OpenConfig => crate::platform::open_config_file(),
             overlay::SettingsAction::Save => self.save_settings(ctx),
+            overlay::SettingsAction::ResetPanelSize => {
+                // The overlay is hidden behind the panel: no anchor needed.
+                self.panel_size = theme::size::DEFAULT_PANEL;
+                persist_ui_value("panel_size", None);
+            }
             overlay::SettingsAction::TestProfile(index) => self.start_profile_test(ctx, index),
         }
         output

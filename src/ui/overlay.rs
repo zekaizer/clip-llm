@@ -446,6 +446,8 @@ pub enum SettingsAction {
     StartDrag,
     /// Run a live connection test for the profile at this index.
     TestProfile(usize),
+    /// Back to the default overlay size (removes `[ui].panel_size`).
+    ResetPanelSize,
 }
 
 /// Connection-test state shown inside a profile editor.
@@ -464,6 +466,8 @@ pub fn render_settings<'t>(
     form: &mut crate::settings::SettingsForm,
     baseline: Option<&crate::settings::SettingsForm>,
     config_path: Option<&str>,
+    // Current overlay panel size, shown read-only with a reset.
+    panel_size: egui::Vec2,
     test: impl Fn(usize) -> ProfileTestView<'t>,
     caps: impl Fn(&str) -> Option<String>,
 ) -> (SettingsAction, OverlayOutput) {
@@ -512,7 +516,7 @@ pub fn render_settings<'t>(
                     }
                     _ => {
                         form.editing = None;
-                        render_settings_body(ui, form, &caps, &mut action, dirty);
+                        render_settings_body(ui, form, &caps, panel_size, &mut action, dirty);
                     }
                 }
             });
@@ -544,6 +548,7 @@ fn render_settings_body(
     ui: &mut egui::Ui,
     form: &mut crate::settings::SettingsForm,
     caps: &impl Fn(&str) -> Option<String>,
+    panel_size: egui::Vec2,
     action: &mut SettingsAction,
     dirty: bool,
 ) {
@@ -609,6 +614,20 @@ fn render_settings_body(
                     }
                     if pill_with_tip(ui, "after double-tap", form.double_tap_pinned, tip) {
                         form.double_tap_pinned = !form.double_tap_pinned;
+                    }
+                });
+                ui.end_row();
+                // Read-only: the grip is the control; this makes it discoverable
+                // and offers the way back.
+                row_label(ui, "Overlay size");
+                ui.horizontal(|ui| {
+                    let size = format!("{} \u{d7} {} pt", panel_size.x.round(), panel_size.y.round());
+                    ui.label(theme::text(size, font::CAPTION, color::text_muted()))
+                        .on_hover_text("Drag the overlay's bottom-right grip to change it");
+                    if (panel_size - size::DEFAULT_PANEL).length() > 0.5
+                        && ui.add(small_button("Reset to default")).clicked()
+                    {
+                        *action = SettingsAction::ResetPanelSize;
                     }
                 });
                 ui.end_row();
@@ -1147,6 +1166,7 @@ mod tests {
                 &mut form,
                 None,
                 Some("/tmp/config.toml"),
+                size::DEFAULT_PANEL,
                 |_| ProfileTestView::Idle,
                 |_| None,
             ));
