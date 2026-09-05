@@ -128,7 +128,11 @@ file holds these kinds of settings:
   tab-bar order; the first entry is the mode selected at startup (reorder-only —
   modes can't be hidden). `panel_size = [512, 380]` is the overlay size in
   points — written automatically when you drag the resize grip, removed when
-  you double-click it (built-in default).
+  you double-click it (built-in default). `position = "cursor"` (default)
+  centers the overlay on the trigger point; `"remembered"` reopens it where
+  you last left it (the app writes `panel_position` for you). `zoom = 1.0`
+  scales the whole UI (0.5–3.0); Cmd/Ctrl +/−/0 change it at runtime and the
+  value is written back.
 - **per-mode thinking** — `[translate|rephrase|summarize|explain|transcribe].thinking =
   "think" | "no_think"` overrides that mode's default thinking (built-ins:
   translate/rephrase/transcribe = `no_think`, summarize/explain = `think`); applies only

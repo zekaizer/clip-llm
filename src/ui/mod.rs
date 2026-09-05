@@ -18,6 +18,7 @@ use crate::platform::{ModifierState, NativePlatform, Platform};
 use crate::worker::{ProcessTask, WorkerCommand, WorkerResponse};
 
 pub use state_machine::OverlayState;
+use crate::config::PanelPlacement;
 use state_machine::{StateMachine, UiEffect, UiEvent};
 
 /// Polling interval for diagnostics scenario runner.
@@ -138,12 +139,13 @@ fn format_retry_label(
 /// within `OVERLAY_WIDTH`.
 const MODEL_LABEL_MAX_CHARS: usize = 24;
 
-/// Remember the grip's result in `[ui].panel_size` (`None` = back to the
-/// default). A failed write only costs the user the size on next launch.
-fn persist_panel_size(size: Option<(f32, f32)>) {
-    match crate::settings::save_panel_size(size) {
-        Ok(path) => debug!("panel size {size:?} saved to {}", path.display()),
-        Err(e) => warn!("panel size not saved: {e}"),
+/// Remember a value the UI owns (`[ui].panel_size` / `panel_position` /
+/// `zoom`; `None` removes the key). A failed write only costs the user that
+/// preference on the next launch.
+fn persist_ui_value(key: &str, value: Option<toml_edit::Value>) {
+    match crate::settings::save_ui_value(key, value) {
+        Ok(path) => debug!("[ui].{key} saved to {}", path.display()),
+        Err(e) => warn!("[ui].{key} not saved: {e}"),
     }
 }
 
@@ -215,6 +217,17 @@ pub struct OverlayApp {
     /// Panel (frame incl. margin) size: `[ui].panel_size` at startup, then
     /// whatever the grip set (docs/UI-GUIDELINES.md §1).
     panel_size: egui::Vec2,
+    /// `[ui].position`: center on the cursor, or reopen where last left.
+    placement: PanelPlacement,
+    /// Screen top-left to reopen at (`Remembered` only); refreshed on hide.
+    remembered_pos: Option<egui::Pos2>,
+    /// `[ui].zoom` as last written; compared on hide to persist keyboard zoom.
+    saved_zoom: f32,
+    /// Zoom factor seen by the last viewport pass — a change re-sends the
+    /// window size, which eframe converts with the new pixels-per-point.
+    last_zoom: f32,
+    /// `[ui].zoom` has been applied to the context (first frame).
+    zoom_applied: bool,
     /// The window position last actually applied (native reposition or
     /// `OuterPosition`), so repeated per-frame repositioning to the same spot
     /// is skipped. `send_viewport_cmd` internally triggers `request_repaint`,
@@ -349,6 +362,11 @@ impl OverlayApp {
             last_content_size: None,
             last_sent_pos: None,
             panel_size: panel_size_from_config(),
+            placement: crate::config::get().ui_placement(),
+            remembered_pos: crate::config::get().ui_panel_position().map(|(x, y)| egui::pos2(x, y)),
+            saved_zoom: crate::config::get().ui_zoom(),
+            last_zoom: 1.0,
+            zoom_applied: false,
             resize_anchor: None,
             think_expanded: false,
             processing_request_id: None,
@@ -409,6 +427,11 @@ impl OverlayApp {
             last_content_size: None,
             last_sent_pos: None,
             panel_size: panel_size_from_config(),
+            placement: crate::config::get().ui_placement(),
+            remembered_pos: crate::config::get().ui_panel_position().map(|(x, y)| egui::pos2(x, y)),
+            saved_zoom: crate::config::get().ui_zoom(),
+            last_zoom: 1.0,
+            zoom_applied: false,
             resize_anchor: None,
             think_expanded: false,
             processing_request_id: None,
@@ -853,6 +876,8 @@ impl OverlayApp {
                         let _ = self.diag_state_tx.send("Hidden");
                     }
                     ctx.memory_mut(|m| m.reset_areas());
+                    self.remember_position(ctx);
+                    self.persist_zoom(ctx);
                     self.hide_window(ctx);
                     self.spawn_position = None;
                     self.last_sent_pos = None;
@@ -1358,11 +1383,17 @@ impl OverlayApp {
         Some(centered_position_screen(cursor, win_size, scale, bounds))
     }
 
-    /// Position for this frame's reposition pass: centered on the spawn point,
-    /// except during a grip drag, which keeps the top-left the drag started
-    /// from (clamped only if the panel would leave the display work area).
+    /// Position for this frame's reposition pass (`win_size` in OS points —
+    /// see `os_window_size`): centered on the spawn point, except during a
+    /// grip drag, which keeps the top-left the drag started from, or with
+    /// `Remembered` placement, which reopens at the stored top-left. Anchors
+    /// are clamped only if the panel would leave the display work area.
     fn calculate_target_position(&self, win_size: egui::Vec2) -> Option<egui::Pos2> {
-        if let Some(anchor) = self.resize_anchor {
+        let anchor = self.resize_anchor.or(match self.placement {
+            PanelPlacement::Remembered => self.remembered_pos,
+            PanelPlacement::Cursor => None,
+        });
+        if let Some(anchor) = anchor {
             let (bounds, scale) = self.spawn_bounds_and_scale();
             return Some(anchored_position_screen(anchor, win_size, scale, bounds));
         }
@@ -1391,13 +1422,49 @@ impl OverlayApp {
         {
             return Some(pos);
         }
+        // egui points → OS points is the zoom factor; → screen units the
+        // platform scale (1 on macOS, the DPI factor on Windows).
         let (_, scale) = self.spawn_bounds_and_scale();
-        ctx.input(|i| i.viewport().outer_rect).map(|r| (r.min.to_vec2() * scale).to_pos2())
+        let zoom = ctx.zoom_factor();
+        ctx.input(|i| i.viewport().outer_rect).map(|r| (r.min.to_vec2() * zoom * scale).to_pos2())
     }
 
-    /// Window size for the current panel size (frame plus shadow pad).
+    /// Window size in egui points for the current panel size (frame plus
+    /// shadow pad) — what `ViewportCommand::InnerSize` takes.
     fn window_size(&self) -> egui::Vec2 {
         self.panel_size.max(theme::size::MIN_PANEL) + egui::Vec2::splat(theme::size::SHADOW_PAD * 2.0)
+    }
+
+    /// The same in OS points — what positioning math takes: eframe scales
+    /// `InnerSize` by the zoom factor when it reaches the window.
+    fn os_window_size(&self, ctx: &egui::Context) -> egui::Vec2 {
+        self.window_size() * ctx.zoom_factor()
+    }
+
+    /// `Remembered` placement: store where the window is (before it hides)
+    /// for the next trigger and the next launch.
+    fn remember_position(&mut self, ctx: &egui::Context) {
+        if self.placement != PanelPlacement::Remembered {
+            return;
+        }
+        let Some(pos) = self.current_top_left_screen(ctx) else { return };
+        if self.remembered_pos.is_some_and(|p| (p - pos).length() < 1.0) {
+            return;
+        }
+        self.remembered_pos = Some(pos);
+        persist_ui_value("panel_position", Some(crate::settings::point_pair(pos.x, pos.y)));
+    }
+
+    /// Persist a zoom the user changed with Cmd/Ctrl +/−/0 (egui handles the
+    /// keys); called on hide so a session's zoom survives a restart.
+    fn persist_zoom(&mut self, ctx: &egui::Context) {
+        let zoom = ctx.zoom_factor();
+        if (zoom - self.saved_zoom).abs() < 1e-3 {
+            return;
+        }
+        self.saved_zoom = zoom;
+        let rounded = f64::from((zoom * 100.0).round() / 100.0);
+        persist_ui_value("zoom", Some(toml_edit::Value::from(rounded)));
     }
 
     /// Apply a new panel size, anchoring the window's top-left for the
@@ -1437,7 +1504,7 @@ impl OverlayApp {
         let pos = if self.sm.user_repositioned() {
             None
         } else {
-            self.calculate_centered_position(self.window_size()).map(|p| (p.x, p.y))
+            self.calculate_target_position(self.os_window_size(ctx)).map(|p| (p.x, p.y))
         };
 
         if self.platform.show_window(pos) {
@@ -1452,7 +1519,7 @@ impl OverlayApp {
         let pos = if self.sm.user_repositioned() {
             None
         } else {
-            self.calculate_centered_position(self.window_size()).map(|p| (p.x, p.y))
+            self.calculate_target_position(self.os_window_size(ctx)).map(|p| (p.x, p.y))
         };
 
         if self.platform.show_window_no_activate(pos) {
@@ -1577,6 +1644,13 @@ impl OverlayApp {
     ) {
         self.last_content_size = content_size;
         let Some(size) = desired else { return };
+        let zoom = ctx.zoom_factor();
+        if zoom != self.last_zoom {
+            // The window's pixel size follows egui points × zoom, so the same
+            // point size must be re-sent after a zoom change.
+            self.last_zoom = zoom;
+            self.last_desired_size = None;
+        }
         if self.last_desired_size != Some(size) {
             self.last_desired_size = Some(size);
             // Every window resize is a potential whole-window flash on macOS
@@ -1601,7 +1675,7 @@ impl OverlayApp {
         // re-asserting its anchor, see `resize_anchor`.
         let owns_placement = !self.sm.user_repositioned() || self.resize_anchor.is_some();
         if !matches!(self.sm.state(), OverlayState::Hidden) && owns_placement {
-            self.reposition_window(ctx, size);
+            self.reposition_window(ctx, size * zoom);
         }
     }
 
@@ -1630,11 +1704,12 @@ impl OverlayApp {
             }
             overlay::OverlayAction::ResetSize => {
                 self.set_panel_size(ctx, theme::size::DEFAULT_PANEL);
-                persist_panel_size(None);
+                persist_ui_value("panel_size", None);
                 UiEvent::UserResize
             }
             overlay::OverlayAction::ResizeDone => {
-                persist_panel_size(Some((self.panel_size.x, self.panel_size.y)));
+                let size = crate::settings::point_pair(self.panel_size.x, self.panel_size.y);
+                persist_ui_value("panel_size", Some(size));
                 return;
             }
             overlay::OverlayAction::SwitchMode(mode) => UiEvent::UserSwitchMode(mode),
@@ -1780,6 +1855,10 @@ impl OverlayApp {
 
 impl eframe::App for OverlayApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.zoom_applied {
+            self.zoom_applied = true;
+            ctx.set_zoom_factor(self.saved_zoom);
+        }
         let startup_settled = self.initial_hide_done;
         self.maybe_initial_hide(ctx);
 
@@ -2827,5 +2906,63 @@ mod tests {
         // A request for a repaint is the observable "do something" here: the
         // native show has no egui footprint on macOS.
         assert!(full.viewport_output.values().any(|v| v.repaint_delay.is_zero()));
+    }
+
+    // --- placement and zoom ---
+
+    /// `Remembered` placement reopens at the stored top-left instead of
+    /// centering on the cursor; the grip anchor still wins during a drag.
+    #[test]
+    fn remembered_placement_anchors_the_stored_position() {
+        let _lock = crate::clipboard::test_support::lock_clipboard();
+        let (mut app, _resp_tx) = new_test_app();
+        app.spawn_position = Some(egui::pos2(900.0, 900.0));
+        let win = egui::vec2(552.0, 420.0);
+
+        app.placement = PanelPlacement::Remembered;
+        app.remembered_pos = None;
+        let centered = app.calculate_target_position(win);
+        app.remembered_pos = Some(egui::pos2(300.0, 400.0));
+        // No display bounds in tests (mock platform), so the anchor passes through.
+        assert_eq!(app.calculate_target_position(win), Some(egui::pos2(300.0, 400.0)));
+        assert_ne!(centered, Some(egui::pos2(300.0, 400.0)), "without a stored position it centers");
+
+        // Inside the mock display's work area, so no clamping applies.
+        app.resize_anchor = Some(egui::pos2(60.0, 80.0));
+        assert_eq!(app.calculate_target_position(win), Some(egui::pos2(60.0, 80.0)));
+    }
+
+    /// A zoom change re-sends the (unchanged) point size, so eframe applies
+    /// the new pixels-per-point to the window; the same size at the same zoom
+    /// is not re-sent.
+    #[test]
+    fn zoom_change_resends_the_window_size() {
+        let _lock = crate::clipboard::test_support::lock_clipboard();
+        let (mut app, _resp_tx) = new_test_app();
+        let ctx = egui::Context::default();
+        let win = app.window_size();
+        let inner_sizes = |full: &egui::FullOutput| {
+            full.viewport_output
+                .values()
+                .flat_map(|v| v.commands.iter())
+                .filter(|c| matches!(c, egui::ViewportCommand::InnerSize(_)))
+                .count()
+        };
+
+        let first = ctx.run(egui::RawInput::default(), |ctx| {
+            app.update_viewport(ctx, Some(win), Some(app.panel_size));
+        });
+        assert_eq!(inner_sizes(&first), 1);
+        let same = ctx.run(egui::RawInput::default(), |ctx| {
+            app.update_viewport(ctx, Some(win), Some(app.panel_size));
+        });
+        assert_eq!(inner_sizes(&same), 0, "unchanged size and zoom: nothing sent");
+
+        let _ = ctx.run(egui::RawInput::default(), |ctx| ctx.set_zoom_factor(1.5));
+        let zoomed = ctx.run(egui::RawInput::default(), |ctx| {
+            assert_eq!(ctx.zoom_factor(), 1.5);
+            app.update_viewport(ctx, Some(win), Some(app.panel_size));
+        });
+        assert_eq!(inner_sizes(&zoomed), 1, "zoom changed: size re-sent");
     }
 }

@@ -466,6 +466,25 @@ struct UiConfig {
     /// Overlay panel size in points, `[width, height]`. Written by the resize
     /// grip; absent = the built-in default.
     panel_size: Option<[f32; 2]>,
+    /// Where the overlay appears: `"cursor"` (default — centered on the
+    /// trigger point) or `"remembered"` (where it was last left, see
+    /// `panel_position`).
+    position: Option<String>,
+    /// Screen top-left the overlay was last left at. Written by the app when
+    /// `position = "remembered"`.
+    panel_position: Option<[f32; 2]>,
+    /// UI zoom factor, 0.5–3.0 (default 1.0). Cmd/Ctrl +/−/0 change it at
+    /// runtime and the app writes the result back.
+    zoom: Option<f32>,
+}
+
+/// `[ui].position` — where the overlay appears on a trigger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelPlacement {
+    /// Centered on the trigger point (the cursor).
+    Cursor,
+    /// Where the user last left it (`[ui].panel_position`).
+    Remembered,
 }
 
 /// `[languages]` — substituted into `{primary_lang}` / `{secondary_lang}`.
@@ -763,6 +782,25 @@ impl Config {
     pub fn ui_panel_size(&self) -> Option<(f32, f32)> {
         let [w, h] = self.ui.panel_size?;
         (w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0).then_some((w, h))
+    }
+
+    /// `[ui].position`; anything but `"remembered"` means the cursor.
+    pub fn ui_placement(&self) -> PanelPlacement {
+        match self.ui.position.as_deref().map(str::trim) {
+            Some(s) if s.eq_ignore_ascii_case("remembered") => PanelPlacement::Remembered,
+            _ => PanelPlacement::Cursor,
+        }
+    }
+
+    /// `[ui].panel_position` (screen top-left), if finite.
+    pub fn ui_panel_position(&self) -> Option<(f32, f32)> {
+        let [x, y] = self.ui.panel_position?;
+        (x.is_finite() && y.is_finite()).then_some((x, y))
+    }
+
+    /// `[ui].zoom` clamped to 0.5–3.0; 1.0 when unset or not a number.
+    pub fn ui_zoom(&self) -> f32 {
+        self.ui.zoom.filter(|z| z.is_finite()).map_or(1.0, |z| z.clamp(0.5, 3.0))
     }
 
     /// Tab-bar display order (`[ui].tabs`). Order-only semantics: listed modes
@@ -1228,6 +1266,8 @@ fn starter_template() -> String {
     ));
     t.push_str(&s("default_model", "", "model profile active at startup (a [[models]] name or the [api] model); unset = first"));
     t.push_str(&r("panel_size", "[512, 380]", "overlay size in points; the resize grip writes this, double-click it to reset"));
+    t.push_str(&s("position", "cursor", "\"cursor\" = centered on the trigger point; \"remembered\" = where you last left it (panel_position is written for you)"));
+    t.push_str(&r("zoom", "1.0", "UI scale 0.5-3.0; Cmd/Ctrl +/- change it at runtime and it is written back"));
     t.push('\n');
 
     // [languages] — substituted into {primary_lang} / {secondary_lang}.
@@ -1935,6 +1975,26 @@ X-Test = "1"
         assert!(!config.ui_single_tap_pinned());
         assert!(!config.ui_double_tap_pinned());
         assert_eq!(config.ui_panel_size(), None);
+    }
+
+    #[test]
+    fn ui_placement_zoom_and_position_parse_with_safe_defaults() {
+        let c: Config = toml::from_str(
+            "[ui]\nposition = \"Remembered\"\npanel_position = [120, 80]\nzoom = 1.25\n",
+        )
+        .unwrap();
+        assert_eq!(c.ui_placement(), PanelPlacement::Remembered);
+        assert_eq!(c.ui_panel_position(), Some((120.0, 80.0)));
+        assert_eq!(c.ui_zoom(), 1.25);
+
+        let d = Config::default();
+        assert_eq!(d.ui_placement(), PanelPlacement::Cursor);
+        assert_eq!(d.ui_panel_position(), None);
+        assert_eq!(d.ui_zoom(), 1.0);
+
+        let odd: Config = toml::from_str("[ui]\nposition = \"corner\"\nzoom = 9.0\n").unwrap();
+        assert_eq!(odd.ui_placement(), PanelPlacement::Cursor);
+        assert_eq!(odd.ui_zoom(), 3.0, "clamped");
     }
 
     #[test]

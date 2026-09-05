@@ -503,32 +503,30 @@ pub fn save_to(path: &Path, patch: &SettingsPatch) -> Result<PathBuf, String> {
     edit_file(path, |doc| apply_patch(doc, patch))
 }
 
-/// Write `[ui].panel_size` (points, rounded) to the file at `path`, or
-/// remove the key for `None` (back to the built-in default).
-pub fn save_panel_size_to(path: &Path, size: Option<(f32, f32)>) -> Result<PathBuf, String> {
-    edit_file(path, |doc| apply_panel_size(doc, size))
-}
-
-/// `save_panel_size_to` on the active config file, creating the starter file
-/// first when none exists yet.
-pub fn save_panel_size(size: Option<(f32, f32)>) -> Result<PathBuf, String> {
+/// Write one `[ui]` key in place in the active config file (created from the
+/// starter first when missing); `None` removes the key. Used for the values
+/// the UI itself remembers: panel size and position, zoom.
+pub fn save_ui_value(key: &str, value: Option<toml_edit::Value>) -> Result<PathBuf, String> {
     let path = crate::config::ensure_config_file().ok_or("no writable config path")?;
-    save_panel_size_to(&path, size)
+    edit_file(&path, |doc| apply_ui_value(doc, key, value))
 }
 
-pub fn apply_panel_size(doc: &mut toml_edit::Document, size: Option<(f32, f32)>) {
+pub fn apply_ui_value(doc: &mut toml_edit::Document, key: &str, value: Option<toml_edit::Value>) {
     let ui = section(doc, "ui");
-    match size {
-        Some((w, h)) => {
-            let mut arr = toml_edit::Array::new();
-            arr.push(w.round() as i64);
-            arr.push(h.round() as i64);
-            set_scalar(ui, "panel_size", toml_edit::Value::Array(arr));
-        }
+    match value {
+        Some(v) => set_scalar(ui, key, v),
         None => {
-            ui.remove("panel_size");
+            ui.remove(key);
         }
     }
+}
+
+/// `[a, b]` as rounded integers — sizes and positions in points.
+pub fn point_pair(a: f32, b: f32) -> toml_edit::Value {
+    let mut arr = toml_edit::Array::new();
+    arr.push(a.round() as i64);
+    arr.push(b.round() as i64);
+    toml_edit::Value::Array(arr)
 }
 
 /// Parse the TOML file at `path`, let `edit` change the document in place
@@ -878,17 +876,17 @@ model = "gone"
     }
 
     #[test]
-    fn apply_panel_size_writes_rounded_points_and_none_removes_the_key() {
+    fn apply_ui_value_writes_rounded_points_and_none_removes_the_key() {
         let mut doc: toml_edit::Document =
             "# keep me\n[ui]\nsingle_tap_pinned = true\n".parse().unwrap();
-        apply_panel_size(&mut doc, Some((640.4, 419.6)));
+        apply_ui_value(&mut doc, "panel_size", Some(point_pair(640.4, 419.6)));
         let text = doc.to_string();
         assert!(text.contains("panel_size = [640, 420]"), "{text}");
         assert!(text.contains("# keep me") && text.contains("single_tap_pinned = true"), "{text}");
         let cfg: crate::config::Config = toml::from_str(&text).unwrap();
         assert_eq!(cfg.ui_panel_size(), Some((640.0, 420.0)));
 
-        apply_panel_size(&mut doc, None);
+        apply_ui_value(&mut doc, "panel_size", None);
         let text = doc.to_string();
         assert!(!text.contains("panel_size"), "{text}");
         assert!(text.contains("single_tap_pinned = true"), "{text}");

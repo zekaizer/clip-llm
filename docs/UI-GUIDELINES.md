@@ -17,9 +17,13 @@ spacing of their own.
   Double-clicking the grip restores the default and removes the key.
 - The size is clamped to `theme::size::MIN_PANEL` so the header row and one
   text line plus the footer always fit.
-- Placement: the panel is centered on the trigger point (the cursor) on each
-  new trigger. Once the user drags or resizes it, placement is theirs until
-  the next trigger.
+- Placement (`[ui].position`): by default the panel is centered on the
+  trigger point (the cursor) on each new trigger; `"remembered"` reopens it
+  where it was last left (stored in `[ui].panel_position` on hide). Once the
+  user drags or resizes it, placement is theirs until the next trigger.
+- Zoom (`[ui].zoom`, Cmd/Ctrl +/−/0 at runtime): scales everything; the
+  panel size stays in points, so the window grows with the zoom. Positioning
+  math works in OS points (`os_window_size`), never in egui points.
 
 Why fixed: content-driven sizing made the window jump between Processing
 and Result and needed a stack of workarounds (latched heights, per-row
