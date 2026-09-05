@@ -801,6 +801,25 @@ impl LlmClient {
         &self.0.model
     }
 
+    /// One tiny round trip to prove the profile works end to end (auth, URL,
+    /// model name). Returns a short human-readable line for the settings panel.
+    pub async fn test_connection(&self) -> Result<String, ApiError> {
+        let started = std::time::Instant::now();
+        let mut capture = DebugCapture::default();
+        let content = ClipboardContent::text_only("Reply with the single word OK.".into());
+        let reply = self
+            .complete(&content, ProcessMode::Rephrase, RephraseParams::default(), ThinkingMode::NoThink, &mut capture)
+            .await?;
+        let visible = crate::api::response::strip_think_blocks(&reply);
+        let snippet: String = visible.trim().chars().take(40).collect();
+        let secs = started.elapsed().as_secs_f32();
+        Ok(if snippet.is_empty() {
+            format!("Connected in {secs:.1}s (empty reply)")
+        } else {
+            format!("Connected in {secs:.1}s \u{b7} \"{snippet}\"")
+        })
+    }
+
     /// Build a client for one model profile. `CLIP_LLM_*` environment variables
     /// apply only when `spec.from_api_section`; a `[[models]]` entry missing a
     /// required setting fails with [`ApiError::InvalidConfig`] naming the profile.

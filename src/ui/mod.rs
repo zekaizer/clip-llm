@@ -194,6 +194,10 @@ pub struct OverlayApp {
     settings: Option<crate::settings::SettingsForm>,
     /// The form as opened / last saved; the panel's dirty state is form != baseline.
     settings_baseline: Option<crate::settings::SettingsForm>,
+    /// In-flight "Test connection" (profile index, result channel).
+    profile_test: Option<(usize, mpsc::Receiver<Result<String, String>>)>,
+    /// Last finished connection test (profile index, outcome).
+    profile_test_result: Option<(usize, Result<String, String>)>,
     /// Tap events from coordinator thread (hotkey detection runs off-UI).
     tap_rx: mpsc::Receiver<TapEvent>,
     /// Cached desired_size to avoid redundant send_viewport_cmd calls.
@@ -339,6 +343,8 @@ impl OverlayApp {
             model_names: Vec::new(),
             settings: None,
             settings_baseline: None,
+            profile_test: None,
+            profile_test_result: None,
             tap_rx,
             last_desired_size: None,
             last_content_size: None,
@@ -395,6 +401,8 @@ impl OverlayApp {
             model_names: Vec::new(),
             settings: None,
             settings_baseline: None,
+            profile_test: None,
+            profile_test_result: None,
             tap_rx,
             last_desired_size: None,
             last_content_size: None,
@@ -481,13 +489,12 @@ impl OverlayApp {
             let effects = self.sm_handle(UiEvent::UserClose);
             self.execute_effects(effects, ctx);
         }
-        let form = crate::settings::SettingsForm::from_config(
-            &crate::config::get(),
-            self.model_names.clone(),
-            self.sm.active_model(),
-        );
+        let active = self.model_names.get(self.sm.active_model()).map(String::as_str);
+        let form = crate::settings::SettingsForm::from_config(&crate::config::get(), active);
         self.settings_baseline = Some(form.clone());
         self.settings = Some(form);
+        self.profile_test = None;
+        self.profile_test_result = None;
         self.capture_mouse_position();
         self.last_sent_pos = None;
         self.result_latch = None;
@@ -506,6 +513,8 @@ impl OverlayApp {
 
     fn close_settings(&mut self, ctx: &egui::Context) {
         self.settings_baseline = None;
+        self.profile_test = None;
+        self.profile_test_result = None;
         if self.settings.take().is_none() {
             return;
         }
@@ -554,17 +563,44 @@ impl OverlayApp {
     /// Render the settings panel for this frame and act on its result.
     fn render_settings_panel(&mut self, ctx: &egui::Context) -> overlay::OverlayOutput {
         let path = crate::config::candidate_path().map(|p| p.display().to_string());
+        // Collect a finished connection test before rendering.
+        if let Some((index, rx)) = &self.profile_test {
+            match rx.try_recv() {
+                Ok(result) => {
+                    self.profile_test_result = Some((*index, result));
+                    self.profile_test = None;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.profile_test_result = Some((*index, Err("test thread died".into())));
+                    self.profile_test = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        let running = self.profile_test.as_ref().map(|(i, _)| *i);
+        let result = self.profile_test_result.as_ref();
+        let test = |i: usize| -> overlay::ProfileTestView {
+            if running == Some(i) {
+                overlay::ProfileTestView::Running
+            } else {
+                match result {
+                    Some((idx, r)) if *idx == i => overlay::ProfileTestView::Done(r),
+                    _ => overlay::ProfileTestView::Idle,
+                }
+            }
+        };
         let Some(form) = self.settings.as_mut() else {
             return overlay::OverlayOutput { action: overlay::OverlayAction::None, desired_size: None, content_size: None };
         };
         let (action, output) =
-            overlay::render_settings(ctx, form, self.settings_baseline.as_ref(), path.as_deref());
+            overlay::render_settings(ctx, form, self.settings_baseline.as_ref(), path.as_deref(), test);
         match action {
             overlay::SettingsAction::None => {}
             overlay::SettingsAction::StartDrag => ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag),
             overlay::SettingsAction::Cancel => self.close_settings(ctx),
             overlay::SettingsAction::OpenConfig => crate::platform::open_config_file(),
             overlay::SettingsAction::Save => self.save_settings(ctx),
+            overlay::SettingsAction::TestProfile(index) => self.start_profile_test(ctx, index),
         }
         output
     }
@@ -585,8 +621,40 @@ impl OverlayApp {
         }
     }
 
-    /// Re-read the file, swap it in and rebuild the model clients when the
-    /// profile set is unchanged. Pure of UI; callers report the outcome.
+    /// "Test connection" for the profile being edited: build a client from the
+    /// form's current values and run one tiny request on a helper thread.
+    fn start_profile_test(&mut self, ctx: &egui::Context, index: usize) {
+        let Some(profile) = self.settings.as_ref().and_then(|f| f.profiles.get(index)) else { return };
+        let spec = match profile.to_spec() {
+            Ok(spec) => spec,
+            Err(msg) => {
+                self.profile_test_result = Some((index, Err(msg)));
+                return;
+            }
+        };
+        let (tx, rx) = mpsc::channel();
+        self.profile_test = Some((index, rx));
+        self.profile_test_result = None;
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())
+                .and_then(|rt| {
+                    rt.block_on(async {
+                        let client = crate::api::client::LlmClient::for_spec(&spec).map_err(|e| e.to_string())?;
+                        client.test_connection().await.map_err(|e| crate::worker::friendly_api_error(&e))
+                    })
+                });
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+    }
+
+    /// Re-read the file, swap it in and rebuild the model clients — also when
+    /// the profile set changed: the worker pool, tray submenu and the active
+    /// selection (kept by name) follow. Pure of UI; callers report the outcome.
     fn perform_reload(&mut self) -> ReloadOutcome {
         let previous = crate::config::get();
         match crate::config::reload() {
@@ -599,17 +667,9 @@ impl OverlayApp {
                     .map_err(crate::ApiError::InvalidConfig)
                     .and_then(|specs| crate::api::client::build_profiles(&specs));
                 let models_changed = match rebuilt {
-                    Ok(set) if set.labels() == self.model_names => {
-                        let _ = self.cmd_tx.send(WorkerCommand::ReloadClients(set.clients));
-                        false
-                    }
                     Ok(set) => {
-                        warn!(
-                            "config reload: model profiles changed ({:?} -> {:?}); restart to apply",
-                            self.model_names,
-                            set.labels()
-                        );
-                        true
+                        self.apply_profile_set(set);
+                        false
                     }
                     Err(e) => {
                         warn!("config reload: model profiles not rebuilt: {e}");
@@ -619,6 +679,33 @@ impl OverlayApp {
                 ReloadOutcome::Applied { path, restart_needed, models_changed }
             }
         }
+    }
+
+    /// Swap in freshly built profiles: worker clients, tray submenu, and the
+    /// active selection (same profile by name, else the first).
+    fn apply_profile_set(&mut self, set: crate::api::client::ProfileSet) {
+        let labels = set.labels();
+        let active_name = self.model_names.get(self.sm.active_model()).cloned();
+        let active = active_name
+            .as_deref()
+            .and_then(|name| labels.iter().position(|l| l == name))
+            .unwrap_or(0);
+        if labels != self.model_names {
+            info!("model profiles now {:?} (active #{active})", labels);
+        }
+        let tray: Vec<crate::platform::TrayModel> = labels
+            .iter()
+            .map(|label| crate::platform::TrayModel { label: label.clone(), unavailable: None })
+            .chain(set.unavailable.iter().map(|(label, why)| crate::platform::TrayModel {
+                label: label.clone(),
+                unavailable: Some(why.clone()),
+            }))
+            .collect();
+        let _ = self.cmd_tx.send(WorkerCommand::ReloadClients(set.clients));
+        let _ = self.cmd_tx.send(WorkerCommand::SelectModel(active));
+        self.model_names = labels;
+        self.sm.set_active_model(active);
+        crate::platform::update_tray_models(&tray, active);
     }
 
     /// Apply a model-profile choice from the tray or the overlay.
@@ -1058,6 +1145,9 @@ impl OverlayApp {
                             t.1 = Some(crate::ThinkingMode::Think);
                         }
                         form.error = Some("Double-tap window must be 100\u{2013}2000 ms.".into());
+                        form.editing = Some(1.min(form.profiles.len().saturating_sub(1)));
+                        self.profile_test_result =
+                            Some((1, Ok("Connected in 0.8s \u{b7} \"OK\"".into())));
                         ctx.memory_mut(|m| m.reset_areas());
                         self.diag_transition("SettingsEdited");
                     }

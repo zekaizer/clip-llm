@@ -168,7 +168,7 @@ fn friendly_status_message(status: reqwest::StatusCode) -> String {
 }
 
 /// Map an [`ApiError`] to a short, user-facing message (no internal details).
-fn friendly_api_error(e: &ApiError) -> String {
+pub fn friendly_api_error(e: &ApiError) -> String {
     match e {
         ApiError::Http(inner) => friendly_reqwest_error(inner),
         // Reaches the user only if a client is built lazily post-startup;
