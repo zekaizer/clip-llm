@@ -844,6 +844,14 @@ impl OverlayApp {
                     self.capture_target_pid = self.platform.frontmost_app_pid();
                 }
                 UiEffect::HideWindow => {
+                    #[cfg(feature = "diagnostics")]
+                    {
+                        // Not a captured transition (nothing to screenshot),
+                        // but the chain must show the window was hidden so
+                        // the next show is not judged as an in-place move.
+                        self.prev_state_name = "Hidden";
+                        let _ = self.diag_state_tx.send("Hidden");
+                    }
                     ctx.memory_mut(|m| m.reset_areas());
                     self.hide_window(ctx);
                     self.spawn_position = None;
@@ -1132,6 +1140,16 @@ impl OverlayApp {
                     }
                 }
                 crate::diagnostics::ScenarioAction::CloseSettings => self.close_settings(ctx),
+                crate::diagnostics::ScenarioAction::BeginCapture { text } => {
+                    let effects = self.sm_handle(UiEvent::CaptureStarted {
+                        source: state_machine::CaptureSource::Clipboard,
+                    });
+                    self.execute_effects(effects, ctx);
+                    // No real capture runs: stand in for the clipboard read
+                    // that would have parked its content here.
+                    self.pending_capture = false;
+                    self.pending_content = Some(crate::ClipboardContent::text_only(text));
+                }
                 crate::diagnostics::ScenarioAction::Resize(w, h) => {
                     // Same path as a real grip drag (anchor + state machine event).
                     self.handle_overlay_action(ctx, overlay::OverlayAction::Resize(egui::vec2(w, h)));
@@ -1407,6 +1425,7 @@ impl OverlayApp {
             return;
         }
         self.last_sent_pos = Some(pos);
+        debug!("viewport: OuterPosition {pos:?} in {:?}", self.sm.state().variant_name());
         if !self.platform.reposition_window(pos.x, pos.y) {
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
         }
@@ -1560,6 +1579,9 @@ impl OverlayApp {
         let Some(size) = desired else { return };
         if self.last_desired_size != Some(size) {
             self.last_desired_size = Some(size);
+            // Every window resize is a potential whole-window flash on macOS
+            // (the wgpu surface is reconfigured), so each one is logged.
+            debug!("viewport: InnerSize {size:?} in {:?}", self.sm.state().variant_name());
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
             // A programmatic resize can itself move the OS window (platforms
             // anchor it at the center or bottom-left rather than the top-left)
@@ -1861,6 +1883,7 @@ impl eframe::App for OverlayApp {
                     .map(|r| [r.min.x, r.min.y, r.max.x, r.max.y]),
                 spawn_position: self.spawn_position.map(|p| [p.x, p.y]),
                 user_repositioned: self.sm.user_repositioned(),
+                panel_size: [self.panel_size.x, self.panel_size.y],
             });
             self.diag.tick_screenshot(ctx);
             self.diag.flush_pending_if_stale();

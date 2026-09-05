@@ -35,6 +35,8 @@ pub struct FrameSnapshot {
     pub viewport_inner_rect: Option<[f32; 4]>,
     pub spawn_position: Option<[f32; 2]>,
     pub user_repositioned: bool,
+    /// Fixed panel size in effect (UI-GUIDELINES §1).
+    pub panel_size: [f32; 2],
 }
 
 // ---------------------------------------------------------------------------
@@ -49,6 +51,13 @@ struct TransitionContext {
     timestamp: String,
     snapshot: Option<FrameSnapshot>,
     ring_tail: Vec<FrameSnapshot>,
+    /// Frames rendered from the transition up to the capture.
+    post_frames: Vec<FrameSnapshot>,
+    /// For a transition between two visible states: whether the window kept
+    /// its size and position on every frame after it (`None` when a hidden
+    /// or settings state is involved). `false` is the flicker this UI must
+    /// never show (UI-GUIDELINES §2).
+    geometry_stable: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -141,6 +150,8 @@ impl DiagCollector {
             timestamp,
             snapshot,
             ring_tail,
+            post_frames: Vec::new(),
+            geometry_stable: None,
         });
 
         self.pending_screenshot = true;
@@ -191,9 +202,10 @@ impl DiagCollector {
         self.screenshot_requested = false;
         self.dump_counter += 1;
 
-        let Some(tctx) = self.transition_ctx.take() else {
+        let Some(mut tctx) = self.transition_ctx.take() else {
             return;
         };
+        self.finalize_geometry(&mut tctx);
 
         let prefix = format!(
             "{:03}_{}_to_{}",
@@ -222,6 +234,27 @@ impl DiagCollector {
         }
     }
 
+    /// Fill `post_frames` from the ring and judge `geometry_stable`: between
+    /// two visible overlay states every frame after the transition must
+    /// report the same window size and position as the first one.
+    fn finalize_geometry(&self, tctx: &mut TransitionContext) {
+        tctx.post_frames = self.ring.iter().filter(|f| f.frame >= tctx.frame).cloned().collect();
+        // "Resized" changes the size on purpose; hidden/settings states are
+        // not overlay geometry.
+        let visible = |s: &str| !matches!(s, "Hidden" | "Settings" | "SettingsEdited" | "Resized");
+        if !(visible(tctx.from) && visible(tctx.to)) {
+            return;
+        }
+        let mut shown = tctx.post_frames.iter().filter(|f| f.desired_size.is_some());
+        let Some(first) = shown.next() else { return };
+        let stable = shown
+            .all(|f| f.desired_size == first.desired_size && f.viewport_inner_rect == first.viewport_inner_rect);
+        if !stable {
+            warn!("diag: window geometry changed across {} -> {}", tctx.from, tctx.to);
+        }
+        tctx.geometry_stable = Some(stable);
+    }
+
     /// Flush any pending transition that didn't receive a screenshot
     /// (e.g. wgpu backend doesn't support it). Called each frame.
     pub fn flush_pending_if_stale(&mut self) {
@@ -235,7 +268,8 @@ impl DiagCollector {
                 self.pending_screenshot = false;
                 self.dump_counter += 1;
 
-                if let Some(tctx) = self.transition_ctx.take() {
+                if let Some(mut tctx) = self.transition_ctx.take() {
+                    self.finalize_geometry(&mut tctx);
                     let prefix = format!(
                         "{:03}_{}_to_{}",
                         self.dump_counter, tctx.from, tctx.to
@@ -297,6 +331,9 @@ struct Scenario {
     /// After the result arrives, drag the panel to this size (pseudo-state
     /// "Resized") and capture again.
     resize_to: Option<(f32, f32)>,
+    /// Enter Capturing first (the single-tap picking view with `input` as the
+    /// picked text), then commit to Processing after a short hold.
+    capture_first: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -305,6 +342,8 @@ enum RunnerPhase {
     StartupDelay,
     /// Waiting between scenarios (overlay hidden).
     WaitingToInject,
+    /// Capturing shown, waiting a bit before committing the content.
+    WaitingToCommit,
     /// Scenario injected, waiting for Processing -> Result/Error.
     WaitingForResult,
     /// Result received, waiting a bit before hiding.
@@ -327,6 +366,9 @@ pub struct DiagScenarioRunner {
 const STARTUP_DELAY: Duration = Duration::from_secs(2);
 const BETWEEN_DELAY: Duration = Duration::from_millis(1500);
 const RESULT_DISPLAY: Duration = Duration::from_secs(1);
+/// How long the Capturing view stays up before the content is committed —
+/// long enough for its settle + screenshot.
+const CAPTURE_DISPLAY: Duration = Duration::from_millis(900);
 const QUIT_DELAY: Duration = Duration::from_secs(1);
 
 impl DiagScenarioRunner {
@@ -340,6 +382,7 @@ impl DiagScenarioRunner {
                 settings: false,
                 settings_edit: false,
                 resize_to: None,
+                capture_first: false,
             },
             Scenario {
                 name: "long_text",
@@ -360,6 +403,7 @@ impl DiagScenarioRunner {
                 settings: false,
                 settings_edit: false,
                 resize_to: None,
+                capture_first: false,
             },
             Scenario {
                 name: "mode_switch",
@@ -369,6 +413,7 @@ impl DiagScenarioRunner {
                 settings: false,
                 settings_edit: false,
                 resize_to: None,
+                capture_first: false,
             },
             Scenario {
                 name: "error_display",
@@ -378,6 +423,7 @@ impl DiagScenarioRunner {
                 settings: false,
                 settings_edit: false,
                 resize_to: None,
+                capture_first: false,
             },
             Scenario {
                 name: "korean_text",
@@ -387,6 +433,7 @@ impl DiagScenarioRunner {
                 settings: false,
                 settings_edit: false,
                 resize_to: None,
+                capture_first: false,
             },
             Scenario {
                 name: "rephrase_mode",
@@ -396,6 +443,7 @@ impl DiagScenarioRunner {
                 settings: false,
                 settings_edit: false,
                 resize_to: None,
+                capture_first: false,
             },
             Scenario {
                 name: "summarize_mode",
@@ -413,6 +461,7 @@ impl DiagScenarioRunner {
                 settings: false,
                 settings_edit: false,
                 resize_to: None,
+                capture_first: false,
             },
             Scenario {
                 name: "long_single_line",
@@ -422,6 +471,17 @@ impl DiagScenarioRunner {
                 settings: false,
                 settings_edit: false,
                 resize_to: None,
+                capture_first: false,
+            },
+            Scenario {
+                name: "capturing",
+                input: "Text already on the clipboard, shown while the modifiers are still held so the mode can be picked.",
+                mode: ProcessMode::Translate,
+                switch_to: None,
+                settings: false,
+                settings_edit: false,
+                resize_to: None,
+                capture_first: true,
             },
             Scenario {
                 name: "resized_min",
@@ -433,6 +493,7 @@ impl DiagScenarioRunner {
                 // Far below the minimum: captures the clamped smallest layout,
                 // where the header row is tightest.
                 resize_to: Some((100.0, 100.0)),
+                capture_first: false,
             },
             Scenario {
                 name: "settings",
@@ -442,6 +503,7 @@ impl DiagScenarioRunner {
                 settings: true,
                 settings_edit: false,
                 resize_to: None,
+                capture_first: false,
             },
             Scenario {
                 name: "settings_edited",
@@ -451,6 +513,7 @@ impl DiagScenarioRunner {
                 settings: true,
                 settings_edit: true,
                 resize_to: None,
+                capture_first: false,
             },
         ]);
         // DIAG_SCENARIO=a,b keeps only the named scenarios.
@@ -489,6 +552,11 @@ impl DiagScenarioRunner {
                     if scenario.settings {
                         return ScenarioAction::OpenSettings;
                     }
+                    if scenario.capture_first {
+                        self.phase = RunnerPhase::WaitingToCommit;
+                        self.delay_until = Instant::now() + CAPTURE_DISPLAY;
+                        return ScenarioAction::BeginCapture { text: scenario.input.to_string() };
+                    }
                     return ScenarioAction::ShowOverlay {
                         mode: scenario.mode,
                         text: scenario.input.to_string(),
@@ -497,6 +565,20 @@ impl DiagScenarioRunner {
                     self.phase = RunnerPhase::Finishing;
                     self.delay_until = Instant::now() + QUIT_DELAY;
                     info!("diag: all scenarios complete, finishing");
+                }
+            }
+
+            RunnerPhase::WaitingToCommit => {
+                if Instant::now() < self.delay_until {
+                    return ScenarioAction::None;
+                }
+                if let Some(scenario) = self.scenarios.front() {
+                    info!("diag: committing the capture for '{}'", scenario.name);
+                    self.phase = RunnerPhase::WaitingForResult;
+                    return ScenarioAction::ShowOverlay {
+                        mode: scenario.mode,
+                        text: scenario.input.to_string(),
+                    };
                 }
             }
 
@@ -578,6 +660,8 @@ pub enum ScenarioAction {
     CloseSettings,
     /// Drag the resize grip to this panel size (pseudo-state "Resized").
     Resize(f32, f32),
+    /// Enter Capturing (single-tap picking) with `text` as the picked content.
+    BeginCapture { text: String },
     /// All scenarios complete — app should exit.
     Quit,
 }
