@@ -233,6 +233,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     style.visuals.window_stroke = egui::Stroke::NONE;
                     style.visuals.window_shadow = egui::Shadow::NONE;
                     style.visuals.window_corner_radius = egui::CornerRadius::same(12);
+                    if theme == egui::Theme::Light {
+                        // egui's light widgets assume a white window; on the
+                        // overlay's light-grey frame their near-white fills and
+                        // strokes (radio rings, slider trough, combo border)
+                        // disappear. Pull them a few steps darker.
+                        let v = &mut style.visuals;
+                        v.extreme_bg_color = egui::Color32::from_gray(225);
+                        v.faint_bg_color = egui::Color32::from_gray(232);
+                        v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(180));
+                        v.widgets.inactive.bg_fill = egui::Color32::from_gray(205);
+                        v.widgets.inactive.weak_bg_fill = egui::Color32::from_gray(215);
+                        v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(160));
+                        v.widgets.hovered.bg_fill = egui::Color32::from_gray(190);
+                        v.widgets.hovered.weak_bg_fill = egui::Color32::from_gray(200);
+                        v.widgets.active.bg_fill = egui::Color32::from_gray(175);
+                        v.widgets.active.weak_bg_fill = egui::Color32::from_gray(185);
+                    }
                 });
             }
             cc.egui_ctx.set_theme(match clip_llm::config::get().ui_theme() {
