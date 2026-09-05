@@ -29,6 +29,7 @@ pub struct ThinkingState {
 }
 
 /// Action requested by the overlay UI.
+#[derive(Debug, Clone, PartialEq)]
 pub enum OverlayAction {
     None,
     Close,
@@ -160,6 +161,14 @@ pub fn render(
         action = OverlayAction::Close;
     }
 
+    // Keyboard mode switching once content is loaded (Result/Error): ←/→
+    // step through the available tabs, Cmd/Ctrl+1…5 jump to a tab position.
+    if matches!(state, OverlayState::Result(_) | OverlayState::Error(_))
+        && let Some(target) = keyboard_mode_switch(ctx, mode, available_modes)
+    {
+        action = OverlayAction::SwitchMode(target);
+    }
+
     // Keyboard actions in the Result state (#52). Enter triggers the primary
     // action — paste-replace for double-tap, copy for single-tap — mirroring
     // the docked action button. Cmd/Ctrl+C copies the full result, but only
@@ -190,6 +199,44 @@ pub fn render(
         desired_size: Some(out.desired_size),
         content_size: Some(out.content_size),
     }
+}
+
+/// The mode the keyboard asks for this frame, if any: ←/→ cycle through
+/// `available` in tab order (wrapping), Cmd/Ctrl+digit picks the tab at that
+/// position when it is available. Consumes the keys it acts on.
+fn keyboard_mode_switch(
+    ctx: &egui::Context,
+    current: ProcessMode,
+    available: &[ProcessMode],
+) -> Option<ProcessMode> {
+    let order: Vec<ProcessMode> =
+        ProcessMode::display_order().iter().copied().filter(|m| available.contains(m)).collect();
+    if order.is_empty() {
+        return None;
+    }
+    let step = ctx.input_mut(|i| {
+        if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight) {
+            1
+        } else if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft) {
+            -1
+        } else {
+            0
+        }
+    });
+    if step != 0 {
+        let at = order.iter().position(|m| *m == current).unwrap_or(0) as isize;
+        let next = order[(at + step).rem_euclid(order.len() as isize) as usize];
+        return (next != current).then_some(next);
+    }
+    const DIGITS: [egui::Key; 5] =
+        [egui::Key::Num1, egui::Key::Num2, egui::Key::Num3, egui::Key::Num4, egui::Key::Num5];
+    for (slot, key) in DIGITS.iter().enumerate() {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, *key)) {
+            let picked = ProcessMode::display_order().get(slot).copied()?;
+            return (available.contains(&picked) && picked != current).then_some(picked);
+        }
+    }
+    None
 }
 
 /// Footer actions, right-aligned. Render the primary action first: the
@@ -1221,6 +1268,81 @@ mod tests {
         let first = sizes[0];
         assert!(sizes.iter().all(|s| close(*s, first)), "{sizes:?}");
         assert!(close(first, panel + egui::Vec2::splat(size::SHADOW_PAD * 2.0)));
+    }
+
+    fn key_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::RawInput {
+        egui::RawInput {
+            events: vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }],
+            ..Default::default()
+        }
+    }
+
+    /// Render one frame with `input` and return the action it produced.
+    fn action_for(input: egui::RawInput, state: &OverlayState, mode: ProcessMode) -> OverlayAction {
+        let ctx = egui::Context::default();
+        let mut output = None;
+        let _ = ctx.run(input, |ctx| {
+            output = Some(render(
+                state,
+                mode,
+                StreamingState {
+                    text: "",
+                    think_started: false,
+                    retry_notice: None,
+                    think_content: None,
+                    think_expanded: false,
+                    incomplete: None,
+                },
+                &[ProcessMode::Translate, ProcessMode::Summarize, ProcessMode::Explain],
+                None,
+                None,
+                RephraseParams::default(),
+                ThinkingState { mode: ThinkingMode::NoThink, supported: false },
+                false,
+                true,
+                CaptureSource::Selection,
+                &[],
+                false,
+                None,
+                false,
+                None,
+                false,
+                size::DEFAULT_PANEL,
+                ctx,
+            ));
+        });
+        output.unwrap().action
+    }
+
+    /// Interaction policy (UI-GUIDELINES §4): ←/→ step through the available
+    /// tabs in tab order, wrapping, and skip unavailable ones.
+    #[test]
+    fn arrow_keys_cycle_the_available_modes() {
+        let result = OverlayState::Result("x".into());
+        // Rephrase is unavailable in this fixture, so Translate → Summarize.
+        assert_eq!(
+            action_for(key_event(egui::Key::ArrowRight, egui::Modifiers::NONE), &result, ProcessMode::Translate),
+            OverlayAction::SwitchMode(ProcessMode::Summarize),
+        );
+        // Wraps from the first available back to the last.
+        assert_eq!(
+            action_for(key_event(egui::Key::ArrowLeft, egui::Modifiers::NONE), &result, ProcessMode::Translate),
+            OverlayAction::SwitchMode(ProcessMode::Explain),
+        );
+        // Cmd+3 = third tab position (Summarize); Cmd+2 (Rephrase) is unavailable.
+        assert_eq!(
+            action_for(key_event(egui::Key::Num3, egui::Modifiers::COMMAND), &result, ProcessMode::Translate),
+            OverlayAction::SwitchMode(ProcessMode::Summarize),
+        );
+        assert_eq!(
+            action_for(key_event(egui::Key::Num2, egui::Modifiers::COMMAND), &result, ProcessMode::Translate),
+            OverlayAction::None,
+        );
+        // Not while the request is in flight.
+        assert_eq!(
+            action_for(key_event(egui::Key::ArrowRight, egui::Modifiers::NONE), &OverlayState::Processing, ProcessMode::Translate),
+            OverlayAction::None,
+        );
     }
 
     /// An idle frame reports no action and a hidden state no geometry.
