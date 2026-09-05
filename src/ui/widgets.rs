@@ -99,13 +99,9 @@ pub(super) fn language_picker(ui: &mut egui::Ui, id: &str, value: &mut String) {
     });
 }
 
-/// Render `add_contents` inside a row whose height is pinned to exactly
-/// `height` (a floor — content is never clipped, only ever centered within
-/// more space than it naturally needs). Used for the shared top status/think
-/// row and bottom controls row in both Processing and Result, so those rows'
-/// vertical footprint is identical regardless of which content variant (or
-/// which state) renders inside them — only the *contents* swap in place at
-/// the Processing→Result transition, not the layout around them.
+/// A horizontal row at least `height` tall (content is centered, never
+/// clipped) — the status rows and the footer keep the same footprint in every
+/// state, so only their contents swap at a transition.
 pub(super) fn fixed_height_row(ui: &mut egui::Ui, height: f32, add_contents: impl FnOnce(&mut egui::Ui)) {
     ui.horizontal(|ui| {
         ui.set_min_height(height);
@@ -113,12 +109,14 @@ pub(super) fn fixed_height_row(ui: &mut egui::Ui, height: f32, add_contents: imp
     });
 }
 
-/// Renders a vertically scrollable, word-wrapped text label with a consistent
-/// style, shrinking to the content's natural height up to `max_height`.
+/// Vertically scrollable, word-wrapped body text, shrinking to the content's
+/// natural height up to `max_height`. Views draw body text through
+/// `panel::Body::fill_text`, which supplies the height.
 pub(super) fn scroll_text(
     ui: &mut egui::Ui,
     id_salt: impl std::hash::Hash,
     text: &str,
+    text_color: egui::Color32,
     max_height: f32,
     stick_to_bottom: bool,
 ) {
@@ -128,8 +126,7 @@ pub(super) fn scroll_text(
         // egui's ScrollArea defaults to a 64px `min_scrolled_size` floor once
         // content needs scrolling, silently overriding a smaller max_height
         // (a `max_height` as low as e.g. 24 was still rendering at ~64px).
-        // Match that floor to the same one `render_result`'s budget math
-        // floors to, so a tight budget is actually honored.
+        // Match the panel's own text-column floor so a tight budget is honored.
         .min_scrolled_height(size::MIN_TEXT_HEIGHT)
         .auto_shrink([false, true])
         .stick_to_bottom(stick_to_bottom)
@@ -137,7 +134,7 @@ pub(super) fn scroll_text(
         .show(ui, |ui| {
             ui.add(
                 egui::Label::new(
-                    egui::RichText::new(text).color(color::TEXT).size(font::BODY),
+                    egui::RichText::new(text).color(text_color).size(font::BODY),
                 )
                 .wrap_mode(egui::TextWrapMode::Wrap),
             );
@@ -177,6 +174,23 @@ pub(super) fn think_block(ui: &mut egui::Ui, content: &str) {
                 .wrap_mode(egui::TextWrapMode::Wrap),
             );
         });
+}
+
+/// A `size::ROW` status row at the top of the body: optional spinner, a
+/// label (already styled), and the elapsed time.
+pub(super) fn status_row(
+    ui: &mut egui::Ui,
+    spinner: bool,
+    label: egui::RichText,
+    elapsed: Option<std::time::Duration>,
+) {
+    fixed_height_row(ui, size::ROW, |ui| {
+        if spinner {
+            ui.spinner();
+        }
+        ui.label(label);
+        elapsed_label(ui, elapsed);
+    });
 }
 
 /// Small dim label showing how long the current request has been processing.

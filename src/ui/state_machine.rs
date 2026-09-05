@@ -135,11 +135,10 @@ pub enum UiEvent {
     UserSelectModel(usize),
     /// User started dragging the overlay.
     UserStartDrag,
-    /// User dragged the resize grip; `width`/`height` is the new outer size
-    /// of the panel (frame including its margin, excluding the shadow pad).
-    UserResize { width: f32, height: f32 },
-    /// User asked for auto-sizing again (double-click on the grip).
-    UserResetSize,
+    /// User resized the overlay via the grip (the size itself is presentation
+    /// state owned by the adapter); like a drag, this hands placement to the
+    /// user until the next trigger.
+    UserResize,
     /// Window gained focus.
     FocusGained,
     /// Window lost focus (after having been focused at least once).
@@ -211,9 +210,6 @@ pub struct StateMachine {
     thinking_supported: bool,
     /// True after the user drags the overlay; suppresses auto-repositioning.
     user_repositioned: bool,
-    /// Panel size set via the resize grip; `None` = auto-size to content.
-    /// Survives triggers and hides (unlike `user_repositioned`/`pinned`).
-    user_size: Option<(f32, f32)>,
     /// True once the window has received focus after show_window.
     has_been_focused: bool,
     /// Current focus level, mirrored from FocusGained/FocusLost edges. Lets
@@ -259,7 +255,6 @@ impl StateMachine {
             next_request_id: 0,
             current_request_id: 0,
             user_repositioned: false,
-            user_size: None,
             has_been_focused: false,
             is_focused: false,
             cache: HashMap::new(),
@@ -330,20 +325,6 @@ impl StateMachine {
 
     pub fn user_repositioned(&self) -> bool {
         self.user_repositioned
-    }
-
-    /// Start with a panel size (the one persisted in the config), as if the
-    /// user had already dragged the grip to it.
-    pub fn with_user_size(mut self, size: Option<(f32, f32)>) -> Self {
-        self.user_size = size;
-        self
-    }
-
-    /// Panel size chosen by the user via the resize grip, `None` while the
-    /// overlay auto-sizes to its content. Kept across triggers so Processing
-    /// and Result show at the same size; `UserResetSize` clears it.
-    pub fn user_size(&self) -> Option<(f32, f32)> {
-        self.user_size
     }
 
     pub fn auto_copy(&self) -> bool {
@@ -428,17 +409,7 @@ impl StateMachine {
                 self.user_repositioned = true;
                 vec![]
             }
-            UiEvent::UserResize { .. } | UiEvent::UserResetSize
-                if matches!(self.state, OverlayState::Hidden) =>
-            {
-                vec![]
-            }
-            UiEvent::UserResetSize => {
-                self.user_size = None;
-                vec![]
-            }
-            UiEvent::UserResize { width, height } => {
-                self.user_size = Some((width, height));
+            UiEvent::UserResize => {
                 // The grip anchors the top-left; re-centering on the new size
                 // would slide the grip out from under the cursor.
                 self.user_repositioned = true;
@@ -2795,45 +2766,15 @@ mod tests {
     }
 
     #[test]
-    fn user_resize_records_size_and_pins_position() {
+    fn user_resize_pins_placement_until_the_next_trigger() {
         let mut sm = new_sm();
         start_processing(&mut sm, "hello");
-        assert_eq!(sm.user_size(), None);
+        assert!(!sm.user_repositioned());
 
-        let effects = sm.handle(UiEvent::UserResize { width: 600.0, height: 400.0 });
-
-        assert!(effects.is_empty());
-        assert_eq!(sm.user_size(), Some((600.0, 400.0)));
-        // A resize anchors the top-left, so auto re-centering must stop too.
-        assert!(sm.user_repositioned());
-    }
-
-    #[test]
-    fn user_size_survives_triggers_and_hide_until_reset() {
-        let mut sm = new_sm();
-        start_processing(&mut sm, "hello");
-        sm.handle(UiEvent::UserResize { width: 600.0, height: 400.0 });
+        assert!(sm.handle(UiEvent::UserResize).is_empty());
+        assert!(sm.user_repositioned(), "a resize anchors the window like a drag");
 
         start_processing(&mut sm, "again");
-        assert_eq!(sm.user_size(), Some((600.0, 400.0)), "single-tap keeps the size");
-        assert!(!sm.user_repositioned(), "a new trigger still re-centers the window");
-
-        sm.handle(UiEvent::CaptureStarted { source: CaptureSource::Selection });
-        assert_eq!(sm.user_size(), Some((600.0, 400.0)), "double-tap keeps the size");
-        sm.handle(UiEvent::UserCancel);
-        assert_eq!(sm.user_size(), Some((600.0, 400.0)), "hiding keeps the size");
-
-        sm.handle(UiEvent::UserResize { width: 700.0, height: 500.0 });
-        assert_eq!(sm.user_size(), Some((600.0, 400.0)), "ignored while hidden");
-
-        start_processing(&mut sm, "third");
-        sm.handle(UiEvent::UserResetSize);
-        assert_eq!(sm.user_size(), None, "double-click on the grip returns to auto-size");
-    }
-
-    #[test]
-    fn with_user_size_seeds_a_persisted_panel_size() {
-        let sm = new_sm().with_user_size(Some((640.0, 420.0)));
-        assert_eq!(sm.user_size(), Some((640.0, 420.0)));
+        assert!(!sm.user_repositioned(), "a new trigger re-centers");
     }
 }

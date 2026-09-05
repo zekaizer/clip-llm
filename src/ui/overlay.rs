@@ -1,43 +1,14 @@
 use eframe::egui;
 
+use super::panel::{self, GripAction, Slots};
 use super::state_machine::{CaptureSource, OverlayState};
-use super::theme::{color, font, size, space};
+use super::theme::{self, color, font, size, space};
 use super::widgets::{
-    cancel_button, docked_action_button, elapsed_label, fixed_height_row, hint_text, language_picker,
-    pill, pill_row, pill_styled, pill_with_tip, row_label, scroll_text, section_header, small_button,
+    cancel_button, docked_action_button, hint_text, language_picker, pill,
+    pill_row, pill_styled, pill_with_tip, row_label, section_header, small_button, status_row,
     think_block, think_toggle, PillTone,
 };
 use crate::{ProcessMode, RephraseLength, RephraseParams, RephraseStyle, ThinkingMode};
-
-pub(crate) const OVERLAY_WIDTH: f32 = 480.0;
-const MAX_RESULT_HEIGHT: f32 = 260.0;
-
-/// Inner-content height the panel must fill (see `render()`): a floor for the
-/// text column — shorter content pads up to the remainder so the bottom row
-/// stays at the bottom — and, with `cap`, also its ceiling, so the text
-/// scrolls inside the user's size instead of growing the window.
-#[derive(Clone, Copy)]
-struct HeightTarget {
-    /// Target inner height (frame margin already subtracted).
-    inner: f32,
-    /// Top of the whole inner content ui, captured before anything is drawn:
-    /// the reference for how much of `inner` is already used when the text
-    /// column is about to render.
-    content_top: f32,
-    /// User-sized panel: cap the text column at the remainder too.
-    cap: bool,
-}
-
-impl HeightTarget {
-    /// Height left for the text column: the target minus what is drawn above
-    /// the current cursor and what must still follow (`reserved_after`, plus
-    /// the item spacing egui inserts after the column itself).
-    fn remaining(&self, ui: &egui::Ui, reserved_after: f32) -> f32 {
-        let used = ui.cursor().top() - self.content_top;
-        (self.inner - used - reserved_after - ui.spacing().item_spacing.y)
-            .max(size::MIN_TEXT_HEIGHT)
-    }
-}
 
 /// Streaming and think-block display state for Processing/Result rendering.
 pub struct StreamingState<'a> {
@@ -95,7 +66,9 @@ pub struct OverlayOutput {
     pub content_size: Option<egui::Vec2>,
 }
 
-/// Render the overlay panel. Returns action and desired viewport size.
+/// Render the overlay panel for `state`: the fixed-size frame, the shared
+/// header, and the state's body/footer (docs/UI-GUIDELINES.md). Returns the
+/// user's action and the window geometry.
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     state: &OverlayState,
@@ -114,187 +87,71 @@ pub fn render(
     copy_confirmed: bool,
     elapsed: Option<std::time::Duration>,
     debug_available: bool,
-    // Compact completion summary ("✓ 2.4s · 850 tokens") shown in Result's
-    // bottom row — the same slot Processing's spinner+elapsed+Cancel row
-    // occupies (see `size::ROW`/`size::ACTION_BTN`), filling what would
-    // otherwise be empty space left by those controls disappearing. `None`
-    // when no completion data is available (e.g. a cached/instant result —
-    // see `format_completion_status` in `mod.rs`).
+    // Compact completion summary ("✓ 2.4s · 850 tokens") for Result's footer;
+    // `None` for a cached/instant result (see `format_completion_status`).
     completion_status: Option<String>,
     // More than one model profile exists: the status label switches models.
     model_switchable: bool,
-    // Floor for the Result/Error content height, latched by the adapter from
-    // the last Processing frame's rendered content (see
-    // `OverlayApp::result_latch`) so the final answer never renders shorter
-    // than the last streaming frame — the fix for the visible
-    // Processing→Result resize jump. `None` outside Result/Error, or when no
-    // latch is active (falls back to normal auto-sizing). A floor only:
-    // content taller than the latch grows the window naturally, up to
-    // `MAX_RESULT_HEIGHT` for the answer text (see `render_result`).
-    min_result_height: Option<f32>,
-    // Panel (frame) size the user dragged the grip to: replaces both
-    // `OVERLAY_WIDTH` and content-driven height — the text column scrolls
-    // inside it (`HeightTarget::cap`) and the latch is moot. `None` while
-    // the overlay auto-sizes to its content.
-    user_size: Option<egui::Vec2>,
+    // Panel (frame incl. margin) size: the config default or the grip's
+    // last value. Content never changes it.
+    panel_size: egui::Vec2,
     ctx: &egui::Context,
 ) -> OverlayOutput {
     if matches!(state, OverlayState::Hidden) {
-        return OverlayOutput {
-            action: OverlayAction::None,
-            desired_size: None,
-            content_size: None,
-        };
+        return OverlayOutput { action: OverlayAction::None, desired_size: None, content_size: None };
     }
 
     let mut action = OverlayAction::None;
-
-    let frame = overlay_frame();
-
-    // --- egui Area sizing fix ---
-    // egui::Area stores the previous frame's content min_size and uses it as
-    // the next frame's max_rect.  Two things conspire to keep the overlay tiny:
-    //
-    //  1. With constrain=true (default), the *initial* sizing pass caps the
-    //     Area to the viewport, which starts at the small initial window size.
-    //  2. When transitioning from a short state (Processing) to a tall one
-    //     (Result), the Area's max_rect is still sized for the short state,
-    //     starving the ScrollArea of vertical space.
-    //
-    // Fix (a): constrain(false) — lets the initial sizing pass use a large
-    //          default size instead of the viewport.
-    // Fix (b): OverlayApp::update() calls reset_areas() on state transitions,
-    //          clearing the stale stored size so the Area re-measures fresh.
-
-    // Offset the frame so shadow renders evenly on all sides.
-    let area_resp = egui::Area::new("overlay".into())
-        .fixed_pos(egui::pos2(size::SHADOW_PAD, size::SHADOW_PAD))
-        .constrain(false) // Fix (a): see above
-        .sense(egui::Sense::drag())
-        .show(ctx, |ui| {
-            let frame_resp = frame.show(ui, |ui| {
-                // Both the user size and the latch are the Frame's OUTER size
-                // (`content_size` in `OverlayOutput`, margin included), so
-                // subtract the margin to get targets for the *inner* ui.
-                let user_inner = user_size.map(|s| s.max(size::MIN_PANEL) - size::FRAME_MARGIN.sum());
-                ui.set_width(user_inner.map_or(OVERLAY_WIDTH, |v| v.x));
-                let content_top = ui.cursor().top();
-
-                // User size wins over the latch: it applies in every state and
-                // caps the text column. The latch only floors Result/Error
-                // (never shorter than the last streaming frame; taller content
-                // still grows the window — see `render_result`).
-                let target = match user_inner {
-                    Some(v) => Some(HeightTarget { inner: v.y, content_top, cap: true }),
-                    None => min_result_height
-                        .filter(|_| matches!(state, OverlayState::Result(_) | OverlayState::Error(_)))
-                        .map(|h| HeightTarget {
-                            inner: (h - size::FRAME_MARGIN.sum().y).max(0.0),
-                            content_top,
-                            cap: false,
-                        }),
-                };
-
-                // Floor for the whole panel. This MUST run here, at the true
-                // top of the inner ui — `Ui::set_min_height` reserves space
-                // from the *current cursor*, so applied after content is drawn
-                // it would add phantom height on top instead of flooring the
-                // total. This is what makes `desired_size` >= the target.
-                if let Some(t) = target {
-                    ui.set_min_height(t.inner);
-                }
-
-                // Picking overlay (hold-to-cycle, before commit). Show the mode
-                // tabs from the start so the user sees and cycles the mode, and
-                // the content area shows the data to be processed when available
-                // (single-tap clipboard). The double-tap selection is captured on
-                // release, so it shows a spinner until then. Content type is not
-                // yet known, so all modes are offered; image-only is reconciled on
-                // capture in on_content_ready.
-                if matches!(state, OverlayState::Capturing) {
-                    render_tab_bar(
-                        ui, mode, ProcessMode::display_order(),
-                        thinking, pinned, preview_mode,
-                        &mut action,
-                    );
-                    ui.add_space(space::SM);
-                    ui.add(egui::Separator::default().spacing(space::SM));
-                    ui.add_space(space::SM);
-                    render_capturing(ui, picking_text, source, elapsed, target, &mut action);
-                    return;
-                }
-
-                render_tab_bar(
-                    ui, mode, available_modes,
-                    thinking, pinned, preview_mode,
-                    &mut action,
-                );
-
-                // Rephrase parameter rows (style + length), shown when Rephrase is active.
-                if mode == ProcessMode::Rephrase && !matches!(state, OverlayState::Hidden) {
-                    ui.add_space(space::SM);
-                    render_rephrase_params(ui, rephrase_params, &mut action);
-                }
-
-                // Separator between tab bar / params and content.
+    let capturing = matches!(state, OverlayState::Capturing);
+    let out = panel::show(ctx, panel_size, |slots| {
+        slots.header(|ui| {
+            // While capturing the content type is unknown, so every mode is
+            // offered; image-only is reconciled in on_content_ready.
+            let modes = if capturing { ProcessMode::display_order() } else { available_modes };
+            render_tab_bar(ui, mode, modes, thinking, pinned, preview_mode, &mut action);
+            if mode == ProcessMode::Rephrase && !capturing {
                 ui.add_space(space::SM);
-                ui.add(egui::Separator::default().spacing(space::SM));
-                ui.add_space(space::SM);
-
-                match state {
-                    OverlayState::Processing => {
-                        render_processing(
-                            ui,
-                            mode,
-                            streaming.text,
-                            streaming.think_started,
-                            streaming.retry_notice,
-                            elapsed,
-                            target,
-                            &mut action,
-                        );
-                    }
-                    OverlayState::Result(text) => {
-                        render_result(
-                            ui,
-                            mode,
-                            text,
-                            streaming.think_content,
-                            streaming.think_expanded,
-                            auto_copy,
-                            copy_confirmed,
-                            streaming.incomplete,
-                            debug_available,
-                            source,
-                            source_files,
-                            completion_status.as_deref(),
-                            model_switchable,
-                            target,
-                            &mut action,
-                        );
-                    }
-                    OverlayState::Error(msg) => {
-                        // Retry needs loaded content; a capture failure leaves
-                        // none (available_modes is empty), so hide the button.
-                        // The height floor for a latched Error is already
-                        // applied above (at the true top of the ui) — Error
-                        // has no adjustable scrollable content to cap, so
-                        // that floor is this state's entire pinning story.
-                        render_error(ui, msg, !available_modes.is_empty(), debug_available, &mut action);
-                    }
-                    // Hidden returns early at the top of render(); Capturing is handled above.
-                    OverlayState::Hidden | OverlayState::Capturing => unreachable!(),
-                }
-            });
-            let grip_action = render_resize_grip(ui, frame_resp.response.rect);
-            if !matches!(grip_action, OverlayAction::None) {
-                action = grip_action;
+                render_rephrase_params(ui, rephrase_params, &mut action);
             }
         });
+        match state {
+            OverlayState::Capturing => {
+                view_capturing(slots, picking_text, source, elapsed, &mut action)
+            }
+            OverlayState::Processing => view_processing(slots, mode, &streaming, elapsed, &mut action),
+            OverlayState::Result(text) => view_result(
+                slots,
+                mode,
+                text,
+                &streaming,
+                ResultFooter {
+                    auto_copy,
+                    copy_confirmed,
+                    debug_available,
+                    source,
+                    source_files,
+                    completion_status: completion_status.as_deref(),
+                    model_switchable,
+                },
+                &mut action,
+            ),
+            // Retry needs loaded content; a capture failure leaves none
+            // (available_modes is empty), so hide the button.
+            OverlayState::Error(msg) => {
+                view_error(slots, msg, !available_modes.is_empty(), debug_available, &mut action)
+            }
+            OverlayState::Hidden => unreachable!("returned above"),
+        }
+    });
 
-    // Drag the OS window when the user drags the overlay area. The grip is a
-    // child widget, so a drag it captured never starts here as well.
-    if area_resp.response.drag_started() && !matches!(action, OverlayAction::Resize(_)) {
+    match out.grip {
+        GripAction::Resize(panel) => action = OverlayAction::Resize(panel),
+        GripAction::Done => action = OverlayAction::ResizeDone,
+        GripAction::Reset => action = OverlayAction::ResetSize,
+        GripAction::None => {}
+    }
+    // Drag the OS window when the user drags the panel background.
+    if out.drag_started {
         action = OverlayAction::StartDrag;
     }
 
@@ -328,70 +185,209 @@ pub fn render(
         }
     }
 
-    // Viewport = content + shadow padding on all sides.
-    let content_size = area_resp.response.rect.size();
-    let desired = content_size + egui::vec2(size::SHADOW_PAD * 2.0, size::SHADOW_PAD * 2.0);
-
     OverlayOutput {
         action,
-        desired_size: Some(desired),
-        content_size: Some(content_size),
+        desired_size: Some(out.desired_size),
+        content_size: Some(out.content_size),
     }
 }
 
-/// Resize grip in the frame's bottom-right corner (inside the margin, where
-/// no content is drawn): drag = `Resize` (new panel size) then `ResizeDone`
-/// on release, double-click = `ResetSize`.
-fn render_resize_grip(ui: &mut egui::Ui, frame_rect: egui::Rect) -> OverlayAction {
-    let grip_rect = egui::Rect::from_min_max(
-        frame_rect.max - egui::vec2(size::GRIP, size::GRIP),
-        frame_rect.max,
-    );
-    let resp = ui
-        .interact(grip_rect, ui.id().with("resize_grip"), egui::Sense::click_and_drag())
-        .on_hover_cursor(egui::CursorIcon::ResizeSouthEast)
-        .on_hover_text("Drag to resize \u{b7} double-click to auto-size");
-    let color = if resp.hovered() || resp.dragged() {
-        color::TEXT_SECONDARY
-    } else {
-        color::TEXT_DISABLED
-    };
-    // Three dots along the corner diagonal, the usual grip glyph.
-    let painter = ui.painter();
-    let corner = frame_rect.max - egui::vec2(5.0, 5.0);
-    for step in 0..3 {
-        let offset = step as f32 * 4.0;
-        painter.circle_filled(corner - egui::vec2(offset, 0.0), 1.2, color);
-        painter.circle_filled(corner - egui::vec2(0.0, offset), 1.2, color);
-    }
-    painter.circle_filled(corner - egui::vec2(4.0, 4.0), 1.2, color);
-    if resp.double_clicked() {
-        return OverlayAction::ResetSize;
-    }
-    if resp.drag_stopped() {
-        return OverlayAction::ResizeDone;
-    }
-    let delta = resp.drag_delta();
-    if !resp.dragged() || delta == egui::Vec2::ZERO {
-        return OverlayAction::None;
-    }
-    OverlayAction::Resize((frame_rect.size() + delta).max(size::MIN_PANEL))
+/// Footer actions, right-aligned. Render the primary action first: the
+/// layout is right-to-left, so it lands at the far right edge.
+fn actions_right(ui: &mut egui::Ui, add_actions: impl FnOnce(&mut egui::Ui)) {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add_actions);
 }
 
-/// The translucent rounded panel every overlay view is drawn in.
-fn overlay_frame() -> egui::Frame {
-    egui::Frame::new()
-        .fill(color::SURFACE)
-        .stroke(egui::Stroke::NONE)
-        .corner_radius(size::FRAME_RADIUS)
-        .inner_margin(size::FRAME_MARGIN)
-        .shadow(egui::Shadow {
-            offset: [0, 4],
-            blur: 16,
-            spread: 0,
-            color: color::SHADOW,
-        })
+/// Capturing: status names the capture in flight (double-tap copies on
+/// modifier release, the clipboard read runs off-thread — #38); the body
+/// shows the picked clipboard text once it has arrived. Footer: Cancel.
+fn view_capturing(
+    slots: &mut Slots<'_>,
+    picking_text: Option<&str>,
+    source: CaptureSource,
+    elapsed: Option<std::time::Duration>,
+    action: &mut OverlayAction,
+) {
+    slots.status(|ui| {
+        let label = match (picking_text, source) {
+            (Some(_), _) => "Release to process",
+            (None, CaptureSource::Selection) => "Copying selection...",
+            (None, CaptureSource::Clipboard) => "Reading clipboard...",
+        };
+        status_row(ui, picking_text.is_none(), theme::text(label, font::BODY, color::TEXT), elapsed);
+    });
+    slots.body(|body| {
+        if let Some(text) = picking_text {
+            body.fill_text("picking", text, color::TEXT, false);
+        }
+    });
+    slots.footer(|ui| {
+        actions_right(ui, |ui| {
+            if cancel_button(ui) {
+                *action = OverlayAction::Cancel;
+            }
+        });
+    });
 }
+
+/// Processing: status names the phase; the body streams the text, sticking
+/// to its bottom. Footer: Cancel.
+fn view_processing(
+    slots: &mut Slots<'_>,
+    mode: ProcessMode,
+    streaming: &StreamingState<'_>,
+    elapsed: Option<std::time::Duration>,
+    action: &mut OverlayAction,
+) {
+    slots.status(|ui| {
+        if let Some(notice) = streaming.retry_notice {
+            // A silent retry is indistinguishable from a slow first attempt,
+            // so say so (WARNING = degraded, not failed).
+            status_row(ui, true, theme::text(notice, font::BODY, color::WARNING), elapsed);
+        } else if streaming.think_started && streaming.text.is_empty() {
+            status_row(ui, true, theme::text("Thinking...", font::BODY, color::TEXT_MUTED), elapsed);
+        } else if streaming.think_started {
+            // Think done, answer streaming: the collapsed header Result will
+            // show, locked.
+            let label = theme::text("\u{25b6} Thinking", font::LABEL, color::TEXT_MUTED);
+            status_row(ui, false, label, elapsed);
+        } else {
+            let label = theme::text(mode.processing_label(), font::BODY, color::TEXT);
+            status_row(ui, true, label, elapsed);
+        }
+    });
+    slots.body(|body| {
+        if !streaming.text.is_empty() {
+            body.fill_text(("streaming", mode), streaming.text, color::TEXT, true);
+        }
+    });
+    slots.footer(|ui| {
+        actions_right(ui, |ui| {
+            if cancel_button(ui) {
+                *action = OverlayAction::Cancel;
+            }
+        });
+    });
+}
+
+/// Error: status says it failed; the body is the user-facing message (#27).
+/// Footer: Retry, copy-debug.
+fn view_error(
+    slots: &mut Slots<'_>,
+    message: &str,
+    can_retry: bool,
+    debug_available: bool,
+    action: &mut OverlayAction,
+) {
+    slots.status(|ui| {
+        status_row(ui, false, theme::text("\u{2715} Request failed", font::BODY, color::DANGER), None);
+    });
+    slots.body(|body| body.fill_text("error", message, color::TEXT, false));
+    slots.footer(|ui| {
+        actions_right(ui, |ui| {
+            if can_retry && docked_action_button(ui, "\u{21bb}", "Retry") {
+                *action = OverlayAction::Retry;
+            }
+            if debug_available && copy_debug_button(ui) {
+                *action = OverlayAction::CopyDebug;
+            }
+        });
+    });
+}
+
+/// Everything Result's footer shows besides the answer itself.
+struct ResultFooter<'a> {
+    auto_copy: bool,
+    copy_confirmed: bool,
+    debug_available: bool,
+    source: CaptureSource,
+    source_files: &'a [String],
+    completion_status: Option<&'a str>,
+    model_switchable: bool,
+}
+
+/// Result: status carries the Think toggle and the completion summary (which
+/// switches models when profiles exist); the body is the answer, preceded by
+/// the expanded Think block and an "incomplete" banner when they apply.
+/// Footer: source badge on the left; primary action, Retry and copy-debug
+/// on the right.
+fn view_result(
+    slots: &mut Slots<'_>,
+    mode: ProcessMode,
+    text: &str,
+    streaming: &StreamingState<'_>,
+    footer: ResultFooter<'_>,
+    action: &mut OverlayAction,
+) {
+    slots.status(|ui| {
+        if streaming.think_content.is_some() && think_toggle(ui, streaming.think_expanded) {
+            *action = OverlayAction::ToggleThink;
+        }
+        if let Some(status) = footer.completion_status {
+            let label = theme::text(status, font::CAPTION, color::TEXT_MUTED);
+            if footer.model_switchable {
+                // The label names the model that answered, so it doubles as
+                // the "ask another model" control when profiles exist.
+                let resp = ui
+                    .add(egui::Label::new(label).sense(egui::Sense::click()))
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("Switch to the next model profile and re-run");
+                if resp.clicked() {
+                    *action = OverlayAction::CycleModel;
+                }
+            } else {
+                ui.label(label);
+            }
+        }
+    });
+    slots.body(|body| {
+        // The partial reply is shown below, so say it is incomplete and why (#65).
+        if let Some(reason) = streaming.incomplete {
+            let banner = format!("\u{26a0} Incomplete — {reason}");
+            body.ui.label(theme::text(banner, font::LABEL, color::WARNING));
+            body.ui.add_space(space::SM);
+        }
+        if streaming.think_expanded && let Some(content) = streaming.think_content {
+            think_block(body.ui, content);
+            body.ui.add_space(space::SM);
+        }
+        body.fill_text(("result", mode), text, color::TEXT, false);
+    });
+    slots.footer(|ui| {
+        render_source_badge(ui, footer.source, footer.source_files);
+        actions_right(ui, |ui| {
+            // Primary: auto_copy (double-tap) = paste/replace (↩); otherwise
+            // copy (📋), with ✓ confirming a just-done copy (#16a).
+            let (icon, tip) = if footer.auto_copy {
+                ("\u{21a9}", "Paste over the selection (Enter)")
+            } else if footer.copy_confirmed {
+                ("\u{2713}", "Copied")
+            } else {
+                ("\u{1f4cb}", "Copy to clipboard (Enter)")
+            };
+            if docked_action_button(ui, icon, tip) {
+                *action = if footer.auto_copy {
+                    OverlayAction::PasteReplace
+                } else {
+                    OverlayAction::CopyToClipboard
+                };
+            }
+            if docked_action_button(ui, "\u{21bb}", "Retry") {
+                *action = OverlayAction::Retry;
+            }
+            if footer.debug_available && copy_debug_button(ui) {
+                *action = OverlayAction::CopyDebug;
+            }
+        });
+    });
+}
+
+/// The copy-debug (🔍) action shared by Result and Error.
+fn copy_debug_button(ui: &mut egui::Ui) -> bool {
+    docked_action_button(ui, "\u{1f50d}", "Copy the raw request + response to the clipboard")
+}
+
+
 
 /// What the user did in the settings panel this frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -437,7 +433,7 @@ pub fn render_settings<'t>(
         .constrain(false)
         .sense(egui::Sense::drag())
         .show(ctx, |ui| {
-            overlay_frame().show(ui, |ui| {
+            panel::frame().show(ui, |ui| {
                 ui.set_width(size::SETTINGS_WIDTH);
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 4.0);
                 ui.spacing_mut().slider_width = 220.0;
@@ -875,321 +871,14 @@ fn render_profile_page<'t>(
 
 
 
-/// The text column under an optional `HeightTarget`: floors it at the
-/// target's remainder (`reserved_after` = what still follows it), and with
-/// `cap` also scrolls it there; no target = natural height up to
-/// `MAX_RESULT_HEIGHT`. `set_min_height` reserves from the current cursor, so
-/// the floor is scoped to exactly this column.
-fn render_text_column(
-    ui: &mut egui::Ui,
-    id_salt: impl std::hash::Hash,
-    text: &str,
-    target: Option<HeightTarget>,
-    reserved_after: f32,
-    stick_to_bottom: bool,
-) {
-    match target {
-        Some(t) => {
-            let floor = t.remaining(ui, reserved_after);
-            let max_height = if t.cap { floor } else { MAX_RESULT_HEIGHT };
-            ui.scope(|ui| {
-                ui.set_min_height(floor);
-                scroll_text(ui, id_salt, text, max_height, stick_to_bottom);
-            });
-        }
-        None => scroll_text(ui, id_salt, text, MAX_RESULT_HEIGHT, stick_to_bottom),
-    }
-}
 
 
 
 
 
-/// Render the Capturing state: a spinner shown immediately on double-tap while the
-/// selection is copied on a background thread (no content/tabs yet).
-fn render_capturing(
-    ui: &mut egui::Ui,
-    picking_text: Option<&str>,
-    source: CaptureSource,
-    elapsed: Option<std::time::Duration>,
-    target: Option<HeightTarget>,
-    action: &mut OverlayAction,
-) {
-    if let Some(text) = picking_text {
-        // Single-tap picking: the clipboard content has arrived, so show the
-        // data that will be processed in the chosen mode on release.
-        render_text_column(ui, "picking", text, target, 4.0 + size::ACTION_BTN, false);
-    } else {
-        // Content not yet available — double-tap captures the selection on
-        // modifier release (copy simulation needs the modifiers up) and the
-        // single-tap clipboard read runs on a background thread (#38); until
-        // then show a spinner with a source-appropriate label.
-        ui.horizontal(|ui| {
-            ui.spinner();
-            let label = match source {
-                CaptureSource::Selection => "Copying selection...",
-                CaptureSource::Clipboard => "Reading clipboard...",
-            };
-            ui.label(
-                egui::RichText::new(label)
-                    .color(color::TEXT)
-                    .size(font::BODY),
-            );
-            elapsed_label(ui, elapsed);
-        });
-    }
-    ui.add_space(space::SM);
-    if cancel_button(ui) {
-            *action = OverlayAction::Cancel;
-        }
-}
 
-#[allow(clippy::too_many_arguments)]
-fn render_processing(
-    ui: &mut egui::Ui,
-    mode: ProcessMode,
-    streaming_text: &str,
-    think_started: bool,
-    retry_notice: Option<&str>,
-    elapsed: Option<std::time::Duration>,
-    target: Option<HeightTarget>,
-    action: &mut OverlayAction,
-) {
-    // Top row: shared slot with Result's think toggle (see `size::ROW`)
-    // — whichever of these variants is showing on the last Processing
-    // frame, it occupies the same height as Result's row that replaces it.
-    fixed_height_row(ui, size::ROW, |ui| {
-        if let Some(notice) = retry_notice {
-            // Automatic retry pending: a silent retry is indistinguishable
-            // from a slow first attempt, so say so (amber = degraded, not failed).
-            ui.spinner();
-            ui.label(
-                egui::RichText::new(notice)
-                    .color(color::WARNING)
-                    .size(font::BODY),
-            );
-            elapsed_label(ui, elapsed);
-        } else if think_started && streaming_text.is_empty() {
-            // Think block in progress, no visible output yet.
-            ui.spinner();
-            ui.label(
-                egui::RichText::new("Thinking...")
-                    .color(color::TEXT_SECONDARY)
-                    .size(font::BODY),
-            );
-            elapsed_label(ui, elapsed);
-        } else if think_started {
-            // Think done, answer streaming: show locked collapsed header.
-            ui.label(
-                egui::RichText::new("\u{25b6} Thinking")
-                    .color(color::TEXT_MUTED)
-                    .size(font::LABEL),
-            );
-            elapsed_label(ui, elapsed);
-        } else {
-            ui.spinner();
-            ui.label(
-                egui::RichText::new(mode.processing_label())
-                    .color(color::TEXT)
-                    .size(font::BODY),
-            );
-            elapsed_label(ui, elapsed);
-        }
-    });
-    if !streaming_text.is_empty() {
-        ui.add_space(space::SM);
-        render_text_column(
-            ui,
-            ("streaming", mode),
-            streaming_text,
-            target,
-            4.0 + size::ACTION_BTN,
-            true,
-        );
-    }
-    ui.add_space(space::SM);
-    // Bottom row: shared slot with Result's reserved action-button space (see
-    // `size::ACTION_BTN`).
-    fixed_height_row(ui, size::ACTION_BTN, |ui| {
-        if cancel_button(ui) {
-            *action = OverlayAction::Cancel;
-        }
-    });
-}
 
-fn render_error(
-    ui: &mut egui::Ui,
-    message: &str,
-    can_retry: bool,
-    debug_available: bool,
-    action: &mut OverlayAction,
-) {
-    ui.label(
-        egui::RichText::new(format!("Error: {message}"))
-            .color(color::DANGER)
-            .size(font::LABEL),
-    );
-    // Bottom controls row, same slot and docked-button style as Result's (see
-    // `size::ACTION_BTN`): retry at the far right, copy-debug to its left —
-    // matching their relative order in Result, which only adds the primary
-    // copy/paste button after them.
-    if can_retry || debug_available {
-        ui.add_space(space::SM);
-        fixed_height_row(ui, size::ACTION_BTN, |ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if can_retry && docked_action_button(ui, "\u{21bb}", "Retry") {
-                    *action = OverlayAction::Retry;
-                }
-                if debug_available
-                    && docked_action_button(
-                        ui,
-                        "\u{1f50d}",
-                        "Copy the raw request + response to the clipboard",
-                    )
-                {
-                    *action = OverlayAction::CopyDebug;
-                }
-            });
-        });
-    }
-}
 
-#[allow(clippy::too_many_arguments)]
-fn render_result(
-    ui: &mut egui::Ui,
-    mode: ProcessMode,
-    text: &str,
-    think_content: Option<&str>,
-    think_expanded: bool,
-    auto_copy: bool,
-    copy_confirmed: bool,
-    incomplete: Option<&str>,
-    debug_available: bool,
-    source: CaptureSource,
-    source_files: &[String],
-    // Compact completion summary for the bottom row (see the doc comment on
-    // `render()`'s `completion_status` parameter, which this is threaded
-    // from).
-    completion_status: Option<&str>,
-    model_switchable: bool,
-    // Height target from `render()` (latch floor, or the user's capped size;
-    // already applied as a floor at the true top of the ui there). Its
-    // remainder budgets the answer text column below. A latch (`cap ==
-    // false`) is ignored while `think_expanded`, which is free to grow the
-    // window; collapsing again returns to at least the latched height.
-    target: Option<HeightTarget>,
-    action: &mut OverlayAction,
-) {
-    // Truncation / interruption banner at the very top: the partial reply is
-    // shown below, so tell the user it is incomplete and why (#65).
-    if let Some(reason) = incomplete {
-        ui.label(
-            egui::RichText::new(format!("\u{26a0} Incomplete — {reason}"))
-                .color(color::WARNING)
-                .size(font::LABEL),
-        );
-        ui.add_space(space::SM);
-    }
-
-    // Top row: shared slot with Processing's status/thinking row (see
-    // `size::ROW`) — but only when there's an actual think toggle to
-    // show. Reserving this row unconditionally (even blank) read as an empty
-    // hole above the text, which is worse than the row's height differing
-    // from Processing's for the (very common) non-thinking case; a plain
-    // result's text instead starts right under the separator.
-    if think_content.is_some() {
-        fixed_height_row(ui, size::ROW, |ui| {
-            if think_toggle(ui, think_expanded) {
-                *action = OverlayAction::ToggleThink;
-            }
-        });
-    }
-    // Expanded think content is deliberate, user-triggered growth — kept
-    // outside the fixed slot above (unaffected styling/size — #6).
-    if think_expanded && let Some(content) = think_content {
-        think_block(ui, content);
-    }
-    ui.add_space(space::SM);
-
-    // Answer text. With a latch (and Think collapsed) the leftover budget is
-    // a FLOOR only: a short answer still owns the latched space (no gap above
-    // the bottom row, no shrink-jump at the Processing→Result seam), while a
-    // taller answer grows the window — capping at the latch left the window
-    // shorter than its content whenever the last Processing frame undershot
-    // the final answer (thinking-only streams, cached/fast responses). A
-    // user size caps as well, expanded Think included: the text scrolls in
-    // whatever the fixed panel has left. The budget is measured from the
-    // cursor, so the optional banner/think rows above are accounted for;
-    // `4.0 + size::ACTION_BTN` is what unconditionally follows the text.
-    let text_target = target.filter(|t| t.cap || !think_expanded);
-    render_text_column(ui, ("result", mode), text, text_target, 4.0 + size::ACTION_BTN, false);
-
-    // Bottom row: shared slot with Processing's Cancel-button row (see
-    // `size::ACTION_BTN`): the passive completion summary on the left, the
-    // docked action buttons right-aligned in the otherwise-empty right side —
-    // "controls swap in place" the way the top row already does.
-    ui.add_space(space::SM);
-    fixed_height_row(ui, size::ACTION_BTN, |ui| {
-        render_source_badge(ui, source, source_files);
-        if let Some(status) = completion_status {
-            let text = egui::RichText::new(status).color(color::TEXT_MUTED).size(font::CAPTION);
-            if model_switchable {
-                // The label names the model that answered, so it doubles as
-                // the "ask another model" control when profiles exist.
-                let resp = ui
-                    .add(egui::Label::new(text).sense(egui::Sense::click()))
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .on_hover_text("Switch to the next model profile and re-run");
-                if resp.clicked() {
-                    *action = OverlayAction::CycleModel;
-                }
-            } else {
-                ui.label(text);
-            }
-        }
-        // right_to_left: the first button rendered lands at the far right, so
-        // this reads in reverse visual order — primary action at the edge,
-        // then retry, then copy-debug.
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // Primary: auto_copy (double-tap) = paste/replace (↩);
-            // otherwise copy (📋), with ✓ confirming a just-done copy (#16a).
-            let (icon, tip) = if auto_copy {
-                ("\u{21a9}", "Paste over the selection")
-            } else if copy_confirmed {
-                ("\u{2713}", "Copied")
-            } else {
-                ("\u{1f4cb}", "Copy to clipboard")
-            };
-            if docked_action_button(ui, icon, tip) {
-                *action = if auto_copy {
-                    OverlayAction::PasteReplace
-                } else {
-                    OverlayAction::CopyToClipboard
-                };
-            }
-            if docked_action_button(ui, "\u{21bb}", "Retry") {
-                *action = OverlayAction::Retry;
-            }
-            // Copy-debug (🔍): copies the raw request + response snapshot.
-            // Shown only when a capture exists for this result.
-            if debug_available
-                && docked_action_button(
-                    ui,
-                    "\u{1f50d}",
-                    "Copy the raw request + response to the clipboard",
-                )
-            {
-                *action = OverlayAction::CopyDebug;
-            }
-        });
-    });
-    // The floor for "never shorter than the latch" is already applied once,
-    // at the true top of the whole inner ui, in `render()` — see the comment
-    // there on why it can't be (re)applied here instead (`Ui::set_min_height`
-    // reserves space measured from the *current* cursor, not from the ui's
-    // start, so calling it this late would add phantom extra height on top
-    // of everything already drawn rather than act as a floor for the total).
-}
 
 /// Compact source badge in Result's bottom row — where the content came from:
 /// selection (double-tap) vs clipboard (single-tap). Makes a slow double-tap
@@ -1423,222 +1112,124 @@ mod tests {
         assert_eq!(form.default_model, 0, "rendering must not mutate the form");
     }
 
-    /// Render `render()` once inside a headless (no window, no display —
-    /// nothing pops up on screen) egui frame and return its output. Reuses
-    /// the given `ctx` rather than a fresh one, so `egui::Area`'s persisted
-    /// per-frame sizing memory (see the "egui Area sizing fix" comment on
-    /// `render()`) carries over between calls exactly like consecutive real
-    /// frames; tests mirror the app's `ResetAreas` at a state transition by
-    /// calling `ctx.memory_mut(|m| m.reset_areas())` themselves (see the
-    /// `ResetAreas` handling in `mod.rs`).
+    /// Render `render()` once inside a headless egui frame (no window, nothing
+    /// on screen). Reuses `ctx` so `egui::Area`'s per-frame sizing memory
+    /// carries over between calls exactly like consecutive real frames.
     fn render_headless(
         ctx: &egui::Context,
         state: &OverlayState,
-        text: &str,
-        min_result_height: Option<f32>,
-    ) -> OverlayOutput {
-        render_headless_sized(ctx, state, text, min_result_height, None)
-    }
-
-    fn render_headless_sized(
-        ctx: &egui::Context,
-        state: &OverlayState,
-        text: &str,
-        min_result_height: Option<f32>,
-        user_size: Option<egui::Vec2>,
+        mode: ProcessMode,
+        streaming_text: &str,
+        panel_size: egui::Vec2,
     ) -> OverlayOutput {
         let mut output = None;
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             output = Some(render(
                 state,
-                ProcessMode::Translate,
+                mode,
                 StreamingState {
-                    text,
+                    text: streaming_text,
                     think_started: false,
                     retry_notice: None,
-                    think_content: None,
+                    think_content: Some("some reasoning"),
                     think_expanded: false,
-                    incomplete: None,
+                    incomplete: Some("token limit"),
                 },
                 ProcessMode::ALL,
                 None,
                 None,
                 RephraseParams::default(),
-                ThinkingState { mode: ThinkingMode::NoThink, supported: false },
+                ThinkingState { mode: ThinkingMode::NoThink, supported: true },
                 false,
                 true,
                 CaptureSource::Selection,
                 &[],
                 false,
-                None,
-                false,
-                None,
-                false,
-                min_result_height,
-                user_size,
+                Some(std::time::Duration::from_secs(3)),
+                true,
+                Some("\u{2713} 2.4s".into()),
+                true,
+                panel_size,
                 ctx,
             ));
         });
         output.expect("render() must run synchronously inside ctx.run's closure")
     }
 
-    /// Render Processing repeatedly on a fresh `Context`, mirroring the real
-    /// app's continuous repaint while streaming, so the Area's sizing memory
-    /// has settled by the time its last `content_size` is used as the latch
-    /// (an isolated single-frame render can still be mid-settle on a brand
-    /// new `Context`). Returns the settled `OverlayOutput` and the `Context`
-    /// so the caller can render Result on the very same `ctx` next — the
-    /// realistic "transition frame" setup.
-    fn settle_processing(text: &str) -> (egui::Context, OverlayOutput) {
+    /// Render `n` settled frames and return the last one's frame size.
+    fn settled_size(state: &OverlayState, mode: ProcessMode, streaming: &str, panel: egui::Vec2) -> egui::Vec2 {
         let ctx = egui::Context::default();
-        let mut last = None;
-        for _ in 0..5 {
-            last = Some(render_headless(&ctx, &OverlayState::Processing, text, None));
-        }
-        (ctx, last.expect("looped at least once"))
-    }
-
-    /// The latch is a FLOOR, not a ceiling: a Result whose natural
-    /// (unconstrained) text is *taller* than the latch must grow the window
-    /// to its natural auto-size (still capped by `MAX_RESULT_HEIGHT`) instead
-    /// of absorbing the extra height into the ScrollArea. Pinning growth too
-    /// left the window shorter than its content whenever the last Processing
-    /// frame undershot the final answer (thinking-only streams, cached/fast
-    /// responses, post-processed text taller than the streamed preview).
-    /// The Area reset mirrors the app's unconditional `ResetAreas` at the
-    /// transition (see `execute_effects` in `mod.rs`) — without it the
-    /// carried-over Area memory starves the ScrollArea and the height only
-    /// crawls toward natural over many frames instead of landing in one.
-    #[test]
-    fn result_grows_beyond_latch_when_text_is_taller() {
-        let (ctx, processing) = settle_processing("hi");
-        let latch = processing.content_size.expect("Processing must report a content size").y;
-
-        ctx.memory_mut(|m| m.reset_areas());
-        let long_text = "line\n".repeat(200);
-        let result =
-            render_headless(&ctx, &OverlayState::Result(long_text.clone()), "", Some(latch));
-        let result_height = result.content_size.expect("Result must report a content size").y;
-
-        assert!(result_height >= latch - 0.5, "must never render shorter than the latch");
-        assert!(
-            result_height > latch + 50.0,
-            "a Result much taller than the latch ({latch}) must grow the window \
-             ({result_height}) instead of scrolling inside the latched height",
-        );
-
-        // Growth converges to the same auto-size an unlatched render produces
-        // (i.e. natural height capped by MAX_RESULT_HEIGHT) — the latch only
-        // ever adds height, never subtracts it.
-        let unlatched_ctx = egui::Context::default();
-        let mut unlatched = None;
-        for _ in 0..5 {
-            unlatched = Some(render_headless(
-                &unlatched_ctx,
-                &OverlayState::Result(long_text.clone()),
-                "",
-                None,
-            ));
-        }
-        let unlatched_height = unlatched.unwrap().content_size.unwrap().y;
-        assert!(
-            (result_height - unlatched_height).abs() < 12.0,
-            "latched growth ({result_height}) must converge to the unlatched \
-             auto-size ({unlatched_height})",
-        );
-    }
-
-    /// The floor side: a Result whose natural text is *shorter* than the
-    /// latch must still render at exactly the latch height on the very next
-    /// frame (never shrink below it). The text column's floor (`set_min_height`
-    /// in `render_result`) pads up to the latched budget rather than shrinking
-    /// to the short content, so no empty gap is left between the text column
-    /// and the bottom row.
-    #[test]
-    fn result_pinned_height_matches_latch_when_text_is_shorter() {
-        let (ctx, processing) =
-            settle_processing("a fairly long streaming preview of the answer so far");
-        let latch = processing.content_size.expect("Processing must report a content size").y;
-
-        ctx.memory_mut(|m| m.reset_areas());
-        let result = render_headless(&ctx, &OverlayState::Result("short".into()), "", Some(latch));
-        let result_height = result.content_size.expect("Result must report a content size").y;
-
-        // Same tolerance/rationale as the "taller" test above: never shorter
-        // (tight), a few px of ScrollArea-internal-chrome overshoot tolerated.
-        assert!(result_height >= latch - 0.5, "must never render shorter than the latch");
-        assert!(
-            result_height < latch + 12.0,
-            "pinned Result height {result_height} must stay close to the latch {latch} \
-             even though the natural text is much shorter",
-        );
-    }
-
-    /// Without a latch (`min_result_height: None`), Result falls back to
-    /// normal auto-sizing — a much longer text must render measurably taller
-    /// than a short one, proving the cap in the tests above is really doing
-    /// something (not just always producing the same size regardless).
-    #[test]
-    fn result_without_latch_auto_sizes_normally() {
-        let ctx = egui::Context::default();
-        let mut short = None;
-        let mut long = None;
-        let long_text = "line\n".repeat(200);
-        for _ in 0..5 {
-            short = Some(render_headless(&ctx, &OverlayState::Result("short".into()), "", None));
-            long = Some(render_headless(&ctx, &OverlayState::Result(long_text.clone()), "", None));
-        }
-
-        let short_h = short.unwrap().content_size.unwrap().y;
-        let long_h = long.unwrap().content_size.unwrap().y;
-        assert!(
-            long_h > short_h + 10.0,
-            "without a latch, a much longer result ({long_h}) must render taller \
-             than a short one ({short_h})",
-        );
-    }
-
-    /// A user size fixes the panel: a 200-line Result and a one-word Result
-    /// both render at exactly that panel size (the text scrolls inside it),
-    /// and so does a streaming Processing frame — the latch is moot.
-    #[test]
-    fn user_size_fixes_the_panel_in_every_state() {
-        let ctx = egui::Context::default();
-        let size = egui::vec2(640.0, 420.0);
-        let long_text = "line\n".repeat(200);
-        let cases: [(OverlayState, &str); 3] = [
-            (OverlayState::Result(long_text.clone()), ""),
-            (OverlayState::Result("short".into()), ""),
-            (OverlayState::Processing, long_text.as_str()),
-        ];
-        for (state, streaming) in &cases {
-            ctx.memory_mut(|m| m.reset_areas());
-            let mut out = None;
-            for _ in 0..5 {
-                out = Some(render_headless_sized(&ctx, state, streaming, Some(300.0), Some(size)));
-            }
-            let content = out.unwrap().content_size.unwrap();
-            assert!(
-                (content.x - size.x).abs() < 1.0 && (content.y - size.y).abs() < 1.0,
-                "{state:?}: panel {content:?} must match the user size {size:?}",
-            );
-        }
-    }
-
-    /// The grip never reports a size below `size::MIN_PANEL`, and a delta of
-    /// zero reports nothing (no redundant resize events while merely holding).
-    #[test]
-    fn user_size_below_minimum_grows_the_panel_to_the_minimum() {
-        let ctx = egui::Context::default();
-        let tiny = egui::vec2(100.0, 40.0);
         let mut out = None;
         for _ in 0..5 {
-            out = Some(render_headless_sized(&ctx, &OverlayState::Result("x".into()), "", None, Some(tiny)));
+            out = Some(render_headless(&ctx, state, mode, streaming, panel));
         }
-        let content = out.unwrap().content_size.unwrap();
-        assert!(
-            content.x >= size::MIN_PANEL.x - 1.0 && content.y >= tiny.y,
-            "the chrome must not collapse below its own size: {content:?}",
-        );
+        out.unwrap().content_size.expect("visible states report a size")
+    }
+
+    fn close(a: egui::Vec2, b: egui::Vec2) -> bool {
+        (a.x - b.x).abs() < 1.0 && (a.y - b.y).abs() < 1.0
+    }
+
+    /// Geometry policy (UI-GUIDELINES §1): every state renders at exactly the
+    /// panel size — a one-word answer, a 200-line answer, a streaming frame, a
+    /// long error, the capture spinner, and Rephrase with its extra rows.
+    #[test]
+    fn every_state_renders_at_the_panel_size() {
+        let panel = egui::vec2(640.0, 420.0);
+        let long = "line\n".repeat(200);
+        let cases: [(OverlayState, ProcessMode, &str); 7] = [
+            (OverlayState::Capturing, ProcessMode::Translate, ""),
+            (OverlayState::Processing, ProcessMode::Translate, ""),
+            (OverlayState::Processing, ProcessMode::Translate, long.as_str()),
+            (OverlayState::Result("short".into()), ProcessMode::Translate, ""),
+            (OverlayState::Result(long.clone()), ProcessMode::Translate, ""),
+            (OverlayState::Result(long.clone()), ProcessMode::Rephrase, ""),
+            (OverlayState::Error(long.clone()), ProcessMode::Translate, ""),
+        ];
+        for (state, mode, streaming) in &cases {
+            let size = settled_size(state, *mode, streaming, panel);
+            assert!(close(size, panel), "{state:?}/{mode:?}: {size:?} must equal {panel:?}");
+        }
+    }
+
+    /// A panel smaller than `size::MIN_PANEL` is clamped up to it.
+    #[test]
+    fn panel_size_is_clamped_to_the_minimum() {
+        let size = settled_size(&OverlayState::Result("x".into()), ProcessMode::Translate, "", egui::vec2(100.0, 40.0));
+        assert!(close(size, size::MIN_PANEL), "{size:?}");
+    }
+
+    /// The same panel size is reported whether or not the state changed: the
+    /// window never has to move or resize at a transition.
+    #[test]
+    fn transitions_keep_the_window_size() {
+        let panel = egui::vec2(512.0, 380.0);
+        let ctx = egui::Context::default();
+        let mut sizes = Vec::new();
+        for state in [
+            OverlayState::Capturing,
+            OverlayState::Processing,
+            OverlayState::Result("line\n".repeat(50)),
+            OverlayState::Error("boom".into()),
+        ] {
+            ctx.memory_mut(|m| m.reset_areas());
+            for _ in 0..3 {
+                let out = render_headless(&ctx, &state, ProcessMode::Translate, "streamed", panel);
+                sizes.push(out.desired_size.unwrap());
+            }
+        }
+        let first = sizes[0];
+        assert!(sizes.iter().all(|s| close(*s, first)), "{sizes:?}");
+        assert!(close(first, panel + egui::Vec2::splat(size::SHADOW_PAD * 2.0)));
+    }
+
+    /// An idle frame reports no action and a hidden state no geometry.
+    #[test]
+    fn idle_frame_reports_no_action() {
+        let ctx = egui::Context::default();
+        let out = render_headless(&ctx, &OverlayState::Result("x".into()), ProcessMode::Translate, "", size::DEFAULT_PANEL);
+        assert!(matches!(out.action, OverlayAction::None));
+        let hidden = render_headless(&ctx, &OverlayState::Hidden, ProcessMode::Translate, "", size::DEFAULT_PANEL);
+        assert!(hidden.desired_size.is_none() && hidden.content_size.is_none());
     }
 }

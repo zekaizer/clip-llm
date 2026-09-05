@@ -463,6 +463,9 @@ struct UiConfig {
     /// Name of the model profile active at startup (a `[[models]].name` or the
     /// `[api]` model). Unknown/absent = the first profile.
     default_model: Option<String>,
+    /// Overlay panel size in points, `[width, height]`. Written by the resize
+    /// grip; absent = the built-in default.
+    panel_size: Option<[f32; 2]>,
 }
 
 /// `[languages]` — substituted into `{primary_lang}` / `{secondary_lang}`.
@@ -753,6 +756,13 @@ impl Config {
     /// Whether double-tap results start pinned (`[ui].double_tap_pinned`, default false).
     pub fn ui_double_tap_pinned(&self) -> bool {
         self.ui.double_tap_pinned.unwrap_or(false)
+    }
+
+    /// Overlay panel size (`[ui].panel_size`), if set to two finite positive
+    /// numbers. The UI clamps it to its minimum.
+    pub fn ui_panel_size(&self) -> Option<(f32, f32)> {
+        let [w, h] = self.ui.panel_size?;
+        (w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0).then_some((w, h))
     }
 
     /// Tab-bar display order (`[ui].tabs`). Order-only semantics: listed modes
@@ -1217,6 +1227,7 @@ fn starter_template() -> String {
         "tab-bar order (first = selected at startup); reorders only, never hides",
     ));
     t.push_str(&s("default_model", "", "model profile active at startup (a [[models]] name or the [api] model); unset = first"));
+    t.push_str(&r("panel_size", "[512, 380]", "overlay size in points; the resize grip writes this, double-click it to reset"));
     t.push('\n');
 
     // [languages] — substituted into {primary_lang} / {secondary_lang}.
@@ -1923,6 +1934,16 @@ X-Test = "1"
         let config = Config::default();
         assert!(!config.ui_single_tap_pinned());
         assert!(!config.ui_double_tap_pinned());
+        assert_eq!(config.ui_panel_size(), None);
+    }
+
+    #[test]
+    fn ui_panel_size_accepts_two_positive_numbers_only() {
+        let c: Config = toml::from_str("[ui]\npanel_size = [640, 420]\n").unwrap();
+        assert_eq!(c.ui_panel_size(), Some((640.0, 420.0)));
+        let zero: Config = toml::from_str("[ui]\npanel_size = [0, 420]\n").unwrap();
+        assert_eq!(zero.ui_panel_size(), None);
+        assert!(toml::from_str::<Config>("[ui]\npanel_size = [640]\n").is_err());
     }
 
     #[test]

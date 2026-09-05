@@ -29,20 +29,24 @@ Exception: the **Settings** panel is a form, not a live view — it keeps a
 fixed width (`theme::size::SETTINGS_WIDTH`) and sizes its height to the
 form. Long forms are split into sub-pages rather than scrolled.
 
-## 2. Layout: header / body / footer
+## 2. Layout: header / status / body / footer
 
-Every view fills the same three slots, top to bottom, provided by
+Every view fills the same four slots, top to bottom, provided by
 `panel::Slots`:
 
 | Slot | Content | Height |
 |------|---------|--------|
 | **Header** | Mode tabs left; thinking pills, pin, close right. Rephrase adds its parameter rows underneath. A separator closes the header. | Natural |
-| **Body** | The one thing the state is about: picked text, streaming text, the answer, the error. A status row (spinner + label + elapsed, or the Think toggle) may sit at its top. Text fills the remaining height and scrolls. | Remainder |
-| **Footer** | Left: passive status (source badge, completion summary, model). Right: actions, primary at the far right (`↩`/`📋`, then `↻`, then `🔍`; Processing shows Cancel). | `theme::size::ACTION_BTN` |
+| **Status** | One line saying what is going on: spinner + phase + elapsed while capturing or processing; the Think toggle and completion summary (`✓ 2.4s · model`, doubles as the model switch) in Result; `✕ Request failed` in Error. | `theme::size::ROW` |
+| **Body** | The one thing the state is about: picked text, streaming text, the answer, the error message. Text fills the remaining height and scrolls. | Remainder |
+| **Footer** | Left: the source badge. Right: actions, primary at the far right (`↩`/`📋`, then `↻`, then `🔍`; Capturing and Processing show Cancel). | `theme::size::ACTION_BTN` |
 
 Rules:
+- Every state fills every slot (an empty slot keeps its height), so a
+  transition only swaps contents — the text block never moves at
+  Processing → Result, which is what made the old overlay flicker.
 - Controls that exist in more than one state occupy the same slot and
-  position in each, so only the contents swap at a transition.
+  position in each.
 - Nothing scrolls except the body text (and the collapsed-by-default Think
   block, capped at `theme::size::THINK_MAX_HEIGHT`). No nested scroll areas.
 - Body content that could overflow (error messages included) goes through
@@ -119,7 +123,7 @@ DIAG_MOCK=1 cargo run --features diagnostics      # target/diagnostics/*.png
 ```
 
 Checklist for a new or changed view:
-1. It uses `panel::Slots` (header/body/footer) and nothing outside them.
+1. It fills every `panel::Slots` slot (header/status/body/footer) and draws nothing outside them.
 2. Every size/color/spacing is a `theme` token.
 3. Controls shared with another state sit in the same slot and order.
 4. Overflowing text goes through `Body::fill_text`.

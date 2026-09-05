@@ -85,7 +85,7 @@ pub mod size {
     pub const DEFAULT_PANEL: egui::Vec2 = egui::vec2(512.0, 380.0);
     /// Smallest panel the grip allows: header row plus one text line plus
     /// the footer still fit.
-    pub const MIN_PANEL: egui::Vec2 = egui::vec2(400.0, 160.0);
+    pub const MIN_PANEL: egui::Vec2 = egui::vec2(400.0, 180.0);
     /// Content width of the settings form (its height follows the form).
     pub const SETTINGS_WIDTH: f32 = 560.0;
     /// Transparent border around the frame where its shadow is drawn.
