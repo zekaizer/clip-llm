@@ -241,10 +241,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         let v = &mut style.visuals;
                         v.extreme_bg_color = egui::Color32::from_gray(225);
                         v.faint_bg_color = egui::Color32::from_gray(232);
-                        v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(180));
+                        v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_gray(180));
                         v.widgets.inactive.bg_fill = egui::Color32::from_gray(205);
                         v.widgets.inactive.weak_bg_fill = egui::Color32::from_gray(215);
-                        v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(160));
+                        v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_gray(160));
                         v.widgets.hovered.bg_fill = egui::Color32::from_gray(190);
                         v.widgets.hovered.weak_bg_fill = egui::Color32::from_gray(200);
                         v.widgets.active.bg_fill = egui::Color32::from_gray(175);
