@@ -49,6 +49,8 @@ const MIN_RESULT_TEXT_HEIGHT: f32 = 24.0;
 pub struct StreamingState<'a> {
     pub text: &'a str,
     pub think_started: bool,
+    /// Status text while an automatic retry is pending (Processing only).
+    pub retry_notice: Option<&'a str>,
     pub think_content: Option<&'a str>,
     pub think_expanded: bool,
     /// `Some(reason)` when the shown Result is partial (stream cut short).
@@ -237,7 +239,15 @@ pub fn render(
 
                 match state {
                     OverlayState::Processing => {
-                        render_processing(ui, mode, streaming.text, streaming.think_started, elapsed, &mut action);
+                        render_processing(
+                            ui,
+                            mode,
+                            streaming.text,
+                            streaming.think_started,
+                            streaming.retry_notice,
+                            elapsed,
+                            &mut action,
+                        );
                     }
                     OverlayState::Result(text) => {
                         render_result(
@@ -477,14 +487,25 @@ fn render_processing(
     mode: ProcessMode,
     streaming_text: &str,
     think_started: bool,
+    retry_notice: Option<&str>,
     elapsed: Option<std::time::Duration>,
     action: &mut OverlayAction,
 ) {
     // Top row: shared slot with Result's think toggle (see `TOP_ROW_HEIGHT`)
-    // — whichever of these three variants is showing on the last Processing
+    // — whichever of these variants is showing on the last Processing
     // frame, it occupies the same height as Result's row that replaces it.
     fixed_height_row(ui, TOP_ROW_HEIGHT, |ui| {
-        if think_started && streaming_text.is_empty() {
+        if let Some(notice) = retry_notice {
+            // Automatic retry pending: a silent retry is indistinguishable
+            // from a slow first attempt, so say so (amber = degraded, not failed).
+            ui.spinner();
+            ui.label(
+                egui::RichText::new(notice)
+                    .color(egui::Color32::from_rgb(230, 170, 60))
+                    .size(15.0),
+            );
+            render_elapsed_label(ui, elapsed);
+        } else if think_started && streaming_text.is_empty() {
             // Think block in progress, no visible output yet.
             ui.spinner();
             ui.label(
@@ -1004,6 +1025,7 @@ mod tests {
                 StreamingState {
                     text,
                     think_started: false,
+                    retry_notice: None,
                     think_content: None,
                     think_expanded: false,
                     incomplete: None,

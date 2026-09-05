@@ -630,8 +630,26 @@ fn classify_vision_status(status: u16) -> Option<bool> {
     }
 }
 
+/// An automatic retry the client is about to perform, reported to the
+/// [`RetryNotifier`] right before it sleeps for `delay`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryNotice {
+    /// The attempt that just failed (1-based); the retry is attempt + 1.
+    pub attempt: u32,
+    /// Total attempts the client will make, including the first.
+    pub max_attempts: u32,
+    /// Wait before the retry (fixed for transient errors, `Retry-After` for 429).
+    pub delay: Duration,
+    /// True when the retry is due to HTTP 429, false for a transient failure.
+    pub rate_limited: bool,
+}
+
+/// Callback invoked on each automatic retry. Runs on the worker runtime, so it
+/// must not block.
+pub type RetryNotifier = Arc<dyn Fn(RetryNotice) + Send + Sync>;
+
 #[derive(Clone)]
-pub struct LlmClient(Arc<LlmClientInner>);
+pub struct LlmClient(Arc<LlmClientInner>, Option<RetryNotifier>);
 
 impl LlmClientInner {
     /// Apply authentication headers (Bearer token and custom headers) to a
@@ -873,7 +891,19 @@ impl LlmClient {
             initial_response_timeout,
             supports_vision: OnceCell::new(),
             thinking_control: OnceCell::new(),
-        })))
+        }), None))
+    }
+
+    /// A handle sharing this client's connection pool and probe caches that
+    /// reports automatic retries to `notifier`.
+    pub fn with_retry_notifier(&self, notifier: RetryNotifier) -> Self {
+        Self(Arc::clone(&self.0), Some(notifier))
+    }
+
+    fn notify_retry(&self, attempt: u32, delay: Duration, rate_limited: bool) {
+        if let Some(notify) = &self.1 {
+            notify(RetryNotice { attempt, max_attempts: MAX_RETRIES + 1, delay, rate_limited });
+        }
     }
 
     /// Probe whether the model supports vision by sending a tiny image request.
@@ -1423,6 +1453,7 @@ impl LlmClient {
                         MAX_RETRIES + 1,
                         RETRY_DELAY.as_millis(),
                     );
+                    self.notify_retry(attempt, RETRY_DELAY, false);
                     tokio::time::sleep(RETRY_DELAY).await;
                     req = retry_req;
                 }
@@ -1433,6 +1464,7 @@ impl LlmClient {
                         MAX_RETRIES + 1,
                         delay.as_millis(),
                     );
+                    self.notify_retry(attempt, delay, true);
                     tokio::time::sleep(delay).await;
                     req = retry_req;
                 }

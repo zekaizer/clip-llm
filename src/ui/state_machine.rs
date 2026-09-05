@@ -112,6 +112,9 @@ pub enum UiEvent {
     },
     /// Worker detected a think block beginning (streaming only).
     ThinkStarted { request_id: u64 },
+    /// Worker scheduled an automatic retry of the in-flight request; `label`
+    /// is the ready-to-show status text (e.g. "Rate limited · retrying in 2s").
+    RetryScheduled { request_id: u64, label: String },
     /// Worker reported an error.
     WorkerError { message: String, request_id: u64 },
     /// User pressed close / Escape.
@@ -211,6 +214,9 @@ pub struct StateMachine {
     streaming_text: String,
     /// True once a think block has started during the current streaming request.
     think_started: bool,
+    /// Status line for an automatic retry in progress (replaces the Processing
+    /// label). Cleared as soon as the retried attempt produces output.
+    retry_notice: Option<String>,
     /// Think block content for the current mode (set on WorkerResult).
     think_content: Option<String>,
     /// `Some(reason)` when the current Result is partial (stream cut short);
@@ -244,6 +250,7 @@ impl StateMachine {
             cache: HashMap::new(),
             streaming_text: String::new(),
             think_started: false,
+            retry_notice: None,
             think_content: None,
             result_incomplete: None,
             auto_copy: false,
@@ -289,6 +296,11 @@ impl StateMachine {
 
     pub fn think_started(&self) -> bool {
         self.think_started
+    }
+
+    /// Status text for an automatic retry in progress, if any.
+    pub fn retry_notice(&self) -> Option<&str> {
+        self.retry_notice.as_deref()
     }
 
     pub fn think_content(&self) -> Option<&str> {
@@ -346,6 +358,9 @@ impl StateMachine {
                 self.on_worker_result(text, think_content, request_id, incomplete)
             }
             UiEvent::ThinkStarted { request_id } => self.on_think_started(request_id),
+            UiEvent::RetryScheduled { request_id, label } => {
+                self.on_retry_scheduled(request_id, label)
+            }
             UiEvent::WorkerError {
                 message,
                 request_id,
@@ -406,6 +421,7 @@ impl StateMachine {
         self.rephrase_params = RephraseParams::default();
         self.streaming_text.clear();
         self.think_started = false;
+        self.retry_notice = None;
         self.think_content = None;
         self.auto_copy = true; // capture is the double-tap (auto-copy) path
         self.user_repositioned = false;
@@ -460,6 +476,7 @@ impl StateMachine {
         }
         self.streaming_text.clear();
         self.think_started = false;
+        self.retry_notice = None;
         self.think_content = None;
         self.auto_copy = auto_copy;
         self.next_request_id += 1;
@@ -503,7 +520,19 @@ impl StateMachine {
         if !matches!(self.state, OverlayState::Processing) {
             return vec![];
         }
+        self.retry_notice = None;
         self.streaming_text.push_str(&text);
+        vec![]
+    }
+
+    fn on_retry_scheduled(&mut self, request_id: u64, label: String) -> Vec<UiEffect> {
+        if request_id != self.current_request_id {
+            return vec![];
+        }
+        if !matches!(self.state, OverlayState::Processing) {
+            return vec![];
+        }
+        self.retry_notice = Some(label);
         vec![]
     }
 
@@ -515,6 +544,7 @@ impl StateMachine {
             return vec![];
         }
         self.think_started = true;
+        self.retry_notice = None;
         vec![]
     }
 
@@ -533,6 +563,7 @@ impl StateMachine {
         }
         self.streaming_text.clear();
         self.think_started = false;
+        self.retry_notice = None;
         self.think_content = think_content.clone();
         self.result_incomplete = incomplete;
         self.cache.insert(self.cache_key(), (text.clone(), think_content));
@@ -559,6 +590,7 @@ impl StateMachine {
             return vec![];
         }
         self.think_started = false;
+        self.retry_notice = None;
         self.state = OverlayState::Error(message);
         // Same auto-hide rule as on_worker_result (#62): if focus was held
         // through the failure the user has seen the error, so the next
@@ -576,6 +608,7 @@ impl StateMachine {
         self.cache.clear();
         self.streaming_text.clear();
         self.think_started = false;
+        self.retry_notice = None;
         self.think_content = None;
         self.result_incomplete = None;
         self.has_been_focused = false;
@@ -794,12 +827,14 @@ impl StateMachine {
                 if let Some((cached_text, cached_think)) = self.cache.get(&key).cloned() {
                     self.streaming_text.clear();
                     self.think_started = false;
+                    self.retry_notice = None;
                     let mut effects = self.apply_cached_result(cached_text, cached_think);
                     effects.insert(0, UiEffect::SendCancel);
                     effects
                 } else if let Some(content) = self.original_content.clone() {
                     self.streaming_text.clear();
                     self.think_started = false;
+                    self.retry_notice = None;
                     self.think_content = None;
                     self.next_request_id += 1;
                     self.current_request_id = self.next_request_id;
@@ -825,6 +860,7 @@ impl StateMachine {
                     // errored mid-stream, so the new Processing view starts clean.
                     self.streaming_text.clear();
                     self.think_started = false;
+                    self.retry_notice = None;
                     self.think_content = None;
                     self.next_request_id += 1;
                     self.current_request_id = self.next_request_id;
@@ -1791,6 +1827,78 @@ mod tests {
     }
 
     // === Streaming text ===
+
+    // --- RetryScheduled: automatic-retry status in Processing ---
+
+    #[test]
+    fn retry_scheduled_sets_notice_while_processing() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+        assert_eq!(sm.retry_notice(), None);
+
+        sm.handle(UiEvent::RetryScheduled { request_id: rid, label: "Retrying (1/2)".into() });
+        assert_eq!(sm.retry_notice(), Some("Retrying (1/2)"));
+        assert!(matches!(sm.state(), OverlayState::Processing));
+    }
+
+    #[test]
+    fn retry_scheduled_stale_or_idle_ignored() {
+        let mut sm = new_sm();
+        sm.handle(UiEvent::RetryScheduled { request_id: 0, label: "x".into() });
+        assert_eq!(sm.retry_notice(), None, "Hidden: nothing to annotate");
+
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::RetryScheduled { request_id: rid + 100, label: "x".into() });
+        assert_eq!(sm.retry_notice(), None, "stale request_id must not leak in");
+    }
+
+    #[test]
+    fn retry_notice_cleared_once_output_arrives() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::RetryScheduled { request_id: rid, label: "Retrying".into() });
+
+        sm.handle(UiEvent::StreamDelta { text: "foo".into(), request_id: rid });
+        assert_eq!(sm.retry_notice(), None, "first delta of the retried attempt clears it");
+
+        sm.handle(UiEvent::RetryScheduled { request_id: rid, label: "Retrying".into() });
+        sm.handle(UiEvent::ThinkStarted { request_id: rid });
+        assert_eq!(sm.retry_notice(), None, "think start counts as output too");
+    }
+
+    #[test]
+    fn retry_notice_cleared_on_result_error_and_new_request() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::RetryScheduled { request_id: rid, label: "Retrying".into() });
+        sm.handle(UiEvent::WorkerError { message: "boom".into(), request_id: rid });
+        assert_eq!(sm.retry_notice(), None);
+
+        // Retry from Error starts a new request: the notice must not carry over.
+        let effects = sm.handle(UiEvent::UserRetry);
+        let rid2 = last_request_id(&effects);
+        assert_ne!(rid, rid2);
+        assert_eq!(sm.retry_notice(), None);
+        sm.handle(UiEvent::RetryScheduled { request_id: rid2, label: "Retrying".into() });
+        sm.handle(UiEvent::WorkerResult {
+            text: "done".into(),
+            think_content: None,
+            request_id: rid2,
+            incomplete: None,
+        });
+        assert_eq!(sm.retry_notice(), None);
+
+        // Hide clears it as well.
+        let effects = start_processing(&mut sm, "again");
+        let rid3 = last_request_id(&effects);
+        sm.handle(UiEvent::RetryScheduled { request_id: rid3, label: "Retrying".into() });
+        sm.handle(UiEvent::UserClose);
+        assert_eq!(sm.retry_notice(), None);
+    }
 
     #[test]
     fn stream_delta_appends_text() {

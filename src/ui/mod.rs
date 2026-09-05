@@ -68,6 +68,22 @@ fn format_completion_status(debug: &crate::DebugCapture) -> Option<String> {
     Some(out)
 }
 
+/// Status text for an automatic retry, shown in place of the Processing label.
+fn format_retry_label(
+    attempt: u32,
+    max_attempts: u32,
+    delay: std::time::Duration,
+    rate_limited: bool,
+) -> String {
+    if rate_limited {
+        // Ceil so a sub-second Retry-After never reads "in 0s".
+        let secs = delay.as_millis().div_ceil(1000);
+        format!("Rate limited \u{b7} retrying in {secs}s ({attempt}/{max_attempts})")
+    } else {
+        format!("Retrying ({attempt}/{max_attempts})\u{2026}")
+    }
+}
+
 /// Longest model label the Result bottom row shows before eliding — the row
 /// also holds the source badge, the timing summary and three action buttons
 /// within `OVERLAY_WIDTH`.
@@ -858,6 +874,12 @@ impl OverlayApp {
                 WorkerResponse::ThinkStarted { request_id } => {
                     UiEvent::ThinkStarted { request_id }
                 }
+                WorkerResponse::Retrying { request_id, attempt, max_attempts, delay, rate_limited } => {
+                    UiEvent::RetryScheduled {
+                        request_id,
+                        label: format_retry_label(attempt, max_attempts, delay, rate_limited),
+                    }
+                }
                 WorkerResponse::ProbeComplete { vision_supported, thinking_method } => {
                     use crate::api::client::ThinkingControlMethod as Tcm;
                     let thinking_label = match thinking_method {
@@ -1381,6 +1403,7 @@ impl eframe::App for OverlayApp {
             overlay::StreamingState {
                 text: self.sm.streaming_text(),
                 think_started: self.sm.think_started(),
+                retry_notice: self.sm.retry_notice(),
                 think_content: self.sm.think_content(),
                 think_expanded: self.think_expanded,
                 incomplete: self.sm.result_incomplete(),
@@ -2049,6 +2072,29 @@ mod tests {
         assert_eq!(app.req_ok, 1);
         assert_eq!(app.req_err, 0);
         assert!(app.last_debug.is_some(), "current completion's debug snapshot must surface");
+    }
+
+    // --- format_retry_label: Processing label during an automatic retry ---
+
+    #[test]
+    fn retry_label_transient() {
+        let d = std::time::Duration::from_millis(500);
+        assert_eq!(format_retry_label(1, 2, d, false), "Retrying (1/2)\u{2026}");
+    }
+
+    #[test]
+    fn retry_label_rate_limited_shows_wait() {
+        let d = std::time::Duration::from_secs(2);
+        assert_eq!(
+            format_retry_label(1, 2, d, true),
+            "Rate limited \u{b7} retrying in 2s (1/2)",
+        );
+        // Sub-second waits round up so the label never says "in 0s".
+        let d = std::time::Duration::from_millis(1200);
+        assert_eq!(
+            format_retry_label(1, 2, d, true),
+            "Rate limited \u{b7} retrying in 2s (1/2)",
+        );
     }
 
     // --- format_completion_status: Result bottom-row summary ---

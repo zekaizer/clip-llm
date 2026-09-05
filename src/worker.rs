@@ -5,7 +5,7 @@ use std::time::{Instant, SystemTime};
 use tokio::sync::mpsc as tokio_mpsc;
 use tracing::{debug, error, info, trace, warn, Instrument};
 
-use crate::api::client::{LlmClient, SseEvent, SseParser, Usage};
+use crate::api::client::{LlmClient, RetryNotice, SseEvent, SseParser, Usage};
 use crate::api::response::{extract_first_think_content, strip_think_blocks, ThinkBlockFilter};
 use crate::{ApiError, ClipboardContent, DebugCapture, ProcessMode, RephraseParams, ThinkingMode};
 
@@ -44,6 +44,15 @@ pub enum WorkerResponse {
     StreamDelta { text: String, request_id: u64 },
     /// Emitted once when the first `<think>` block begins (streaming only).
     ThinkStarted { request_id: u64 },
+    /// The client scheduled an automatic retry of this request (transient
+    /// failure or 429) and is waiting `delay` before resending.
+    Retrying {
+        request_id: u64,
+        attempt: u32,
+        max_attempts: u32,
+        delay: std::time::Duration,
+        rate_limited: bool,
+    },
     /// A finished response. `incomplete` is `Some(reason)` when the stream was
     /// cut short (token limit, stall, dropped connection, transport error) but
     /// partial content was received — the partial is shown with the reason as a
@@ -653,8 +662,20 @@ fn dispatch_process(
     let (c_tx, c_rx) = tokio::sync::oneshot::channel();
     *cancel_tx = Some(c_tx);
 
-    let llm = llm.clone();
     let resp_tx = resp_tx.clone();
+    let llm = {
+        let resp_tx = resp_tx.clone();
+        let request_id = task.request_id;
+        llm.with_retry_notifier(std::sync::Arc::new(move |n: RetryNotice| {
+            let _ = resp_tx.send(WorkerResponse::Retrying {
+                request_id,
+                attempt: n.attempt,
+                max_attempts: n.max_attempts,
+                delay: n.delay,
+                rate_limited: n.rate_limited,
+            });
+        }))
+    };
 
     let text_len = task.content.text.as_ref().map_or(0, |t| t.len());
     let img_count = task.content.images.len();
@@ -799,6 +820,7 @@ mod tests {
         match r {
             WorkerResponse::StreamDelta { .. } => "StreamDelta",
             WorkerResponse::ThinkStarted { .. } => "ThinkStarted",
+            WorkerResponse::Retrying { .. } => "Retrying",
             WorkerResponse::Complete { .. } => "Complete",
             WorkerResponse::Error { .. } => "Error",
             WorkerResponse::ProbeComplete { .. } => "ProbeComplete",
