@@ -485,11 +485,26 @@ impl OverlayApp {
     /// session in progress is closed first — the panel takes the window.
     fn open_settings(&mut self, ctx: &egui::Context) {
         if self.settings.is_some() {
+            // Already open: bring the window back rather than ignoring the
+            // click — the panel may have ended up hidden (see below).
+            if self.platform.show_window(None) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            }
+            ctx.request_repaint();
             return;
         }
         if !matches!(self.sm.state(), OverlayState::Hidden) {
+            // Close the session but keep the window: the panel takes it over.
+            // `HideWindow` would queue `Visible(false)` for the end of this
+            // frame, after the native show below — the window then vanished
+            // with the panel "open" behind it (macOS applies viewport
+            // commands at frame end, the native show runs now).
             let effects = self.sm_handle(UiEvent::UserClose);
+            let effects = effects.into_iter().filter(|e| *e != UiEffect::HideWindow).collect();
             self.execute_effects(effects, ctx);
+            self.preview_mode = None;
+            self.pending_capture = false;
+            self.spawn_position = None;
         }
         let active = self.model_names.get(self.sm.active_model()).map(String::as_str);
         let form = crate::settings::SettingsForm::from_config(&crate::config::get(), active);
@@ -2733,5 +2748,61 @@ mod tests {
         app.handle_overlay_action(&ctx, overlay::OverlayAction::ResetSize);
         assert_eq!(app.panel_size, theme::size::DEFAULT_PANEL);
         assert!(app.sm.user_repositioned());
+    }
+
+    // --- settings panel takes over a visible overlay ---
+
+    /// Opening Settings while a result is showing must not hide the window:
+    /// `HideWindow`'s `Visible(false)` is applied at frame end, after the
+    /// native show, so the panel would open behind a hidden window.
+    #[test]
+    fn open_settings_over_a_result_keeps_the_window_visible() {
+        let _lock = crate::clipboard::test_support::lock_clipboard();
+        let (mut app, resp_tx) = new_test_app();
+        let ctx = egui::Context::default();
+        app.sm_handle(UiEvent::ContentReady {
+            content: crate::ClipboardContent::text_only("only".into()),
+            auto_copy: true,
+        });
+        let current_id = app.sm.current_request_id();
+        resp_tx
+            .send(WorkerResponse::Complete {
+                result: "answer".into(),
+                think_content: None,
+                request_id: current_id,
+                incomplete: None,
+                debug: crate::DebugCapture::default(),
+            })
+            .unwrap();
+        app.poll_responses(&ctx);
+        assert!(matches!(app.sm.state(), OverlayState::Result(_)));
+
+        let full = ctx.run(egui::RawInput::default(), |ctx| app.open_settings(ctx));
+
+        assert!(app.settings.is_some());
+        assert_eq!(*app.sm.state(), OverlayState::Hidden);
+        let hid = full
+            .viewport_output
+            .values()
+            .flat_map(|v| v.commands.iter())
+            .any(|c| matches!(c, egui::ViewportCommand::Visible(false)));
+        assert!(!hid, "settings must not queue Visible(false) in the frame it opens");
+    }
+
+    /// A second "Settings…" while the panel is already open re-shows the
+    /// window instead of being ignored — the recovery path for a panel that
+    /// ended up hidden.
+    #[test]
+    fn reopening_settings_is_not_a_no_op() {
+        let _lock = crate::clipboard::test_support::lock_clipboard();
+        let (mut app, _resp_tx) = new_test_app();
+        let ctx = egui::Context::default();
+        app.open_settings(&ctx);
+        assert!(app.settings.is_some());
+        let full = ctx.run(egui::RawInput::default(), |ctx| app.open_settings(ctx));
+        assert!(app.settings.is_some());
+        // A request for a repaint is the observable "do something" here: the
+        // native show has no egui footprint on macOS.
+        assert!(full.viewport_output.values().any(|v| v.repaint_delay.is_zero()));
     }
 }
