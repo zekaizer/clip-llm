@@ -166,6 +166,9 @@ impl DiagCollector {
         if !self.pending_screenshot || self.screenshot_requested {
             return;
         }
+        // Static states (Settings, a pinned Result) repaint only on events;
+        // the settle countdown below needs frames, so keep them coming.
+        ctx.request_repaint();
         if let Some(snap) = self.ring.back() {
             let settled = match (snap.desired_size, snap.viewport_inner_rect) {
                 (Some(desired), Some(vp)) => {
