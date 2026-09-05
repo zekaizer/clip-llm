@@ -1,4 +1,7 @@
 mod overlay;
+mod panel;
+pub mod theme;
+mod widgets;
 pub mod state_machine;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -514,7 +517,7 @@ impl OverlayApp {
         self.last_desired_size = None;
         // Centered on the cursor's monitor from an estimated size; the real
         // size lands on the first frame and only grows the window in place.
-        let estimated = egui::vec2(overlay::SETTINGS_WIDTH + overlay::SHADOW_PAD * 2.0, 520.0);
+        let estimated = egui::vec2(theme::size::SETTINGS_WIDTH + theme::size::SHADOW_PAD * 2.0, 520.0);
         let pos = self.calculate_centered_position(estimated).map(|p| (p.x, p.y));
         if self.platform.show_window(pos) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));

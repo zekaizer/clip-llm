@@ -1,55 +1,16 @@
 use eframe::egui;
 
 use super::state_machine::{CaptureSource, OverlayState};
+use super::theme::{color, font, size, space};
+use super::widgets::{
+    cancel_button, docked_action_button, elapsed_label, fixed_height_row, hint_text, language_picker,
+    pill, pill_row, pill_styled, pill_with_tip, row_label, scroll_text, section_header, small_button,
+    think_block, think_toggle, PillTone,
+};
 use crate::{ProcessMode, RephraseLength, RephraseParams, RephraseStyle, ThinkingMode};
 
 pub(crate) const OVERLAY_WIDTH: f32 = 480.0;
 const MAX_RESULT_HEIGHT: f32 = 260.0;
-/// Space around the frame for shadow rendering.
-pub(crate) const SHADOW_PAD: f32 = 20.0;
-/// Accent color for selected tab underlines.
-fn accent_color() -> egui::Color32 {
-    egui::Color32::from_rgba_unmultiplied(108, 166, 255, 200)
-}
-/// Dimmed accent color for hover underlines and rephrase indent line.
-fn accent_color_dim() -> egui::Color32 {
-    egui::Color32::from_rgba_unmultiplied(108, 166, 255, 80)
-}
-/// Accent color for the uncommitted cycling preview underline — between the
-/// hover dim and the committed accent, signalling "not yet selected".
-fn accent_color_preview() -> egui::Color32 {
-    egui::Color32::from_rgba_unmultiplied(108, 166, 255, 140)
-}
-/// Action button size (square).
-const ACTION_BTN_SIZE: f32 = 26.0;
-/// Height of the shared top "status/think" row: Processing's spinner+label
-/// (or locked "Thinking" header) and Result's clickable think toggle are
-/// both rendered inside a row pinned to this height (see `fixed_height_row`),
-/// so that row occupies the same slot regardless of which content variant is
-/// showing — no shift in the text block below it across the Processing→Result
-/// transition, or between the row's own content variants.
-const TOP_ROW_HEIGHT: f32 = 24.0;
-/// Height of the shared bottom "controls" row: Processing's Cancel button,
-/// and Result's/Error's docked action buttons (sized `ACTION_BTN_SIZE`, which
-/// this matches) all occupy this same slot — only the contents swap in place
-/// across state transitions.
-const BOTTOM_ROW_HEIGHT: f32 = ACTION_BTN_SIZE;
-/// The frame's inner margin, named so the latch height math can subtract
-/// exactly what this margin adds back around the measured inner content,
-/// instead of duplicating "16, 14" as a second magic literal (see
-/// `HeightTarget` in `render()`).
-const FRAME_MARGIN: egui::Margin = egui::Margin::symmetric(16, 14);
-/// Floor for the Result answer text's column when its budget is derived from
-/// a pinned latch height (see `render_result`) — guards against a degenerate
-/// near-zero or negative budget if the surrounding chrome alone already
-/// consumes most/all of the latch.
-const MIN_RESULT_TEXT_HEIGHT: f32 = 24.0;
-/// Smallest panel (frame incl. margin) the resize grip allows: the tab bar
-/// plus pin/close still fit on one row, and one text line plus the bottom
-/// row still fit below the separator.
-pub(crate) const MIN_USER_PANEL: egui::Vec2 = egui::vec2(400.0, 120.0);
-/// Side of the square drag hit-area in the frame's bottom-right corner.
-const RESIZE_GRIP_SIZE: f32 = 16.0;
 
 /// Inner-content height the panel must fill (see `render()`): a floor for the
 /// text column — shorter content pads up to the remainder so the bottom row
@@ -74,7 +35,7 @@ impl HeightTarget {
     fn remaining(&self, ui: &egui::Ui, reserved_after: f32) -> f32 {
         let used = ui.cursor().top() - self.content_top;
         (self.inner - used - reserved_after - ui.spacing().item_spacing.y)
-            .max(MIN_RESULT_TEXT_HEIGHT)
+            .max(size::MIN_TEXT_HEIGHT)
     }
 }
 
@@ -116,7 +77,7 @@ pub enum OverlayAction {
     /// Switch to the next model profile and re-run the current content.
     CycleModel,
     /// The resize grip was dragged; the new panel (frame) size, already
-    /// clamped to `MIN_USER_PANEL`.
+    /// clamped to `size::MIN_PANEL`.
     Resize(egui::Vec2),
     /// The grip drag ended (the size is final — persist it).
     ResizeDone,
@@ -155,7 +116,7 @@ pub fn render(
     debug_available: bool,
     // Compact completion summary ("✓ 2.4s · 850 tokens") shown in Result's
     // bottom row — the same slot Processing's spinner+elapsed+Cancel row
-    // occupies (see `TOP_ROW_HEIGHT`/`BOTTOM_ROW_HEIGHT`), filling what would
+    // occupies (see `size::ROW`/`size::ACTION_BTN`), filling what would
     // otherwise be empty space left by those controls disappearing. `None`
     // when no completion data is available (e.g. a cached/instant result —
     // see `format_completion_status` in `mod.rs`).
@@ -207,7 +168,7 @@ pub fn render(
 
     // Offset the frame so shadow renders evenly on all sides.
     let area_resp = egui::Area::new("overlay".into())
-        .fixed_pos(egui::pos2(SHADOW_PAD, SHADOW_PAD))
+        .fixed_pos(egui::pos2(size::SHADOW_PAD, size::SHADOW_PAD))
         .constrain(false) // Fix (a): see above
         .sense(egui::Sense::drag())
         .show(ctx, |ui| {
@@ -215,7 +176,7 @@ pub fn render(
                 // Both the user size and the latch are the Frame's OUTER size
                 // (`content_size` in `OverlayOutput`, margin included), so
                 // subtract the margin to get targets for the *inner* ui.
-                let user_inner = user_size.map(|s| s.max(MIN_USER_PANEL) - FRAME_MARGIN.sum());
+                let user_inner = user_size.map(|s| s.max(size::MIN_PANEL) - size::FRAME_MARGIN.sum());
                 ui.set_width(user_inner.map_or(OVERLAY_WIDTH, |v| v.x));
                 let content_top = ui.cursor().top();
 
@@ -228,7 +189,7 @@ pub fn render(
                     None => min_result_height
                         .filter(|_| matches!(state, OverlayState::Result(_) | OverlayState::Error(_)))
                         .map(|h| HeightTarget {
-                            inner: (h - FRAME_MARGIN.sum().y).max(0.0),
+                            inner: (h - size::FRAME_MARGIN.sum().y).max(0.0),
                             content_top,
                             cap: false,
                         }),
@@ -256,9 +217,9 @@ pub fn render(
                         thinking, pinned, preview_mode,
                         &mut action,
                     );
-                    ui.add_space(4.0);
-                    ui.add(egui::Separator::default().spacing(4.0));
-                    ui.add_space(4.0);
+                    ui.add_space(space::SM);
+                    ui.add(egui::Separator::default().spacing(space::SM));
+                    ui.add_space(space::SM);
                     render_capturing(ui, picking_text, source, elapsed, target, &mut action);
                     return;
                 }
@@ -271,14 +232,14 @@ pub fn render(
 
                 // Rephrase parameter rows (style + length), shown when Rephrase is active.
                 if mode == ProcessMode::Rephrase && !matches!(state, OverlayState::Hidden) {
-                    ui.add_space(4.0);
+                    ui.add_space(space::SM);
                     render_rephrase_params(ui, rephrase_params, &mut action);
                 }
 
                 // Separator between tab bar / params and content.
-                ui.add_space(4.0);
-                ui.add(egui::Separator::default().spacing(4.0));
-                ui.add_space(4.0);
+                ui.add_space(space::SM);
+                ui.add(egui::Separator::default().spacing(space::SM));
+                ui.add_space(space::SM);
 
                 match state {
                     OverlayState::Processing => {
@@ -369,7 +330,7 @@ pub fn render(
 
     // Viewport = content + shadow padding on all sides.
     let content_size = area_resp.response.rect.size();
-    let desired = content_size + egui::vec2(SHADOW_PAD * 2.0, SHADOW_PAD * 2.0);
+    let desired = content_size + egui::vec2(size::SHADOW_PAD * 2.0, size::SHADOW_PAD * 2.0);
 
     OverlayOutput {
         action,
@@ -383,7 +344,7 @@ pub fn render(
 /// on release, double-click = `ResetSize`.
 fn render_resize_grip(ui: &mut egui::Ui, frame_rect: egui::Rect) -> OverlayAction {
     let grip_rect = egui::Rect::from_min_max(
-        frame_rect.max - egui::vec2(RESIZE_GRIP_SIZE, RESIZE_GRIP_SIZE),
+        frame_rect.max - egui::vec2(size::GRIP, size::GRIP),
         frame_rect.max,
     );
     let resp = ui
@@ -391,9 +352,9 @@ fn render_resize_grip(ui: &mut egui::Ui, frame_rect: egui::Rect) -> OverlayActio
         .on_hover_cursor(egui::CursorIcon::ResizeSouthEast)
         .on_hover_text("Drag to resize \u{b7} double-click to auto-size");
     let color = if resp.hovered() || resp.dragged() {
-        egui::Color32::from_gray(170)
+        color::TEXT_SECONDARY
     } else {
-        egui::Color32::from_gray(80)
+        color::TEXT_DISABLED
     };
     // Three dots along the corner diagonal, the usual grip glyph.
     let painter = ui.painter();
@@ -414,21 +375,21 @@ fn render_resize_grip(ui: &mut egui::Ui, frame_rect: egui::Rect) -> OverlayActio
     if !resp.dragged() || delta == egui::Vec2::ZERO {
         return OverlayAction::None;
     }
-    OverlayAction::Resize((frame_rect.size() + delta).max(MIN_USER_PANEL))
+    OverlayAction::Resize((frame_rect.size() + delta).max(size::MIN_PANEL))
 }
 
 /// The translucent rounded panel every overlay view is drawn in.
 fn overlay_frame() -> egui::Frame {
     egui::Frame::new()
-        .fill(egui::Color32::from_rgba_unmultiplied(30, 30, 30, 230))
+        .fill(color::SURFACE)
         .stroke(egui::Stroke::NONE)
-        .corner_radius(12)
-        .inner_margin(FRAME_MARGIN)
+        .corner_radius(size::FRAME_RADIUS)
+        .inner_margin(size::FRAME_MARGIN)
         .shadow(egui::Shadow {
             offset: [0, 4],
             blur: 16,
             spread: 0,
-            color: egui::Color32::from_black_alpha(100),
+            color: color::SHADOW,
         })
 }
 
@@ -452,10 +413,6 @@ pub enum ProfileTestView<'a> {
     Done(&'a Result<String, String>),
 }
 
-/// Panel width in settings mode — wider than the overlay so the per-mode
-/// thinking table and language pickers fit on one line each.
-pub(crate) const SETTINGS_WIDTH: f32 = 560.0;
-
 /// Render the settings panel (tray "Settings…") in the overlay window. Edits
 /// go straight into `form`; `baseline` is the form as opened (or last saved)
 /// and drives the dirty state. The caller acts on the returned action.
@@ -476,24 +433,24 @@ pub fn render_settings<'t>(
     }
 
     let area_resp = egui::Area::new("settings".into())
-        .fixed_pos(egui::pos2(SHADOW_PAD, SHADOW_PAD))
+        .fixed_pos(egui::pos2(size::SHADOW_PAD, size::SHADOW_PAD))
         .constrain(false)
         .sense(egui::Sense::drag())
         .show(ctx, |ui| {
             overlay_frame().show(ui, |ui| {
-                ui.set_width(SETTINGS_WIDTH);
+                ui.set_width(size::SETTINGS_WIDTH);
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 4.0);
                 ui.spacing_mut().slider_width = 220.0;
 
                 // Header: title, file name (full path on hover), close.
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Settings").color(egui::Color32::WHITE).size(16.0).strong());
+                    ui.label(egui::RichText::new("Settings").color(color::TEXT).size(font::TITLE).strong());
                     if let Some(path) = config_path {
                         let name = std::path::Path::new(path)
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_else(|| path.to_string());
-                        ui.add_space(4.0);
+                        ui.add_space(space::SM);
                         ui.label(hint_text(&name)).on_hover_text(path);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -502,7 +459,7 @@ pub fn render_settings<'t>(
                         }
                     });
                 });
-                ui.add_space(2.0);
+                ui.add_space(space::XS);
 
                 // A profile being edited gets the panel to itself (a sub-page)
                 // so the window never outgrows a laptop screen.
@@ -532,7 +489,7 @@ pub fn render_settings<'t>(
     }
 
     let content_size = area_resp.response.rect.size();
-    let desired = content_size + egui::vec2(SHADOW_PAD * 2.0, SHADOW_PAD * 2.0);
+    let desired = content_size + egui::vec2(size::SHADOW_PAD * 2.0, size::SHADOW_PAD * 2.0);
     (
         action,
         OverlayOutput { action: OverlayAction::None, desired_size: Some(desired), content_size: Some(content_size) },
@@ -552,7 +509,7 @@ fn render_settings_body(
         "\u{25cf} marks the profile used at startup. Switch at runtime from the tray Model menu or by clicking the model name under a result.",
     ));
     render_profiles(ui, form, caps);
-    ui.add_space(6.0);
+    ui.add_space(space::MD);
 
         section_header(ui, "Languages");
         egui::Grid::new("settings_languages")
@@ -575,7 +532,7 @@ fn render_settings_body(
                 });
                 ui.end_row();
             });
-        ui.add_space(6.0);
+        ui.add_space(space::MD);
 
         section_header(ui, "Behavior");
         egui::Grid::new("settings_behavior")
@@ -614,7 +571,7 @@ fn render_settings_body(
                 ui.end_row();
             });
         ui.label(hint_text("* applies after a restart"));
-        ui.add_space(6.0);
+        ui.add_space(space::MD);
 
         section_header(ui, "Thinking");
         egui::Grid::new("settings_thinking")
@@ -644,7 +601,7 @@ fn render_settings_body(
                     ui.end_row();
                 }
             });
-        ui.add_space(10.0);
+        ui.add_space(space::LG);
 
         render_settings_footer(ui, form, action, dirty);
 }
@@ -657,11 +614,11 @@ fn render_settings_footer(
     dirty: bool,
 ) {
     // Footer: status line, then actions.
-        ui.add_space(2.0);
+        ui.add_space(space::XS);
         if let Some(err) = &form.error {
-            ui.label(egui::RichText::new(err).color(egui::Color32::from_rgb(235, 110, 110)).size(12.0));
+            ui.label(egui::RichText::new(err).color(color::DANGER).size(font::CAPTION));
         } else if let Some(notice) = &form.notice {
-            ui.label(egui::RichText::new(notice).color(egui::Color32::from_rgb(120, 200, 140)).size(12.0));
+            ui.label(egui::RichText::new(notice).color(color::SUCCESS).size(font::CAPTION));
         }
         ui.horizontal(|ui| {
             if ui
@@ -673,22 +630,22 @@ fn render_settings_footer(
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let save = egui::Button::new(
-                    egui::RichText::new("Save").color(egui::Color32::WHITE).size(13.0),
+                    egui::RichText::new("Save").color(color::TEXT).size(font::LABEL),
                 )
-                .fill(if dirty { accent_color() } else { egui::Color32::from_gray(55) })
+                .fill(if dirty { color::ACCENT } else { color::RULE })
                 .stroke(egui::Stroke::NONE)
-                .corner_radius(6.0)
+                .corner_radius(size::RADIUS)
                 .min_size(egui::vec2(80.0, 28.0));
                 if ui.add_enabled(dirty, save).on_hover_text("\u{2318}S / Ctrl+S").clicked() {
                     *action = SettingsAction::Save;
                 }
                 let close_label = if dirty { "Cancel" } else { "Done" };
                 let close = egui::Button::new(
-                    egui::RichText::new(close_label).color(egui::Color32::from_gray(220)).size(13.0),
+                    egui::RichText::new(close_label).color(color::TEXT_SOFT).size(font::LABEL),
                 )
-                .fill(egui::Color32::from_rgba_unmultiplied(60, 60, 60, 200))
+                .fill(color::SURFACE_RAISED)
                 .stroke(egui::Stroke::NONE)
-                .corner_radius(6.0)
+                .corner_radius(size::RADIUS)
                 .min_size(egui::vec2(80.0, 28.0));
                 if ui.add(close).clicked() {
                     *action = SettingsAction::Cancel;
@@ -722,7 +679,7 @@ fn render_profiles(
             } else {
                 profile.name.trim().to_string()
             };
-            ui.label(egui::RichText::new(name).size(13.0).color(egui::Color32::from_gray(220)));
+            ui.label(egui::RichText::new(name).size(font::LABEL).color(color::TEXT_SOFT));
             ui.label(hint_text(&profile.summary()));
             if profile.from_api_section {
                 ui.label(hint_text("[api]")).on_hover_text(
@@ -768,7 +725,7 @@ fn render_profile_page<'t>(
         } else {
             form.profiles[i].name.trim().to_string()
         };
-        ui.label(egui::RichText::new(title).size(14.0).color(egui::Color32::WHITE));
+        ui.label(egui::RichText::new(title).size(font::LABEL).color(color::TEXT));
         if form.profiles[i].from_api_section {
             ui.label(hint_text("[api] section \u{b7} empty fields fall back to CLIP_LLM_* variables"));
         }
@@ -864,7 +821,7 @@ fn render_profile_page<'t>(
                 ui.end_row();
             }
         });
-    ui.add_space(8.0);
+    ui.add_space(space::MD);
     ui.horizontal(|ui| {
         let testing = matches!(test_state, ProfileTestView::Running);
         if ui
@@ -881,10 +838,10 @@ fn render_profile_page<'t>(
                 ui.label(hint_text("testing\u{2026}"));
             }
             ProfileTestView::Done(Ok(msg)) => {
-                ui.label(egui::RichText::new(msg).size(12.0).color(egui::Color32::from_rgb(120, 200, 140)));
+                ui.label(egui::RichText::new(msg).size(font::CAPTION).color(color::SUCCESS));
             }
             ProfileTestView::Done(Err(msg)) => {
-                ui.label(egui::RichText::new(msg).size(12.0).color(egui::Color32::from_rgb(235, 110, 110)));
+                ui.label(egui::RichText::new(msg).size(font::CAPTION).color(color::DANGER));
             }
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -903,146 +860,20 @@ fn render_profile_page<'t>(
             }
         });
     });
-    ui.add_space(10.0);
+    ui.add_space(space::LG);
     render_settings_footer(ui, form, action, dirty);
 }
 
-fn hint_text(text: &str) -> egui::RichText {
-    egui::RichText::new(text).color(egui::Color32::from_gray(120)).size(11.0)
-}
 
-fn row_label(ui: &mut egui::Ui, text: &str) {
-    ui.label(egui::RichText::new(text).color(egui::Color32::from_gray(200)).size(13.0));
-}
 
-/// Small caps-style group title with a rule under it.
-fn section_header(ui: &mut egui::Ui, text: &str) {
-    ui.add_space(2.0);
-    ui.label(
-        egui::RichText::new(text.to_ascii_uppercase())
-            .color(egui::Color32::from_gray(130))
-            .size(11.0),
-    );
-    ui.add(egui::Separator::default().spacing(4.0));
-}
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PillTone {
-    /// Selected = accent fill (an explicit choice).
-    Accent,
-    /// Selected = neutral fill (the built-in default is in effect).
-    Quiet,
-}
 
-/// Selectable pill in the tab-bar/param-pill style. Returns true on click.
-fn pill(ui: &mut egui::Ui, text: &str, selected: bool) -> bool {
-    pill_styled(ui, text, selected, PillTone::Accent).clicked()
-}
 
-fn pill_with_tip(ui: &mut egui::Ui, text: &str, selected: bool, tip: &str) -> bool {
-    pill_styled(ui, text, selected, PillTone::Accent).on_hover_text(tip).clicked()
-}
 
-fn pill_styled(ui: &mut egui::Ui, text: &str, selected: bool, tone: PillTone) -> egui::Response {
-    let rich = egui::RichText::new(text).size(12.0).color(if selected {
-        egui::Color32::WHITE
-    } else {
-        egui::Color32::from_gray(150)
-    });
-    let fill = match (selected, tone) {
-        (true, PillTone::Accent) => egui::Color32::from_rgba_unmultiplied(70, 95, 140, 220),
-        (true, PillTone::Quiet) => egui::Color32::from_rgba_unmultiplied(85, 85, 85, 220),
-        (false, _) => egui::Color32::from_rgba_unmultiplied(50, 50, 50, 120),
-    };
-    let button = egui::Button::new(rich)
-        .fill(fill)
-        .stroke(egui::Stroke::NONE)
-        .corner_radius(6.0)
-        .min_size(egui::vec2(0.0, 24.0));
-    ui.add(button)
-}
 
-/// Flat, low-emphasis button for secondary actions.
-fn small_button(text: &str) -> egui::Button<'static> {
-    egui::Button::new(egui::RichText::new(text).size(12.0).color(egui::Color32::from_gray(170)))
-        .fill(egui::Color32::TRANSPARENT)
-        .stroke(egui::Stroke::NONE)
-        .corner_radius(6.0)
-}
 
-/// Dropdown of common languages plus a free-text field for anything else.
-fn language_picker(ui: &mut egui::Ui, id: &str, value: &mut String) {
-    let common = crate::settings::COMMON_LANGUAGES;
-    let is_common = common.iter().any(|l| l.eq_ignore_ascii_case(value.trim()));
-    let selected = if is_common { value.trim().to_string() } else { "Other\u{2026}".to_string() };
-    ui.horizontal(|ui| {
-        egui::ComboBox::from_id_salt(id)
-            .width(140.0)
-            .selected_text(selected)
-            .show_ui(ui, |ui| {
-                for lang in common {
-                    if ui.selectable_label(value.trim().eq_ignore_ascii_case(lang), *lang).clicked() {
-                        *value = (*lang).to_string();
-                    }
-                }
-                if ui.selectable_label(!is_common, "Other\u{2026}").clicked() && is_common {
-                    value.clear();
-                }
-            });
-        if !is_common {
-            ui.add(
-                egui::TextEdit::singleline(value)
-                    .desired_width(150.0)
-                    .hint_text("language name"),
-            );
-        }
-    });
-}
 
-/// Render `add_contents` inside a row whose height is pinned to exactly
-/// `height` (a floor — content is never clipped, only ever centered within
-/// more space than it naturally needs). Used for the shared top status/think
-/// row and bottom controls row in both Processing and Result, so those rows'
-/// vertical footprint is identical regardless of which content variant (or
-/// which state) renders inside them — only the *contents* swap in place at
-/// the Processing→Result transition, not the layout around them.
-fn fixed_height_row(ui: &mut egui::Ui, height: f32, add_contents: impl FnOnce(&mut egui::Ui)) {
-    ui.horizontal(|ui| {
-        ui.set_min_height(height);
-        add_contents(ui);
-    });
-}
 
-/// Renders a vertically scrollable, word-wrapped text label with a consistent
-/// style, shrinking to the content's natural height up to `max_height`.
-fn render_scrollable_text(
-    ui: &mut egui::Ui,
-    id_salt: impl std::hash::Hash,
-    text: &str,
-    max_height: f32,
-    stick_to_bottom: bool,
-) {
-    egui::ScrollArea::vertical()
-        .id_salt(id_salt)
-        .max_height(max_height)
-        // egui's ScrollArea defaults to a 64px `min_scrolled_size` floor once
-        // content needs scrolling, silently overriding a smaller max_height
-        // (a `max_height` as low as e.g. 24 was still rendering at ~64px).
-        // Match that floor to the same one `render_result`'s budget math
-        // floors to, so a tight budget is actually honored.
-        .min_scrolled_height(MIN_RESULT_TEXT_HEIGHT)
-        .auto_shrink([false, true])
-        .stick_to_bottom(stick_to_bottom)
-        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
-        .show(ui, |ui| {
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(text).color(egui::Color32::WHITE).size(15.0),
-                )
-                .wrap_mode(egui::TextWrapMode::Wrap),
-            );
-        });
-}
 
 /// The text column under an optional `HeightTarget`: floors it at the
 /// target's remainder (`reserved_after` = what still follows it), and with
@@ -1063,85 +894,16 @@ fn render_text_column(
             let max_height = if t.cap { floor } else { MAX_RESULT_HEIGHT };
             ui.scope(|ui| {
                 ui.set_min_height(floor);
-                render_scrollable_text(ui, id_salt, text, max_height, stick_to_bottom);
+                scroll_text(ui, id_salt, text, max_height, stick_to_bottom);
             });
         }
-        None => render_scrollable_text(ui, id_salt, text, MAX_RESULT_HEIGHT, stick_to_bottom),
+        None => scroll_text(ui, id_salt, text, MAX_RESULT_HEIGHT, stick_to_bottom),
     }
 }
 
-/// Render just the clickable "▶/▼ Thinking" toggle (icon + label, unchanged
-/// styling/size — #6), no expanded content. This is Result's counterpart to
-/// Processing's status row and is rendered inside the shared `TOP_ROW_HEIGHT`
-/// slot (see `fixed_height_row`), so it doesn't shift the text block below
-/// when it replaces Processing's row at the transition. Call
-/// `render_think_content` separately, *outside* that fixed slot, when
-/// `expanded` — that growth is a deliberate user action, not part of the
-/// pinned transition geometry.
-fn render_think_toggle_header(ui: &mut egui::Ui, expanded: bool, action: &mut OverlayAction) {
-    let icon = if expanded { "\u{25bc}" } else { "\u{25b6}" };
-    let btn = egui::Button::new(
-        egui::RichText::new(format!("{icon} Thinking"))
-            .color(egui::Color32::from_gray(160))
-            .size(13.0),
-    )
-    .fill(egui::Color32::TRANSPARENT);
-    if ui.add(btn).clicked() {
-        *action = OverlayAction::ToggleThink;
-    }
-}
 
-/// Render the expanded think-block content (scrollable). Only shown once
-/// `render_think_toggle_header`'s toggle is expanded; deliberately rendered
-/// outside the fixed-height/pinned-height budget, so it's free to grow the
-/// window (collapsing returns to the pinned floor, not to whatever egui
-/// would otherwise auto-measure).
-fn render_think_content(ui: &mut egui::Ui, content: &str) {
-    egui::ScrollArea::vertical()
-        .id_salt("think_content")
-        .max_height(120.0)
-        .auto_shrink([false, true])
-        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
-        .show(ui, |ui| {
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(content)
-                        .color(egui::Color32::from_gray(130))
-                        .size(13.0),
-                )
-                .wrap_mode(egui::TextWrapMode::Wrap),
-            );
-        });
-}
 
-/// Small dim label showing how long the current request has been processing.
-/// Helps the user distinguish slow generation (especially a long thinking phase)
-/// from a stall.
-fn render_elapsed_label(ui: &mut egui::Ui, elapsed: Option<std::time::Duration>) {
-    if let Some(d) = elapsed {
-        ui.label(
-            egui::RichText::new(format!("{:.1}s", d.as_secs_f32()))
-                .color(egui::Color32::from_gray(120))
-                .size(12.0),
-        );
-    }
-}
 
-/// Render the "Cancel" button shown while a capture or LLM request is in
-/// flight (Capturing / Processing states), setting `action` to
-/// `OverlayAction::Cancel` when clicked.
-fn render_cancel_button(ui: &mut egui::Ui, action: &mut OverlayAction) {
-    let cancel_btn = egui::Button::new(
-        egui::RichText::new("Cancel")
-            .size(12.0)
-            .color(egui::Color32::from_rgb(255, 140, 140)),
-    )
-    .fill(egui::Color32::from_rgba_unmultiplied(80, 30, 30, 180))
-    .corner_radius(6.0);
-    if ui.add(cancel_btn).clicked() {
-        *action = OverlayAction::Cancel;
-    }
-}
 
 /// Render the Capturing state: a spinner shown immediately on double-tap while the
 /// selection is copied on a background thread (no content/tabs yet).
@@ -1156,7 +918,7 @@ fn render_capturing(
     if let Some(text) = picking_text {
         // Single-tap picking: the clipboard content has arrived, so show the
         // data that will be processed in the chosen mode on release.
-        render_text_column(ui, "picking", text, target, 4.0 + BOTTOM_ROW_HEIGHT, false);
+        render_text_column(ui, "picking", text, target, 4.0 + size::ACTION_BTN, false);
     } else {
         // Content not yet available — double-tap captures the selection on
         // modifier release (copy simulation needs the modifiers up) and the
@@ -1170,14 +932,16 @@ fn render_capturing(
             };
             ui.label(
                 egui::RichText::new(label)
-                    .color(egui::Color32::WHITE)
-                    .size(15.0),
+                    .color(color::TEXT)
+                    .size(font::BODY),
             );
-            render_elapsed_label(ui, elapsed);
+            elapsed_label(ui, elapsed);
         });
     }
-    ui.add_space(4.0);
-    render_cancel_button(ui, action);
+    ui.add_space(space::SM);
+    if cancel_button(ui) {
+            *action = OverlayAction::Cancel;
+        }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1191,63 +955,65 @@ fn render_processing(
     target: Option<HeightTarget>,
     action: &mut OverlayAction,
 ) {
-    // Top row: shared slot with Result's think toggle (see `TOP_ROW_HEIGHT`)
+    // Top row: shared slot with Result's think toggle (see `size::ROW`)
     // — whichever of these variants is showing on the last Processing
     // frame, it occupies the same height as Result's row that replaces it.
-    fixed_height_row(ui, TOP_ROW_HEIGHT, |ui| {
+    fixed_height_row(ui, size::ROW, |ui| {
         if let Some(notice) = retry_notice {
             // Automatic retry pending: a silent retry is indistinguishable
             // from a slow first attempt, so say so (amber = degraded, not failed).
             ui.spinner();
             ui.label(
                 egui::RichText::new(notice)
-                    .color(egui::Color32::from_rgb(230, 170, 60))
-                    .size(15.0),
+                    .color(color::WARNING)
+                    .size(font::BODY),
             );
-            render_elapsed_label(ui, elapsed);
+            elapsed_label(ui, elapsed);
         } else if think_started && streaming_text.is_empty() {
             // Think block in progress, no visible output yet.
             ui.spinner();
             ui.label(
                 egui::RichText::new("Thinking...")
-                    .color(egui::Color32::from_gray(160))
-                    .size(15.0),
+                    .color(color::TEXT_SECONDARY)
+                    .size(font::BODY),
             );
-            render_elapsed_label(ui, elapsed);
+            elapsed_label(ui, elapsed);
         } else if think_started {
             // Think done, answer streaming: show locked collapsed header.
             ui.label(
                 egui::RichText::new("\u{25b6} Thinking")
-                    .color(egui::Color32::from_gray(100))
-                    .size(13.0),
+                    .color(color::TEXT_MUTED)
+                    .size(font::LABEL),
             );
-            render_elapsed_label(ui, elapsed);
+            elapsed_label(ui, elapsed);
         } else {
             ui.spinner();
             ui.label(
                 egui::RichText::new(mode.processing_label())
-                    .color(egui::Color32::WHITE)
-                    .size(15.0),
+                    .color(color::TEXT)
+                    .size(font::BODY),
             );
-            render_elapsed_label(ui, elapsed);
+            elapsed_label(ui, elapsed);
         }
     });
     if !streaming_text.is_empty() {
-        ui.add_space(4.0);
+        ui.add_space(space::SM);
         render_text_column(
             ui,
             ("streaming", mode),
             streaming_text,
             target,
-            4.0 + BOTTOM_ROW_HEIGHT,
+            4.0 + size::ACTION_BTN,
             true,
         );
     }
-    ui.add_space(4.0);
+    ui.add_space(space::SM);
     // Bottom row: shared slot with Result's reserved action-button space (see
-    // `BOTTOM_ROW_HEIGHT`).
-    fixed_height_row(ui, BOTTOM_ROW_HEIGHT, |ui| {
-        render_cancel_button(ui, action);
+    // `size::ACTION_BTN`).
+    fixed_height_row(ui, size::ACTION_BTN, |ui| {
+        if cancel_button(ui) {
+            *action = OverlayAction::Cancel;
+        }
     });
 }
 
@@ -1260,16 +1026,16 @@ fn render_error(
 ) {
     ui.label(
         egui::RichText::new(format!("Error: {message}"))
-            .color(egui::Color32::from_rgb(255, 100, 100))
-            .size(14.0),
+            .color(color::DANGER)
+            .size(font::LABEL),
     );
     // Bottom controls row, same slot and docked-button style as Result's (see
-    // `BOTTOM_ROW_HEIGHT`): retry at the far right, copy-debug to its left —
+    // `size::ACTION_BTN`): retry at the far right, copy-debug to its left —
     // matching their relative order in Result, which only adds the primary
     // copy/paste button after them.
     if can_retry || debug_available {
-        ui.add_space(4.0);
-        fixed_height_row(ui, BOTTOM_ROW_HEIGHT, |ui| {
+        ui.add_space(space::SM);
+        fixed_height_row(ui, size::ACTION_BTN, |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if can_retry && docked_action_button(ui, "\u{21bb}", "Retry") {
                     *action = OverlayAction::Retry;
@@ -1319,29 +1085,31 @@ fn render_result(
     if let Some(reason) = incomplete {
         ui.label(
             egui::RichText::new(format!("\u{26a0} Incomplete — {reason}"))
-                .color(egui::Color32::from_rgb(255, 180, 60))
-                .size(13.0),
+                .color(color::WARNING)
+                .size(font::LABEL),
         );
-        ui.add_space(4.0);
+        ui.add_space(space::SM);
     }
 
     // Top row: shared slot with Processing's status/thinking row (see
-    // `TOP_ROW_HEIGHT`) — but only when there's an actual think toggle to
+    // `size::ROW`) — but only when there's an actual think toggle to
     // show. Reserving this row unconditionally (even blank) read as an empty
     // hole above the text, which is worse than the row's height differing
     // from Processing's for the (very common) non-thinking case; a plain
     // result's text instead starts right under the separator.
     if think_content.is_some() {
-        fixed_height_row(ui, TOP_ROW_HEIGHT, |ui| {
-            render_think_toggle_header(ui, think_expanded, action);
+        fixed_height_row(ui, size::ROW, |ui| {
+            if think_toggle(ui, think_expanded) {
+                *action = OverlayAction::ToggleThink;
+            }
         });
     }
     // Expanded think content is deliberate, user-triggered growth — kept
     // outside the fixed slot above (unaffected styling/size — #6).
     if think_expanded && let Some(content) = think_content {
-        render_think_content(ui, content);
+        think_block(ui, content);
     }
-    ui.add_space(4.0);
+    ui.add_space(space::SM);
 
     // Answer text. With a latch (and Think collapsed) the leftover budget is
     // a FLOOR only: a short answer still owns the latched space (no gap above
@@ -1352,19 +1120,19 @@ fn render_result(
     // user size caps as well, expanded Think included: the text scrolls in
     // whatever the fixed panel has left. The budget is measured from the
     // cursor, so the optional banner/think rows above are accounted for;
-    // `4.0 + BOTTOM_ROW_HEIGHT` is what unconditionally follows the text.
+    // `4.0 + size::ACTION_BTN` is what unconditionally follows the text.
     let text_target = target.filter(|t| t.cap || !think_expanded);
-    render_text_column(ui, ("result", mode), text, text_target, 4.0 + BOTTOM_ROW_HEIGHT, false);
+    render_text_column(ui, ("result", mode), text, text_target, 4.0 + size::ACTION_BTN, false);
 
     // Bottom row: shared slot with Processing's Cancel-button row (see
-    // `BOTTOM_ROW_HEIGHT`): the passive completion summary on the left, the
+    // `size::ACTION_BTN`): the passive completion summary on the left, the
     // docked action buttons right-aligned in the otherwise-empty right side —
     // "controls swap in place" the way the top row already does.
-    ui.add_space(4.0);
-    fixed_height_row(ui, BOTTOM_ROW_HEIGHT, |ui| {
+    ui.add_space(space::SM);
+    fixed_height_row(ui, size::ACTION_BTN, |ui| {
         render_source_badge(ui, source, source_files);
         if let Some(status) = completion_status {
-            let text = egui::RichText::new(status).color(egui::Color32::from_gray(120)).size(12.0);
+            let text = egui::RichText::new(status).color(color::TEXT_MUTED).size(font::CAPTION);
             if model_switchable {
                 // The label names the model that answered, so it doubles as
                 // the "ask another model" control when profiles exist.
@@ -1438,70 +1206,13 @@ fn render_source_badge(ui: &mut egui::Ui, source: CaptureSource, files: &[String
     };
     ui.label(
         egui::RichText::new(icon)
-            .size(12.0)
-            .color(egui::Color32::from_gray(120)),
+            .size(font::CAPTION)
+            .color(color::TEXT_MUTED),
     )
     .on_hover_text(tip);
 }
 
-/// Docked action button for the bottom controls row: a fixed
-/// [`ACTION_BTN_SIZE`] square, always visible in a subdued tone that
-/// brightens on hover. Returns true when clicked.
-fn docked_action_button(ui: &mut egui::Ui, icon: &str, tooltip: &str) -> bool {
-    let hovered = ui
-        .ctx()
-        .read_response(ui.next_auto_id())
-        .is_some_and(|r| r.hovered());
-    let (fg, bg_alpha) = if hovered {
-        (egui::Color32::WHITE, 200)
-    } else {
-        (egui::Color32::from_gray(170), 90)
-    };
-    let btn = egui::Button::new(egui::RichText::new(icon).size(14.0).color(fg))
-        .min_size(egui::vec2(ACTION_BTN_SIZE, ACTION_BTN_SIZE))
-        .fill(egui::Color32::from_rgba_unmultiplied(50, 50, 50, bg_alpha))
-        .stroke(egui::Stroke::NONE)
-        .corner_radius(4.0);
-    ui.add(btn).on_hover_text(tooltip).clicked()
-}
 
-fn render_param_pills<T: Copy + PartialEq>(
-    ui: &mut egui::Ui,
-    label: &str,
-    all: &[T],
-    current: T,
-    get_label: impl Fn(T) -> &'static str,
-    make_action: impl Fn(T) -> OverlayAction,
-    action: &mut OverlayAction,
-) {
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new(label)
-                .color(egui::Color32::from_gray(140))
-                .size(12.0),
-        );
-        for &item in all {
-            let is_selected = item == current;
-            let text = egui::RichText::new(get_label(item))
-                .size(12.0)
-                .color(if is_selected {
-                    egui::Color32::WHITE
-                } else {
-                    egui::Color32::from_gray(140)
-                });
-            let button = egui::Button::new(text)
-                .fill(if is_selected {
-                    egui::Color32::from_rgba_unmultiplied(60, 60, 60, 200)
-                } else {
-                    egui::Color32::TRANSPARENT
-                })
-                .corner_radius(6.0);
-            if ui.add(button).clicked() && !is_selected {
-                *action = make_action(item);
-            }
-        }
-    });
-}
 
 fn render_rephrase_params(
     ui: &mut egui::Ui,
@@ -1512,24 +1223,12 @@ fn render_rephrase_params(
     let outer_left = ui.cursor().min.x;
 
     let response = ui.indent(egui::Id::new("rephrase_params"), |ui| {
-        render_param_pills(
-            ui,
-            "Style",
-            RephraseStyle::ALL,
-            params.style,
-            |s| s.label(),
-            OverlayAction::ChangeRephraseStyle,
-            action,
-        );
-        render_param_pills(
-            ui,
-            "Length",
-            RephraseLength::ALL,
-            params.length,
-            |l| l.label(),
-            OverlayAction::ChangeRephraseLength,
-            action,
-        );
+        if let Some(style) = pill_row(ui, "Style", RephraseStyle::ALL, params.style, |s| s.label()) {
+            *action = OverlayAction::ChangeRephraseStyle(style);
+        }
+        if let Some(length) = pill_row(ui, "Length", RephraseLength::ALL, params.length, |l| l.label()) {
+            *action = OverlayAction::ChangeRephraseLength(length);
+        }
     });
 
     // Draw accent line on the left edge of the indented area.
@@ -1541,7 +1240,7 @@ fn render_rephrase_params(
             egui::vec2(1.5, rect.height() - 4.0),
         ),
         0.75,
-        accent_color_dim(),
+        color::ACCENT_DIM,
     );
 }
 
@@ -1572,19 +1271,19 @@ fn render_tab_bar(
             let is_selected = mode == highlight && is_available;
 
             let text = egui::RichText::new(mode.label())
-                .size(13.0)
+                .size(font::LABEL)
                 .color(if !is_available {
-                    egui::Color32::from_gray(90)
+                    color::TEXT_DISABLED
                 } else if is_selected {
-                    egui::Color32::WHITE
+                    color::TEXT
                 } else {
-                    egui::Color32::from_gray(100)
+                    color::TEXT_MUTED
                 });
 
             let button = egui::Button::new(text)
                 .fill(egui::Color32::TRANSPARENT)
                 .stroke(egui::Stroke::NONE)
-                .corner_radius(6.0);
+                .corner_radius(size::RADIUS);
 
             let response = ui.add(button);
             // Explain why a tab is disabled (an image-only clipboard locks out the
@@ -1598,12 +1297,12 @@ fn render_tab_bar(
             let underline_color = if is_selected {
                 // Distinguish the uncommitted cycling preview from the committed mode.
                 if cycling {
-                    Some(accent_color_preview())
+                    Some(color::ACCENT_PREVIEW)
                 } else {
-                    Some(accent_color())
+                    Some(color::ACCENT)
                 }
             } else if response.hovered() && is_available {
-                Some(accent_color_dim())
+                Some(color::ACCENT_DIM)
             } else {
                 None
             };
@@ -1627,12 +1326,12 @@ fn render_tab_bar(
             // via Escape, and single-tap results stay open on focus loss).
             let close = egui::Button::new(
                 egui::RichText::new("\u{2715}")
-                    .size(13.0)
-                    .color(egui::Color32::from_gray(150)),
+                    .size(font::LABEL)
+                    .color(color::TEXT_SECONDARY),
             )
             .fill(egui::Color32::TRANSPARENT)
             .stroke(egui::Stroke::NONE)
-            .corner_radius(4.0);
+            .corner_radius(size::RADIUS_SM);
             if ui.add(close).on_hover_text("Close (Esc)").clicked() {
                 *action = OverlayAction::Close;
             }
@@ -1640,19 +1339,19 @@ fn render_tab_bar(
             // Pin button (left of close) — when lit, the overlay stays open on
             // focus loss instead of auto-hiding.
             let pin = egui::Button::new(
-                egui::RichText::new("\u{1F4CC}").size(13.0).color(if pinned {
-                    egui::Color32::WHITE
+                egui::RichText::new("\u{1F4CC}").size(font::LABEL).color(if pinned {
+                    color::TEXT
                 } else {
-                    egui::Color32::from_gray(150)
+                    color::TEXT_SECONDARY
                 }),
             )
             .fill(if pinned {
-                egui::Color32::from_rgba_unmultiplied(60, 60, 60, 200)
+                color::SURFACE_RAISED
             } else {
                 egui::Color32::TRANSPARENT
             })
             .stroke(egui::Stroke::NONE)
-            .corner_radius(4.0);
+            .corner_radius(size::RADIUS_SM);
             let pin_tip = if pinned {
                 "Pinned — click to allow auto-hide"
             } else {
@@ -1669,20 +1368,20 @@ fn render_tab_bar(
                     let is_selected = tm == thinking.mode;
 
                     let text = egui::RichText::new(tm.label())
-                        .size(11.0)
+                        .size(font::MICRO)
                         .color(if is_selected {
-                            egui::Color32::WHITE
+                            color::TEXT
                         } else {
-                            egui::Color32::from_gray(130)
+                            color::TEXT_MUTED
                         });
 
                     let button = egui::Button::new(text)
                         .fill(if is_selected {
-                            egui::Color32::from_rgba_unmultiplied(50, 50, 50, 200)
+                            color::SURFACE_HOVER
                         } else {
                             egui::Color32::TRANSPARENT
                         })
-                        .corner_radius(4.0);
+                        .corner_radius(size::RADIUS_SM);
 
                     if ui.add(button).clicked() && !is_selected {
                         *action = OverlayAction::ChangeThinkingMode(tm);
@@ -1719,7 +1418,7 @@ mod tests {
         let (action, output) = result.unwrap();
         assert_eq!(action, SettingsAction::None);
         let size = output.desired_size.expect("panel must report a size");
-        assert!(size.x >= SETTINGS_WIDTH, "{size:?}");
+        assert!(size.x >= size::SETTINGS_WIDTH, "{size:?}");
         assert!(size.y > 200.0, "form rows must occupy real height: {size:?}");
         assert_eq!(form.default_model, 0, "rendering must not mutate the form");
     }
@@ -1926,7 +1625,7 @@ mod tests {
         }
     }
 
-    /// The grip never reports a size below `MIN_USER_PANEL`, and a delta of
+    /// The grip never reports a size below `size::MIN_PANEL`, and a delta of
     /// zero reports nothing (no redundant resize events while merely holding).
     #[test]
     fn user_size_below_minimum_grows_the_panel_to_the_minimum() {
@@ -1938,7 +1637,7 @@ mod tests {
         }
         let content = out.unwrap().content_size.unwrap();
         assert!(
-            content.x >= MIN_USER_PANEL.x - 1.0 && content.y >= tiny.y,
+            content.x >= size::MIN_PANEL.x - 1.0 && content.y >= tiny.y,
             "the chrome must not collapse below its own size: {content:?}",
         );
     }
