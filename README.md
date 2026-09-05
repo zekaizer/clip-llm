@@ -78,12 +78,19 @@ startup clip-llm reads, in order of precedence:
 If no file is found — or it is malformed — the built-in defaults are used. Every
 key is optional; you only specify what you want to change.
 
-After editing the file, pick **Reload Config** from the tray menu: prompts,
+The tray's **Settings…** opens an in-app panel for the everyday knobs —
+model profiles (add, edit, remove, test the connection, pick the one used at
+startup), language pair, startup mode, double-tap window, pin defaults and
+per-mode thinking. Saving rewrites only those keys in `config.toml` (comments
+and everything else stay as they were) and applies the result at once,
+including a changed set of profiles. Prompts and `[generation]` stay file-only.
+
+After editing the file by hand, pick **Reload Config** from the tray menu: prompts,
 languages, `[generation]`, `[ui]` pin defaults, per-mode thinking and the model
 profiles' connection settings apply at once (the tray *Status → Config* row
 reports the outcome; a broken file is rejected and the previous settings stay
-active). `[ui].tabs`, `[hotkey]`, `[telemetry]` and a changed set of model
-profiles still need a restart. The file holds these kinds of settings:
+active). `[ui].tabs`, `[hotkey]` and `[telemetry]` still need a restart. The
+file holds these kinds of settings:
 
 - **`[api]`** — connection settings (provider, endpoint, model, API key, custom
   headers, streaming). Each mirrors a `CLIP_LLM_*` environment variable; the
@@ -99,9 +106,11 @@ profiles still need a restart. The file holds these kinds of settings:
   `token_budget` overrides. The `[api]` section is the first profile (and the
   only one the `CLIP_LLM_*` variables apply to); when `[[models]]` entries exist
   and `[api]` names no model, the profiles alone are used. The first profile is
-  active at startup; pick another from the tray *Model* submenu or click the
-  model name under a result. A profile that fails to build (missing key, unknown
-  provider) is listed as unavailable in the tray instead of stopping the app.
+  active at startup (or the one named by `[ui].default_model`); pick another
+  from the tray *Model* submenu or click the model name under a result. A
+  profile that fails to build (missing key, unknown provider) is listed as
+  unavailable in the tray instead of stopping the app. Profiles can also be
+  managed from the *Settings…* panel.
 - **`[generation]`** — request parameters (`temperature`, `max_tokens`,
   `request_timeout_secs`, `initial_response_timeout_secs`). No
   environment-variable equivalent: **config file > built-in default**.

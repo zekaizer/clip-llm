@@ -761,6 +761,13 @@ impl ProfileSet {
     pub fn labels(&self) -> Vec<String> {
         self.clients.iter().map(|c| c.label().to_string()).collect()
     }
+
+    /// Pool index of the profile named `name`; 0 (the default) when `name` is
+    /// `None` or matches nothing.
+    pub fn index_of(&self, name: Option<&str>) -> usize {
+        name.and_then(|n| self.clients.iter().position(|c| c.label() == n))
+            .unwrap_or(0)
+    }
 }
 
 /// Build a client per profile. The first (default) profile must build — its
@@ -792,6 +799,25 @@ impl LlmClient {
     /// Model id sent in requests.
     pub fn model_name(&self) -> &str {
         &self.0.model
+    }
+
+    /// One tiny round trip to prove the profile works end to end (auth, URL,
+    /// model name). Returns a short human-readable line for the settings panel.
+    pub async fn test_connection(&self) -> Result<String, ApiError> {
+        let started = std::time::Instant::now();
+        let mut capture = DebugCapture::default();
+        let content = ClipboardContent::text_only("Reply with the single word OK.".into());
+        let reply = self
+            .complete(&content, ProcessMode::Rephrase, RephraseParams::default(), ThinkingMode::NoThink, &mut capture)
+            .await?;
+        let visible = crate::api::response::strip_think_blocks(&reply);
+        let snippet: String = visible.trim().chars().take(40).collect();
+        let secs = started.elapsed().as_secs_f32();
+        Ok(if snippet.is_empty() {
+            format!("Connected in {secs:.1}s (empty reply)")
+        } else {
+            format!("Connected in {secs:.1}s \u{b7} \"{snippet}\"")
+        })
     }
 
     /// Build a client for one model profile. `CLIP_LLM_*` environment variables
@@ -1768,6 +1794,14 @@ mod tests {
             token_budget: Some(4000),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn profile_set_index_of_falls_back_to_first() {
+        let set = build_profiles(&[openai_spec("a"), openai_spec("b")]).unwrap();
+        assert_eq!(set.index_of(Some("b")), 1);
+        assert_eq!(set.index_of(Some("zzz")), 0);
+        assert_eq!(set.index_of(None), 0);
     }
 
     #[test]

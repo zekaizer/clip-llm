@@ -453,6 +453,9 @@ struct UiConfig {
     /// relative order after the listed ones; unknown names are ignored with
     /// a warning. The first tab is also the mode selected at startup.
     tabs: Option<Vec<String>>,
+    /// Name of the model profile active at startup (a `[[models]].name` or the
+    /// `[api]` model). Unknown/absent = the first profile.
+    default_model: Option<String>,
 }
 
 /// `[languages]` — substituted into `{primary_lang}` / `{secondary_lang}`.
@@ -729,6 +732,11 @@ impl Config {
     }
 
     /// Whether single-tap results start pinned (`[ui].single_tap_pinned`, default false).
+    /// Model profile selected at startup (`[ui].default_model`), if set.
+    pub fn ui_default_model(&self) -> Option<&str> {
+        self.ui.default_model.as_deref().filter(|s| !s.trim().is_empty())
+    }
+
     pub fn ui_single_tap_pinned(&self) -> bool {
         self.ui.single_tap_pinned.unwrap_or(false)
     }
@@ -1198,6 +1206,7 @@ fn starter_template() -> String {
         "[\"translate\", \"rephrase\", \"summarize\", \"explain\", \"transcribe\"]",
         "tab-bar order (first = selected at startup); reorders only, never hides",
     ));
+    t.push_str(&s("default_model", "", "model profile active at startup (a [[models]] name or the [api] model); unset = first"));
     t.push('\n');
 
     // [languages] — substituted into {primary_lang} / {secondary_lang}.
@@ -1486,6 +1495,15 @@ mod tests {
             substitute("{primary_lang}->{secondary_lang}", "{secondary_lang}", "English"),
             "{secondary_lang}->English",
         );
+    }
+
+    #[test]
+    fn ui_default_model_parses_and_ignores_blank() {
+        let c: Config = toml::from_str("[ui]\ndefault_model = \"groq\"\n").unwrap();
+        assert_eq!(c.ui_default_model(), Some("groq"));
+        let blank: Config = toml::from_str("[ui]\ndefault_model = \"  \"\n").unwrap();
+        assert_eq!(blank.ui_default_model(), None);
+        assert_eq!(Config::default().ui_default_model(), None);
     }
 
     // --- reload: file loader, store, restart diff ---

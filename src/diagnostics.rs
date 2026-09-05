@@ -290,6 +290,10 @@ struct Scenario {
     mode: ProcessMode,
     /// Optional mode switch after result arrives (for mode-switch scenario).
     switch_to: Option<ProcessMode>,
+    /// Settings-panel scenario: opens the panel instead of processing text.
+    settings: bool,
+    /// After the panel is up, apply the canned edit and capture again.
+    settings_edit: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -330,6 +334,8 @@ impl DiagScenarioRunner {
                 input: "Hello",
                 mode: ProcessMode::Translate,
                 switch_to: None,
+                settings: false,
+                settings_edit: false,
             },
             Scenario {
                 name: "long_text",
@@ -347,30 +353,40 @@ impl DiagScenarioRunner {
                     Line 10: Final line of the long text scenario.",
                 mode: ProcessMode::Translate,
                 switch_to: None,
+                settings: false,
+                settings_edit: false,
             },
             Scenario {
                 name: "mode_switch",
                 input: "Testing mode switch from Translate to Rephrase.",
                 mode: ProcessMode::Translate,
                 switch_to: Some(ProcessMode::Rephrase),
+                settings: false,
+                settings_edit: false,
             },
             Scenario {
                 name: "error_display",
                 input: "__ERROR__",
                 mode: ProcessMode::Translate,
                 switch_to: None,
+                settings: false,
+                settings_edit: false,
             },
             Scenario {
                 name: "korean_text",
                 input: "안녕하세요. 이것은 한국어 텍스트 렌더링을 테스트하기 위한 시나리오입니다.",
                 mode: ProcessMode::Translate,
                 switch_to: None,
+                settings: false,
+                settings_edit: false,
             },
             Scenario {
                 name: "rephrase_mode",
                 input: "This sentense has speling erors that need correcting.",
                 mode: ProcessMode::Rephrase,
                 switch_to: None,
+                settings: false,
+                settings_edit: false,
             },
             Scenario {
                 name: "summarize_mode",
@@ -385,14 +401,42 @@ impl DiagScenarioRunner {
                     on runtime checks or locks.",
                 mode: ProcessMode::Summarize,
                 switch_to: None,
+                settings: false,
+                settings_edit: false,
             },
             Scenario {
                 name: "long_single_line",
                 input: "A",
                 mode: ProcessMode::Translate,
                 switch_to: None,
+                settings: false,
+                settings_edit: false,
+            },
+            Scenario {
+                name: "settings",
+                input: "",
+                mode: ProcessMode::Translate,
+                switch_to: None,
+                settings: true,
+                settings_edit: false,
+            },
+            Scenario {
+                name: "settings_edited",
+                input: "",
+                mode: ProcessMode::Translate,
+                switch_to: None,
+                settings: true,
+                settings_edit: true,
             },
         ]);
+        // DIAG_SCENARIO=a,b keeps only the named scenarios.
+        let scenarios = match std::env::var("DIAG_SCENARIO") {
+            Ok(filter) if !filter.trim().is_empty() => {
+                let wanted: Vec<&str> = filter.split(',').map(str::trim).collect();
+                scenarios.into_iter().filter(|s| wanted.contains(&s.name)).collect()
+            }
+            _ => scenarios,
+        };
 
         Self {
             scenarios,
@@ -418,6 +462,9 @@ impl DiagScenarioRunner {
                 if let Some(scenario) = self.scenarios.front() {
                     info!("diag: injecting scenario '{}'", scenario.name);
                     self.phase = RunnerPhase::WaitingForResult;
+                    if scenario.settings {
+                        return ScenarioAction::OpenSettings;
+                    }
                     return ScenarioAction::ShowOverlay {
                         mode: scenario.mode,
                         text: scenario.input.to_string(),
@@ -430,7 +477,7 @@ impl DiagScenarioRunner {
             }
 
             RunnerPhase::WaitingForResult => {
-                if overlay_state == "Result" || overlay_state == "Error" {
+                if overlay_state == "Result" || overlay_state == "Error" || overlay_state == "Settings" {
                     // Check if we need a mode switch.
                     if let Some(scenario) = self.scenarios.front()
                         && let Some(switch_mode) = scenario.switch_to
@@ -439,6 +486,11 @@ impl DiagScenarioRunner {
                         self.phase = RunnerPhase::WaitingForSwitchResult;
                         return ScenarioAction::SwitchMode(switch_mode);
                     }
+                    if self.scenarios.front().is_some_and(|s| s.settings_edit) {
+                        info!("diag: applying the sample settings edit");
+                        self.phase = RunnerPhase::WaitingForSwitchResult;
+                        return ScenarioAction::EditSettingsSample;
+                    }
 
                     self.delay_until = Instant::now() + RESULT_DISPLAY;
                     self.phase = RunnerPhase::WaitingToHide;
@@ -446,7 +498,7 @@ impl DiagScenarioRunner {
             }
 
             RunnerPhase::WaitingForSwitchResult => {
-                if overlay_state == "Result" || overlay_state == "Error" {
+                if overlay_state == "Result" || overlay_state == "Error" || overlay_state == "SettingsEdited" {
                     self.delay_until = Instant::now() + RESULT_DISPLAY;
                     self.phase = RunnerPhase::WaitingToHide;
                 }
@@ -457,10 +509,10 @@ impl DiagScenarioRunner {
                     return ScenarioAction::None;
                 }
 
-                self.scenarios.pop_front();
+                let settings = self.scenarios.pop_front().is_some_and(|s| s.settings);
                 self.delay_until = Instant::now() + BETWEEN_DELAY;
                 self.phase = RunnerPhase::WaitingToInject;
-                return ScenarioAction::HideOverlay;
+                return if settings { ScenarioAction::CloseSettings } else { ScenarioAction::HideOverlay };
             }
 
             RunnerPhase::Finishing => {
@@ -489,6 +541,12 @@ pub enum ScenarioAction {
     },
     SwitchMode(ProcessMode),
     HideOverlay,
+    /// Open the tray settings panel (pseudo-state "Settings").
+    OpenSettings,
+    /// Apply a canned edit to the open panel (pseudo-state "SettingsEdited"):
+    /// custom language, a thinking override, a save banner.
+    EditSettingsSample,
+    CloseSettings,
     /// All scenarios complete — app should exit.
     Quit,
 }
@@ -533,7 +591,7 @@ pub fn run_scenario_thread(
                 ctx.request_repaint();
                 break;
             }
-            ScenarioAction::ShowOverlay { .. } => {
+            ScenarioAction::ShowOverlay { .. } | ScenarioAction::OpenSettings => {
                 pre_show();
                 let _ = action_tx.send(action);
                 ctx.request_repaint();
@@ -699,12 +757,18 @@ mod tests {
         // mode_switch (index 2) returns SwitchMode on first Result.
         // error_display (index 3) produces Error state.
         for i in 0..scenario_count {
-            let action = runner.tick("Hidden"); // ShowOverlay
-            assert!(matches!(action, ScenarioAction::ShowOverlay { .. }),
-                "scenario {i}: expected ShowOverlay, got {action:?}");
+            let settings = runner.scenarios.front().is_some_and(|s| s.settings);
+            let action = runner.tick("Hidden"); // ShowOverlay / OpenSettings
+            if settings {
+                assert!(matches!(action, ScenarioAction::OpenSettings), "scenario {i}: {action:?}");
+            } else {
+                assert!(matches!(action, ScenarioAction::ShowOverlay { .. }),
+                    "scenario {i}: expected ShowOverlay, got {action:?}");
+            }
 
-            // error_display scenario produces Error, rest produce Result.
-            let result_state = if i == 3 { "Error" } else { "Result" };
+            // error_display scenario produces Error, settings the pseudo-state,
+            // the rest produce Result.
+            let result_state = if settings { "Settings" } else if i == 3 { "Error" } else { "Result" };
 
             let action = runner.tick(result_state);
             if matches!(action, ScenarioAction::SwitchMode(_)) {
@@ -712,9 +776,17 @@ mod tests {
                 runner.tick("Processing");
                 runner.tick("Result");
             }
+            if matches!(action, ScenarioAction::EditSettingsSample) {
+                runner.tick("SettingsEdited");
+            }
             // Expire display delay and hide.
             expire_delay(&mut runner);
-            runner.tick(result_state); // HideOverlay
+            let hide = runner.tick(result_state);
+            if settings {
+                assert!(matches!(hide, ScenarioAction::CloseSettings), "{hide:?}");
+            } else {
+                assert!(matches!(hide, ScenarioAction::HideOverlay), "{hide:?}");
+            }
             expire_delay(&mut runner);
         }
 

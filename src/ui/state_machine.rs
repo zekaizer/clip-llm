@@ -339,6 +339,12 @@ impl StateMachine {
         self.active_model
     }
 
+    /// Startup selection (`[ui].default_model`): the worker pool starts on the
+    /// same index, so no effect is needed.
+    pub fn set_active_model(&mut self, index: usize) {
+        self.active_model = index;
+    }
+
     pub fn capture_source(&self) -> CaptureSource {
         self.source
     }

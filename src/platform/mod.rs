@@ -127,6 +127,8 @@ static TRAY_QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// "Reload Config" clicked; consumed by `poll_tray_events` on the main thread,
 /// which owns the config swap and the worker notification.
 static TRAY_RELOAD_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// "Settings…" clicked; the panel is opened by the UI on the main thread.
+static TRAY_SETTINGS_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// A tray menu action the main thread must carry out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +137,8 @@ pub enum TrayAction {
     SelectModel(usize),
     /// "Reload Config" was clicked.
     ReloadConfig,
+    /// "Settings…" was clicked.
+    OpenSettings,
 }
 /// Model profile index picked in the tray "Model" submenu, consumed by
 /// `poll_tray_events` on the main thread. `NO_MODEL_SELECTED` = nothing pending.
@@ -192,6 +196,49 @@ thread_local! {
     /// only, pool order) and their labels. Main thread only.
     static TRAY_MODEL_ITEMS: RefCell<Vec<(String, tray_icon::menu::CheckMenuItem)>> =
         const { RefCell::new(Vec::new()) };
+    /// The "Model" submenu itself, repopulated on a profile reload.
+    static TRAY_MODEL_MENU: RefCell<Option<tray_icon::menu::Submenu>> = const { RefCell::new(None) };
+}
+
+/// Ids of the selectable "Model" items in pool order — read by the menu
+/// event handler (which may run off the main thread), written by
+/// `populate_model_menu` on the main thread.
+static TRAY_MODEL_IDS: std::sync::Mutex<Vec<tray_icon::menu::MenuId>> = std::sync::Mutex::new(Vec::new());
+
+/// Rebuild the "Model" submenu from the current profile set (after a config
+/// reload changed it). Main thread only; no-op without a tray.
+pub fn update_tray_models(models: &[TrayModel], active: usize) {
+    TRAY_MODEL_MENU.with(|m| {
+        if let Some(menu) = m.borrow().as_ref() {
+            populate_model_menu(menu, models, active);
+        }
+    });
+    update_tray_model(active);
+}
+
+/// Fill `menu` with one check item per selectable profile (pool order) and
+/// disabled rows for the unavailable ones; records ids/items for the handler
+/// and `update_tray_model`. Main thread only.
+fn populate_model_menu(menu: &tray_icon::menu::Submenu, models: &[TrayModel], active: usize) {
+    use tray_icon::menu::{CheckMenuItem, MenuItem, PredefinedMenuItem};
+    while menu.remove_at(0).is_some() {}
+    let mut items = Vec::new();
+    for (i, m) in models.iter().filter(|m| m.unavailable.is_none()).enumerate() {
+        let item = CheckMenuItem::new(&m.label, true, i == active, None);
+        let _ = menu.append(&item);
+        items.push((m.label.clone(), item));
+    }
+    let unavailable: Vec<&TrayModel> = models.iter().filter(|m| m.unavailable.is_some()).collect();
+    if !unavailable.is_empty() {
+        let _ = menu.append(&PredefinedMenuItem::separator());
+        for m in unavailable {
+            let why = m.unavailable.as_deref().unwrap_or("");
+            let _ = menu.append(&MenuItem::new(format!("{} \u{2014} unavailable: {why}", m.label), false, None));
+        }
+    }
+    *TRAY_MODEL_IDS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+        items.iter().map(|(_, item)| item.id().clone()).collect();
+    TRAY_MODEL_ITEMS.with(|slot| *slot.borrow_mut() = items);
 }
 
 /// Replace the Status submenu's Config row (reload outcome). Main thread only.
@@ -281,47 +328,11 @@ pub fn init_tray(ctx: &eframe::egui::Context, models: &[TrayModel]) {
 
     // "Model" submenu: one check item per selectable profile (radio-style, the
     // first is active at startup), disabled rows for profiles that failed to
-    // build. Only shown when there is a choice to make.
-    let model_items: Vec<CheckMenuItem> = models
-        .iter()
-        .filter(|m| m.unavailable.is_none())
-        .enumerate()
-        .map(|(i, m)| CheckMenuItem::new(&m.label, true, i == 0, None))
-        .collect();
-    let model_ids: Vec<tray_icon::menu::MenuId> =
-        model_items.iter().map(|item| item.id().clone()).collect();
-    let unavailable_items: Vec<MenuItem> = models
-        .iter()
-        .filter_map(|m| {
-            m.unavailable
-                .as_ref()
-                .map(|why| MenuItem::new(format!("{} \u{2014} unavailable: {why}", m.label), false, None))
-        })
-        .collect();
-    let model_menu = if models.len() > 1 {
-        let mut refs: Vec<&dyn tray_icon::menu::IsMenuItem> = Vec::new();
-        for item in &model_items {
-            refs.push(item);
-        }
-        let sep = PredefinedMenuItem::separator();
-        if !unavailable_items.is_empty() {
-            refs.push(&sep);
-            for item in &unavailable_items {
-                refs.push(item);
-            }
-        }
-        Some(Submenu::with_items("Model", true, &refs).expect("failed to create model submenu"))
-    } else {
-        None
-    };
-    TRAY_MODEL_ITEMS.with(|items| {
-        *items.borrow_mut() = models
-            .iter()
-            .filter(|m| m.unavailable.is_none())
-            .map(|m| m.label.clone())
-            .zip(model_items.iter().cloned())
-            .collect();
-    });
+    // build. Always present so the feature is discoverable with one profile,
+    // and repopulated by update_tray_models after a reload.
+    let model_menu = Submenu::new("Model", true);
+    populate_model_menu(&model_menu, models, 0);
+    TRAY_MODEL_MENU.with(|m| *m.borrow_mut() = Some(model_menu.clone()));
 
     let about_item = MenuItem::new("About clip-llm", true, None);
     let about_id = about_item.id().clone();
@@ -329,6 +340,8 @@ pub fn init_tray(ctx: &eframe::egui::Context, models: &[TrayModel]) {
     let config_id = config_item.id().clone();
     let reload_item = MenuItem::new("Reload Config", true, None);
     let reload_id = reload_item.id().clone();
+    let settings_item = MenuItem::new("Settings\u{2026}", true, None);
+    let settings_id = settings_item.id().clone();
     let launch_at_login_enabled = NativePlatform.launch_at_login_enabled();
     TRAY_LAUNCH_AT_LOGIN_STATE.store(launch_at_login_enabled, Ordering::SeqCst);
     let launch_at_login_item =
@@ -403,11 +416,10 @@ pub fn init_tray(ctx: &eframe::egui::Context, models: &[TrayModel]) {
 
     let menu = Menu::new();
     menu.append(&about_item).expect("failed to build tray menu");
+    menu.append(&settings_item).expect("failed to build tray menu");
     menu.append(&config_item).expect("failed to build tray menu");
     menu.append(&reload_item).expect("failed to build tray menu");
-    if let Some(model_menu) = &model_menu {
-        menu.append(model_menu).expect("failed to build tray menu");
-    }
+    menu.append(&model_menu).expect("failed to build tray menu");
     menu.append(&status_menu).expect("failed to build tray menu");
     menu.append(&PredefinedMenuItem::separator()).expect("failed to build tray menu");
     menu.append(&launch_at_login_item).expect("failed to build tray menu");
@@ -458,6 +470,11 @@ pub fn init_tray(ctx: &eframe::egui::Context, models: &[TrayModel]) {
                 } else if event.id() == &config_id {
                     // Spawning an editor process needs no main-thread round-trip.
                     open_config_file();
+                } else if event.id() == &settings_id {
+                    TRAY_SETTINGS_REQUESTED.store(true, Ordering::SeqCst);
+                    #[cfg(target_os = "windows")]
+                    windows::show_no_activate();
+                    ctx.request_repaint();
                 } else if event.id() == &reload_id {
                     // The swap touches the worker and UI state, so it runs on
                     // the main thread inside poll_tray_events.
@@ -465,7 +482,12 @@ pub fn init_tray(ctx: &eframe::egui::Context, models: &[TrayModel]) {
                     #[cfg(target_os = "windows")]
                     windows::show_no_activate();
                     ctx.request_repaint();
-                } else if let Some(index) = model_ids.iter().position(|id| id == event.id()) {
+                } else if let Some(index) = TRAY_MODEL_IDS
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .iter()
+                    .position(|id| id == event.id())
+                {
                     // The native check item toggled itself; the main thread
                     // re-checks the whole radio group via update_tray_model
                     // once the state machine has applied the switch.
@@ -507,7 +529,7 @@ pub fn init_tray(ctx: &eframe::egui::Context, models: &[TrayModel]) {
 /// Open the config file in a text editor, writing a commented starter template
 /// first when no file exists yet (see `config::ensure_config_file`). Runs on
 /// the tray menu handler thread.
-fn open_config_file() {
+pub fn open_config_file() {
     let Some(path) = crate::config::ensure_config_file() else {
         tracing::warn!("open config: no usable config path");
         return;
@@ -546,6 +568,9 @@ pub fn poll_tray_events(ctx: &eframe::egui::Context) -> Option<TrayAction> {
     };
     if TRAY_RELOAD_REQUESTED.swap(false, Ordering::SeqCst) {
         action = action.or(Some(TrayAction::ReloadConfig));
+    }
+    if TRAY_SETTINGS_REQUESTED.swap(false, Ordering::SeqCst) {
+        action = action.or(Some(TrayAction::OpenSettings));
     }
     if TRAY_LAUNCH_AT_LOGIN_REVERT.swap(false, Ordering::SeqCst) {
         // Re-query reality rather than assuming "not target" — a concurrent
