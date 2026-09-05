@@ -55,10 +55,21 @@ pub struct ProfileForm {
     pub auth_file: String,
     pub max_tokens: String,
     pub token_budget: String,
+    /// `thinking_control` key; empty = auto (probe on first use).
+    pub thinking_control: String,
     /// Lives in `[api]` (the `CLIP_LLM_*`-overridable profile) rather than in
     /// a `[[models]]` entry.
     pub from_api_section: bool,
 }
+
+/// Selectable `thinking_control` values: (key, label, explanation).
+pub const THINKING_CONTROLS: &[(&str, &str, &str)] = &[
+    ("", "Auto", "Probe once: try reasoning_effort, chat_template_kwargs, then /no_think and keep the first one that actually stops reasoning"),
+    ("reasoning_effort", "reasoning_effort", "Send reasoning_effort = \"none\" (LM Studio, Groq, OpenAI)"),
+    ("chat_template_kwargs", "kwargs", "Send chat_template_kwargs.enable_thinking = false (vLLM Qwen3)"),
+    ("prompt_tag", "/no_think", "Prefix the system prompt with /no_think (Qwen)"),
+    ("none", "None", "Never try to switch thinking off (always-on reasoning models)"),
+];
 
 impl ProfileForm {
     pub fn from_spec(spec: &crate::config::ModelSpec) -> Self {
@@ -72,6 +83,13 @@ impl ProfileForm {
             auth_file: text(&spec.auth_file),
             max_tokens: spec.max_tokens.map(|v| v.to_string()).unwrap_or_default(),
             token_budget: spec.token_budget.map(|v| v.to_string()).unwrap_or_default(),
+            thinking_control: spec
+                .thinking_control
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty() && *v != "auto")
+                .unwrap_or("")
+                .to_string(),
             from_api_section: spec.from_api_section,
         }
     }
@@ -87,6 +105,7 @@ impl ProfileForm {
             auth_file: String::new(),
             max_tokens: String::new(),
             token_budget: String::new(),
+            thinking_control: String::new(),
             from_api_section: false,
         }
     }
@@ -111,6 +130,7 @@ impl ProfileForm {
                 headers: Default::default(),
                 max_tokens: None,
                 token_budget: None,
+                thinking_control: non_empty(&self.thinking_control),
                 from_api_section: true,
             });
         }
@@ -151,6 +171,7 @@ impl ProfileForm {
             headers: Default::default(),
             max_tokens: number(&self.max_tokens, "max_tokens")?,
             token_budget: number(&self.token_budget, "token_budget")?,
+            thinking_control: non_empty(&self.thinking_control),
             from_api_section: self.from_api_section,
         })
     }
@@ -364,7 +385,8 @@ pub fn apply_patch(doc: &mut toml_edit::Document, patch: &SettingsPatch) {
 
 /// Keys of `[api]` that make up its model profile (the rest of the section —
 /// `streaming`, `headers` — is not profile data and is left alone).
-const API_PROFILE_KEYS: [&str; 5] = ["provider", "endpoint", "model", "api_key", "auth_file"];
+const API_PROFILE_KEYS: [&str; 6] =
+    ["provider", "endpoint", "model", "api_key", "auth_file", "thinking_control"];
 
 /// Write the profile list: the `[api]` profile (if present) in place, every
 /// other profile as a rebuilt `[[models]]` array (their own comments are not
@@ -383,6 +405,7 @@ fn apply_profiles(doc: &mut toml_edit::Document, profiles: &[crate::config::Mode
             set_optional(table, "model", api.model.as_deref());
             set_optional(table, "api_key", api.api_key.as_deref());
             set_optional(table, "auth_file", api.auth_file.as_deref());
+            set_optional(table, "thinking_control", api.thinking_control.as_deref());
         }
         None => {
             if let Some(table) = doc.get_mut("api").and_then(toml_edit::Item::as_table_mut) {
@@ -423,6 +446,9 @@ fn apply_profiles(doc: &mut toml_edit::Document, profiles: &[crate::config::Mode
         }
         if let Some(v) = spec.token_budget {
             table.insert("token_budget", toml_edit::value(i64::from(v)));
+        }
+        if let Some(v) = &spec.thinking_control {
+            table.insert("thinking_control", toml_edit::value(v.as_str()));
         }
         if !spec.headers.is_empty() {
             let mut headers = toml_edit::Table::new();
@@ -543,6 +569,7 @@ mod tests {
             auth_file: String::new(),
             max_tokens: "40960".into(),
             token_budget: "6000".into(),
+            thinking_control: String::new(),
             from_api_section: false,
         }
     }
@@ -692,6 +719,30 @@ thinking = "think"
         assert_eq!(spec.endpoint, None);
         assert_eq!(spec.api_key, None);
         assert_eq!(spec.auth_file.as_deref(), Some("/x/auth.json"));
+    }
+
+    #[test]
+    fn thinking_control_round_trips_through_form_and_file() {
+        let mut p = openai_profile("g");
+        p.thinking_control = "reasoning_effort".into();
+        let spec = p.to_spec().unwrap();
+        assert_eq!(spec.thinking_control.as_deref(), Some("reasoning_effort"));
+        assert_eq!(ProfileForm::from_spec(&spec).thinking_control, "reasoning_effort");
+        let mut auto = spec.clone();
+        auto.thinking_control = Some("auto".into());
+        assert_eq!(ProfileForm::from_spec(&auto).thinking_control, "", "auto shows as the empty default");
+
+        let mut doc: toml_edit::Document = "[api]\nmodel = \"m\"\n".parse().unwrap();
+        let mut patch = sample_patch();
+        let mut api = openai_profile("api").to_spec().unwrap();
+        api.from_api_section = true;
+        api.thinking_control = Some("none".into());
+        patch.profiles = vec![api, spec];
+        apply_patch(&mut doc, &patch);
+        let cfg: Config = toml::from_str(&doc.to_string()).unwrap();
+        let specs = cfg.model_specs().unwrap();
+        assert_eq!(specs[0].thinking_control.as_deref(), Some("none"));
+        assert_eq!(specs[1].thinking_control.as_deref(), Some("reasoning_effort"));
     }
 
     #[test]

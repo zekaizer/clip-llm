@@ -10,7 +10,7 @@ System-wide LLM clipboard assistant. Captures text via global hotkey, sends it t
 - **Rephrase parameters** — style (Correct / Casual / Formal / Business / Technical) and length (Terse / Brief / Same / Detailed / Full)
 - **Vision support** — paste images from clipboard for summarization via multimodal API (`openai` provider)
 - **File clipboard** — files copied in Finder/Explorer are read directly: UTF-8 text files become the input (several files are joined under `=== name ===` headers), PNG files become images. Anything else (folders, binaries, PDF/Office, non-UTF-8 text) is refused by name instead of being sent half-read; 1 MiB per text file, 2 MiB total
-- **Thinking mode** — toggle Think / NoThink per mode with configurable per-mode defaults; model capability auto-detected at startup
+- **Thinking mode** — toggle Think / NoThink per mode with configurable per-mode defaults. The knob that switches thinking off (`reasoning_effort`, `chat_template_kwargs`, `/no_think`) is probed per model profile by checking that the reply really carries no reasoning, and can be forced with `thinking_control`
 - **Floating overlay** — draggable popup with streaming response and docked action buttons (copy/paste, retry, copy-debug)
 - **Two API providers** — `openai`: vLLM or any `/v1/chat/completions` endpoint; `grok-oauth`: xAI's Responses API through the official Grok CLI's sign-in (no API key — tokens auto-refresh and write back to `~/.grok/auth.json`)
 - **Model profiles** — several backends in one config (`[[models]]`); switch from the tray's *Model* submenu or by clicking the model name under a result, which re-runs the same text on the new model
@@ -102,8 +102,9 @@ file holds these kinds of settings:
   the path).
 - **`[[models]]`** — additional model profiles, each with the same keys as
   `[api]` (`provider`, `endpoint`, `model`, `api_key`, `auth_file`, `headers`)
-  plus optional `name` (display label, defaults to `model`), `max_tokens` and
-  `token_budget` overrides. The `[api]` section is the first profile (and the
+  plus optional `name` (display label, defaults to `model`), `max_tokens`,
+  `token_budget` and `thinking_control` (`auto` | `reasoning_effort` |
+  `chat_template_kwargs` | `prompt_tag` | `none`) overrides. The `[api]` section is the first profile (and the
   only one the `CLIP_LLM_*` variables apply to); when `[[models]]` entries exist
   and `[api]` names no model, the profiles alone are used. The first profile is
   active at startup (or the one named by `[ui].default_model`); pick another

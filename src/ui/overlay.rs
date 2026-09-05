@@ -374,6 +374,7 @@ pub fn render_settings<'t>(
     baseline: Option<&crate::settings::SettingsForm>,
     config_path: Option<&str>,
     test: impl Fn(usize) -> ProfileTestView<'t>,
+    caps: impl Fn(&str) -> Option<String>,
 ) -> (SettingsAction, OverlayOutput) {
     use crate::settings::SettingsForm;
     let mut action = SettingsAction::None;
@@ -420,7 +421,7 @@ pub fn render_settings<'t>(
                     }
                     _ => {
                         form.editing = None;
-                        render_settings_body(ui, form, &mut action, dirty);
+                        render_settings_body(ui, form, &caps, &mut action, dirty);
                     }
                 }
             });
@@ -451,6 +452,7 @@ pub fn render_settings<'t>(
 fn render_settings_body(
     ui: &mut egui::Ui,
     form: &mut crate::settings::SettingsForm,
+    caps: &impl Fn(&str) -> Option<String>,
     action: &mut SettingsAction,
     dirty: bool,
 ) {
@@ -458,7 +460,7 @@ fn render_settings_body(
     ui.label(hint_text(
         "\u{25cf} marks the profile used at startup. Switch at runtime from the tray Model menu or by clicking the model name under a result.",
     ));
-    render_profiles(ui, form);
+    render_profiles(ui, form, caps);
     ui.add_space(6.0);
 
         section_header(ui, "Languages");
@@ -606,9 +608,14 @@ fn render_settings_footer(
 
 /// Profile list: startup radio, name, summary, `[api]` tag, Edit (opens the
 /// profile sub-page) and an "Add profile" row.
-fn render_profiles(ui: &mut egui::Ui, form: &mut crate::settings::SettingsForm) {
+fn render_profiles(
+    ui: &mut egui::Ui,
+    form: &mut crate::settings::SettingsForm,
+    caps: &impl Fn(&str) -> Option<String>,
+) {
     use crate::settings::ProfileForm;
     for i in 0..form.profiles.len() {
+        let probed = caps(form.profiles[i].name.trim());
         ui.horizontal(|ui| {
             let startup = form.default_model == i;
             if ui
@@ -630,6 +637,9 @@ fn render_profiles(ui: &mut egui::Ui, form: &mut crate::settings::SettingsForm) 
                 ui.label(hint_text("[api]")).on_hover_text(
                     "Stored in the [api] section; empty fields fall back to CLIP_LLM_* variables",
                 );
+            }
+            if let Some(text) = &probed {
+                ui.label(hint_text(text)).on_hover_text("Detected by the startup/switch probe");
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.add(small_button("Edit \u{203a}")).clicked() {
@@ -739,6 +749,18 @@ fn render_profile_page<'t>(
                     ui.end_row();
                 }
             }
+            row_label(ui, "Thinking off via");
+            ui.horizontal_wrapped(|ui| {
+                for (key, label, why) in crate::settings::THINKING_CONTROLS {
+                    if pill_styled(ui, label, profile.thinking_control == *key, PillTone::Accent)
+                        .on_hover_text(*why)
+                        .clicked()
+                    {
+                        profile.thinking_control = (*key).to_string();
+                    }
+                }
+            });
+            ui.end_row();
             if !profile.from_api_section {
                 row_label(ui, "Limits");
                 ui.horizontal(|ui| {
@@ -1587,7 +1609,14 @@ mod tests {
         form.error = Some("Both language names are required.".into());
         let mut result = None;
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            result = Some(render_settings(ctx, &mut form, None, Some("/tmp/config.toml"), |_| ProfileTestView::Idle));
+            result = Some(render_settings(
+                ctx,
+                &mut form,
+                None,
+                Some("/tmp/config.toml"),
+                |_| ProfileTestView::Idle,
+                |_| None,
+            ));
         });
         let (action, output) = result.unwrap();
         assert_eq!(action, SettingsAction::None);

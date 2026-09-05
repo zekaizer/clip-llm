@@ -198,6 +198,9 @@ pub struct OverlayApp {
     profile_test: Option<(usize, mpsc::Receiver<Result<String, String>>)>,
     /// Last finished connection test (profile index, outcome).
     profile_test_result: Option<(usize, Result<String, String>)>,
+    /// Probed capabilities per profile index ("vision · thinking: …"), shown
+    /// in the settings profile list. Cleared when the profile set changes.
+    profile_caps: std::collections::HashMap<usize, String>,
     /// Tap events from coordinator thread (hotkey detection runs off-UI).
     tap_rx: mpsc::Receiver<TapEvent>,
     /// Cached desired_size to avoid redundant send_viewport_cmd calls.
@@ -345,6 +348,7 @@ impl OverlayApp {
             settings_baseline: None,
             profile_test: None,
             profile_test_result: None,
+            profile_caps: std::collections::HashMap::new(),
             tap_rx,
             last_desired_size: None,
             last_content_size: None,
@@ -403,6 +407,7 @@ impl OverlayApp {
             settings_baseline: None,
             profile_test: None,
             profile_test_result: None,
+            profile_caps: std::collections::HashMap::new(),
             tap_rx,
             last_desired_size: None,
             last_content_size: None,
@@ -579,6 +584,14 @@ impl OverlayApp {
         }
         let running = self.profile_test.as_ref().map(|(i, _)| *i);
         let result = self.profile_test_result.as_ref();
+        // Capabilities are probed per worker-pool index; the form lists specs
+        // in config order, which matches the pool only while every profile
+        // built — look up by name to stay correct otherwise.
+        let caps_by_name: std::collections::HashMap<&str, &str> = self
+            .profile_caps
+            .iter()
+            .filter_map(|(i, text)| self.model_names.get(*i).map(|n| (n.as_str(), text.as_str())))
+            .collect();
         let test = |i: usize| -> overlay::ProfileTestView {
             if running == Some(i) {
                 overlay::ProfileTestView::Running
@@ -592,8 +605,15 @@ impl OverlayApp {
         let Some(form) = self.settings.as_mut() else {
             return overlay::OverlayOutput { action: overlay::OverlayAction::None, desired_size: None, content_size: None };
         };
-        let (action, output) =
-            overlay::render_settings(ctx, form, self.settings_baseline.as_ref(), path.as_deref(), test);
+        let caps = |name: &str| caps_by_name.get(name).map(|c| (*c).to_string());
+        let (action, output) = overlay::render_settings(
+            ctx,
+            form,
+            self.settings_baseline.as_ref(),
+            path.as_deref(),
+            test,
+            caps,
+        );
         match action {
             overlay::SettingsAction::None => {}
             overlay::SettingsAction::StartDrag => ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag),
@@ -703,6 +723,7 @@ impl OverlayApp {
             .collect();
         let _ = self.cmd_tx.send(WorkerCommand::ReloadClients(set.clients));
         let _ = self.cmd_tx.send(WorkerCommand::SelectModel(active));
+        self.profile_caps.clear();
         self.model_names = labels;
         self.sm.set_active_model(active);
         crate::platform::update_tray_models(&tray, active);
@@ -1249,6 +1270,14 @@ impl OverlayApp {
                 }
                 WorkerResponse::ProbeComplete { vision_supported, thinking_method, model_index } => {
                     use crate::api::client::ThinkingControlMethod as Tcm;
+                    self.profile_caps.insert(
+                        model_index,
+                        format!(
+                            "vision {} \u{b7} thinking control: {}",
+                            if vision_supported { "\u{2713}" } else { "\u{2717}" },
+                            thinking_method.key()
+                        ),
+                    );
                     // A slow probe of a profile the user already left must not
                     // describe the current one.
                     if model_index != self.sm.active_model() {
