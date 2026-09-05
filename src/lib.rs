@@ -4,6 +4,7 @@ pub mod api;
 pub mod clipboard;
 pub mod config;
 pub mod coordinator;
+pub mod files;
 pub use clipboard::ClipboardContent;
 #[cfg(feature = "diagnostics")]
 pub mod diagnostics;
@@ -549,6 +550,19 @@ pub enum ClipboardError {
 
     #[error("image encoding failed: {0}")]
     ImageEncodeFailed(String),
+
+    /// The clipboard holds files none of which can be sent: not text, not
+    /// PNG, a folder, or a non-UTF-8 binary. Carries the offending names.
+    #[error("unsupported files on clipboard: {}", .0.join(", "))]
+    UnsupportedFiles(Vec<String>),
+
+    /// A clipboard file exceeds the per-file or total size limit.
+    #[error("file too large: {name} (limit {limit_bytes} bytes)")]
+    FileTooLarge { name: String, limit_bytes: u64 },
+
+    /// A clipboard file could not be read from disk.
+    #[error("failed to read file {name}: {reason}")]
+    FileReadFailed { name: String, reason: String },
 
     #[error("copy simulation failed: {0}")]
     CopyFailed(#[from] PlatformError),

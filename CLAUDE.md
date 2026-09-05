@@ -57,6 +57,7 @@ The project follows a 7-phase incremental plan defined in [docs/REQUIREMENTS.md]
 - `src/coordinator.rs` — hotkey event → tap detection → `TapEvent` dispatch (dedicated thread)
 - `src/hotkey.rs` — `HotkeyDetector` state machine, `TapAction`, `TapEvent`
 - `src/clipboard.rs` — `ClipboardManager` (read/write, copy simulation + poll)
+- `src/files.rs` — file-list clipboard ingestion (`ingest_files`: UTF-8 text + PNG → `ClipboardContent`)
 - `src/worker.rs` — async LLM request worker thread
 - `src/api/client.rs` — `LlmClient` (`ApiFlavor`: OpenAI chat vs xAI Responses), `SseParser`, vision probe
 - `src/api/response.rs` — `strip_think_blocks`, `ThinkBlockFilter` (streaming)

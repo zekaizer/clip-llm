@@ -1419,6 +1419,7 @@ impl eframe::App for OverlayApp {
             self.sm.pinned(),
             self.sm.auto_copy(),
             self.sm.capture_source(),
+            self.sm.content_files(),
             self.copy_confirmed_at.is_some(),
             elapsed,
             self.last_debug.is_some(),
@@ -1480,6 +1481,26 @@ fn friendly_clipboard_error(e: &crate::ClipboardError) -> String {
         AccessFailed(_) | CopyFailed(_) => "Clipboard is unavailable.".to_string(),
         WriteFailed(_) => "Could not write to clipboard.".to_string(),
         ImageEncodeFailed(_) => "Could not process the clipboard image.".to_string(),
+        UnsupportedFiles(names) => format!(
+            "Unsupported file type: {}. Text and PNG files can be sent.",
+            list_names(names)
+        ),
+        FileTooLarge { name, limit_bytes } => format!(
+            "{name} is too large to send (limit {} MiB).",
+            limit_bytes / (1024 * 1024)
+        ),
+        FileReadFailed { name, .. } => format!("Could not read {name}."),
+    }
+}
+
+/// Join file names for a message, eliding past the first three.
+fn list_names(names: &[String]) -> String {
+    const SHOWN: usize = 3;
+    let shown = names.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(", ");
+    if names.len() > SHOWN {
+        format!("{shown} (+{} more)", names.len() - SHOWN)
+    } else {
+        shown
     }
 }
 
@@ -2072,6 +2093,35 @@ mod tests {
         assert_eq!(app.req_ok, 1);
         assert_eq!(app.req_err, 0);
         assert!(app.last_debug.is_some(), "current completion's debug snapshot must surface");
+    }
+
+    // --- friendly_clipboard_error: file-list clipboard messages ---
+
+    #[test]
+    fn clipboard_error_unsupported_files_lists_names() {
+        let e = crate::ClipboardError::UnsupportedFiles(vec!["a.pdf".into(), "b.docx".into()]);
+        assert_eq!(
+            friendly_clipboard_error(&e),
+            "Unsupported file type: a.pdf, b.docx. Text and PNG files can be sent."
+        );
+        let many = crate::ClipboardError::UnsupportedFiles(
+            (1..=5).map(|i| format!("f{i}.bin")).collect(),
+        );
+        assert_eq!(
+            friendly_clipboard_error(&many),
+            "Unsupported file type: f1.bin, f2.bin, f3.bin (+2 more). Text and PNG files can be sent."
+        );
+    }
+
+    #[test]
+    fn clipboard_error_file_too_large_and_unreadable() {
+        let e = crate::ClipboardError::FileTooLarge {
+            name: "big.log".into(),
+            limit_bytes: 1024 * 1024,
+        };
+        assert_eq!(friendly_clipboard_error(&e), "big.log is too large to send (limit 1 MiB).");
+        let e = crate::ClipboardError::FileReadFailed { name: "x.txt".into(), reason: "eperm".into() };
+        assert_eq!(friendly_clipboard_error(&e), "Could not read x.txt.");
     }
 
     // --- format_retry_label: Processing label during an automatic retry ---

@@ -106,6 +106,8 @@ pub fn render(
     pinned: bool,
     auto_copy: bool,
     source: CaptureSource,
+    // File names when the content came from a file-list clipboard (badge only).
+    source_files: &[String],
     copy_confirmed: bool,
     elapsed: Option<std::time::Duration>,
     debug_available: bool,
@@ -261,6 +263,7 @@ pub fn render(
                             streaming.incomplete,
                             debug_available,
                             source,
+                            source_files,
                             completion_status.as_deref(),
                             content_top,
                             pinned_inner_height,
@@ -593,6 +596,7 @@ fn render_result(
     incomplete: Option<&str>,
     debug_available: bool,
     source: CaptureSource,
+    source_files: &[String],
     // Compact completion summary for the bottom row (see the doc comment on
     // `render()`'s `completion_status` parameter, which this is threaded
     // from).
@@ -682,7 +686,7 @@ fn render_result(
     // "controls swap in place" the way the top row already does.
     ui.add_space(4.0);
     fixed_height_row(ui, BOTTOM_ROW_HEIGHT, |ui| {
-        render_source_badge(ui, source);
+        render_source_badge(ui, source, source_files);
         if let Some(status) = completion_status {
             ui.label(
                 egui::RichText::new(status).color(egui::Color32::from_gray(120)).size(12.0),
@@ -736,10 +740,14 @@ fn render_result(
 /// selection (double-tap) vs clipboard (single-tap). Makes a slow double-tap
 /// that resolved to a single-tap — sending stale clipboard content — visibly
 /// different (#50). Icon-only to keep the row compact; the tooltip spells it out.
-fn render_source_badge(ui: &mut egui::Ui, source: CaptureSource) {
-    let (icon, tip) = match source {
-        CaptureSource::Selection => ("\u{2702}", "Source: selection (double-tap)"),
-        CaptureSource::Clipboard => ("\u{1f4cb}", "Source: clipboard (single-tap)"),
+fn render_source_badge(ui: &mut egui::Ui, source: CaptureSource, files: &[String]) {
+    let (icon, tip) = if files.is_empty() {
+        match source {
+            CaptureSource::Selection => ("\u{2702}", "Source: selection (double-tap)".to_string()),
+            CaptureSource::Clipboard => ("\u{1f4cb}", "Source: clipboard (single-tap)".to_string()),
+        }
+    } else {
+        ("\u{1f4c4}", format!("Source: {} file(s) \u{2014} {}", files.len(), files.join(", ")))
     };
     ui.label(
         egui::RichText::new(icon)
@@ -1038,6 +1046,7 @@ mod tests {
                 false,
                 true,
                 CaptureSource::Selection,
+                &[],
                 false,
                 None,
                 false,

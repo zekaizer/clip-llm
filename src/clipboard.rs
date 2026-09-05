@@ -34,6 +34,10 @@ pub struct ClipboardContent {
     /// PNG-encoded images. Vec for future multi-image support;
     /// currently arboard provides at most one.
     pub images: Vec<Arc<Vec<u8>>>,
+    /// Display names of the files this content was read from (file-list
+    /// clipboard), empty for plain text/image content. Shown in the overlay's
+    /// source badge; never sent to the model.
+    pub files: Vec<String>,
 }
 
 impl ClipboardContent {
@@ -42,6 +46,7 @@ impl ClipboardContent {
         Self {
             text: Some(text),
             images: vec![],
+            files: vec![],
         }
     }
 
@@ -79,30 +84,31 @@ const MAX_IMAGE_LONG_EDGE: u32 = 1568;
 fn read_image_from_board(board: &mut Clipboard) -> Result<Vec<Arc<Vec<u8>>>, ClipboardError> {
     match board.get_image() {
         Ok(img) => {
-            let orig_width = img.width as u32;
-            let orig_height = img.height as u32;
-            let (bytes, width, height) =
-                match downscale_rgba(img.bytes.as_ref(), orig_width, orig_height) {
-                    Some((resized, new_w, new_h)) => {
-                        debug!(
-                            "downscaling clipboard image {}x{} -> {}x{}",
-                            orig_width, orig_height, new_w, new_h
-                        );
-                        (resized, new_w, new_h)
-                    }
-                    None => (img.bytes.into_owned(), orig_width, orig_height),
-                };
-            let png = rgba_to_png(&bytes, width, height)?;
-            info!(
-                "read clipboard image ({}x{}, {} bytes PNG)",
-                width,
-                height,
-                png.len()
-            );
+            let png = encode_rgba_for_upload(img.bytes.into_owned(), img.width as u32, img.height as u32)?;
             Ok(vec![Arc::new(png)])
         }
         Err(_) => Ok(vec![]),
     }
+}
+
+/// Downscale (long edge > `MAX_IMAGE_LONG_EDGE`) and PNG-encode raw RGBA pixels
+/// for the vision API. Shared by the clipboard image and PNG-file paths so both
+/// obey the same payload bound.
+pub(crate) fn encode_rgba_for_upload(
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, ClipboardError> {
+    let (bytes, w, h) = match downscale_rgba(&rgba, width, height) {
+        Some((resized, new_w, new_h)) => {
+            debug!("downscaling image {}x{} -> {}x{}", width, height, new_w, new_h);
+            (resized, new_w, new_h)
+        }
+        None => (rgba, width, height),
+    };
+    let png = rgba_to_png(&bytes, w, h)?;
+    info!("encoded image ({}x{}, {} bytes PNG)", w, h, png.len());
+    Ok(png)
 }
 
 /// Downscale an RGBA image so its long edge is at most `MAX_IMAGE_LONG_EDGE`,
@@ -179,7 +185,7 @@ fn box_resample(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> V
 }
 
 /// Encode raw RGBA pixel data to PNG.
-fn rgba_to_png(bytes: &[u8], width: u32, height: u32) -> Result<Vec<u8>, ClipboardError> {
+pub(crate) fn rgba_to_png(bytes: &[u8], width: u32, height: u32) -> Result<Vec<u8>, ClipboardError> {
     let mut out = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut out, width, height);
@@ -326,11 +332,15 @@ impl ClipboardManager {
             // content until the deadline instead of failing on an empty read.
             if platform.clipboard_change_count() != baseline {
                 copy_landed = true;
+                // Files first — see read_content.
+                if let Some(paths) = self.file_list() {
+                    return crate::files::ingest_files(&paths);
+                }
                 let text = self.board.get_text().ok().filter(|s| !s.trim().is_empty());
                 let images = read_image_from_board(&mut self.board)?;
 
                 if text.is_some() || !images.is_empty() {
-                    let content = ClipboardContent { text, images };
+                    let content = ClipboardContent { text, images, files: vec![] };
                     let elapsed = start.elapsed().as_millis();
                     info!(
                         "clipboard content arrived in {}ms (text={}, images={})",
@@ -357,11 +367,16 @@ impl ClipboardManager {
     /// Read current clipboard content (text + images).
     /// Returns error if clipboard is completely empty.
     pub fn read_content(&mut self) -> Result<ClipboardContent, ClipboardError> {
+        // Files first: Finder/Explorer also publish a plain-text flavor holding
+        // just the file names, which a text read would mistake for content.
+        if let Some(paths) = self.file_list() {
+            return crate::files::ingest_files(&paths);
+        }
         let text = self.board.get_text().ok().filter(|s| !s.trim().is_empty());
 
         let images = read_image_from_board(&mut self.board)?;
 
-        let content = ClipboardContent { text, images };
+        let content = ClipboardContent { text, images, files: vec![] };
         if content.is_empty() {
             return Err(ClipboardError::NoTextInClipboard);
         }
@@ -370,6 +385,11 @@ impl ClipboardManager {
             info!("read clipboard text ({} chars)", t.len());
         }
         Ok(content)
+    }
+
+    /// Paths of a file-list clipboard (Finder/Explorer copy), if any.
+    fn file_list(&mut self) -> Option<Vec<std::path::PathBuf>> {
+        self.board.get().file_list().ok().filter(|v| !v.is_empty())
     }
 
     /// Write text to clipboard.
@@ -457,6 +477,27 @@ mod tests {
         fn exclude_from_taskbar(&self) {}
         fn launch_at_login_enabled(&self) -> bool { false }
         fn set_launch_at_login(&self, _enabled: bool) -> Result<(), PlatformError> { Ok(()) }
+    }
+
+    #[test]
+    fn read_content_prefers_file_list_over_text_flavor() {
+        let _lock = lock_clipboard();
+        let dir = std::env::temp_dir().join(format!("clip-llm-cb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("from-finder.txt");
+        std::fs::write(&path, "file body\n").unwrap();
+
+        let mut mgr = ClipboardManager::new().unwrap();
+        mgr.board.set().file_list(std::slice::from_ref(&path)).unwrap();
+        let content = mgr.read_content().unwrap();
+        assert_eq!(content.text.as_deref(), Some("file body\n"));
+        assert_eq!(content.files, vec!["from-finder.txt".to_string()]);
+
+        // Plain text afterwards must not be mistaken for a stale file list.
+        mgr.write_text("plain").unwrap();
+        let content = mgr.read_content().unwrap();
+        assert_eq!(content.text.as_deref(), Some("plain"));
+        assert!(content.files.is_empty());
     }
 
     #[test]
@@ -592,6 +633,7 @@ mod tests {
         let content = ClipboardContent {
             text: None,
             images: vec![],
+            files: vec![],
         };
         assert!(content.is_empty());
         assert!(!content.has_images());
@@ -610,6 +652,7 @@ mod tests {
         let content = ClipboardContent {
             text: None,
             images: vec![Arc::new(vec![0x89, 0x50, 0x4E, 0x47])],
+            files: vec![],
         };
         assert!(!content.is_empty());
         assert!(content.has_images());
@@ -625,19 +668,19 @@ mod tests {
 
     #[test]
     fn has_text_none() {
-        let content = ClipboardContent { text: None, images: vec![] };
+        let content = ClipboardContent { text: None, images: vec![], files: vec![] };
         assert!(!content.has_text());
     }
 
     #[test]
     fn has_text_whitespace_only() {
-        let content = ClipboardContent { text: Some("  \n ".into()), images: vec![] };
+        let content = ClipboardContent { text: Some("  \n ".into()), images: vec![], files: vec![] };
         assert!(!content.has_text());
     }
 
     #[test]
     fn has_text_empty_string() {
-        let content = ClipboardContent { text: Some("".into()), images: vec![] };
+        let content = ClipboardContent { text: Some("".into()), images: vec![], files: vec![] };
         assert!(!content.has_text());
     }
 

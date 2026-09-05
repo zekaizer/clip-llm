@@ -9,6 +9,7 @@ System-wide LLM clipboard assistant. Captures text via global hotkey, sends it t
 - **Transcribe** — re-expresses clipboard content (text, image, or both) as structured Markdown: GFM tables, mermaid blocks (diagram type matched to what the diagram shows, with syntax-pitfall guardrails), tagged code fences, LaTeX, prose — inline SVG only as a last resort for freeform drawings. Wording is preserved verbatim; only the structure is chosen
 - **Rephrase parameters** — style (Correct / Casual / Formal / Business / Technical) and length (Terse / Brief / Same / Detailed / Full)
 - **Vision support** — paste images from clipboard for summarization via multimodal API (`openai` provider)
+- **File clipboard** — files copied in Finder/Explorer are read directly: UTF-8 text files become the input (several files are joined under `=== name ===` headers), PNG files become images. Anything else (folders, binaries, PDF/Office, non-UTF-8 text) is refused by name instead of being sent half-read; 1 MiB per text file, 2 MiB total
 - **Thinking mode** — toggle Think / NoThink per mode with configurable per-mode defaults; model capability auto-detected at startup
 - **Floating overlay** — draggable popup with streaming response and docked action buttons (copy/paste, retry, copy-debug)
 - **Two API providers** — `openai`: vLLM or any `/v1/chat/completions` endpoint; `grok-oauth`: xAI's Responses API through the official Grok CLI's sign-in (no API key — tokens auto-refresh and write back to `~/.grok/auth.json`)

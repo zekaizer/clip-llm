@@ -320,6 +320,13 @@ impl StateMachine {
         self.auto_copy
     }
 
+    /// File names behind the current content (file-list clipboard), else empty.
+    pub fn content_files(&self) -> &[String] {
+        self.original_content
+            .as_ref()
+            .map_or(&[][..], |c| c.files.as_slice())
+    }
+
     pub fn capture_source(&self) -> CaptureSource {
         self.source
     }
@@ -1994,6 +2001,7 @@ mod tests {
         ClipboardContent {
             text: None,
             images: vec![std::sync::Arc::new(vec![0x89, 0x50, 0x4E, 0x47])],
+            files: vec![],
         }
     }
 
@@ -2001,6 +2009,7 @@ mod tests {
         ClipboardContent {
             text: Some("caption".into()),
             images: vec![std::sync::Arc::new(vec![0x89, 0x50, 0x4E, 0x47])],
+            files: vec![],
         }
     }
 

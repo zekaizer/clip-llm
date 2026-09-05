@@ -2498,6 +2498,7 @@ mod tests {
         let content = ClipboardContent {
             text: Some("caption".into()),
             images: vec![Arc::new(vec![0x89, 0x50])],
+            files: vec![],
         };
         let mc = LlmClient::build_user_content(&content, true);
         match mc {
@@ -2515,6 +2516,7 @@ mod tests {
         let content = ClipboardContent {
             text: Some("hello".into()),
             images: vec![Arc::new(vec![0x89])],
+            files: vec![],
         };
         // use_images=false: caller decided not to include images.
         let mc = LlmClient::build_user_content(&content, false);
@@ -2526,6 +2528,7 @@ mod tests {
         let content = ClipboardContent {
             text: None,
             images: vec![Arc::new(vec![0x89, 0x50])],
+            files: vec![],
         };
         let mc = LlmClient::build_user_content(&content, true);
         match mc {
@@ -2543,6 +2546,7 @@ mod tests {
         let content = ClipboardContent {
             text: Some("".into()),
             images: vec![Arc::new(vec![0x89, 0x50])],
+            files: vec![],
         };
         let mc = LlmClient::build_user_content(&content, true);
         match mc {
