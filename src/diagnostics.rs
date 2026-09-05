@@ -294,6 +294,9 @@ struct Scenario {
     settings: bool,
     /// After the panel is up, apply the canned edit and capture again.
     settings_edit: bool,
+    /// After the result arrives, drag the panel to this size (pseudo-state
+    /// "Resized") and capture again.
+    resize_to: Option<(f32, f32)>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -336,6 +339,7 @@ impl DiagScenarioRunner {
                 switch_to: None,
                 settings: false,
                 settings_edit: false,
+                resize_to: None,
             },
             Scenario {
                 name: "long_text",
@@ -355,6 +359,7 @@ impl DiagScenarioRunner {
                 switch_to: None,
                 settings: false,
                 settings_edit: false,
+                resize_to: None,
             },
             Scenario {
                 name: "mode_switch",
@@ -363,6 +368,7 @@ impl DiagScenarioRunner {
                 switch_to: Some(ProcessMode::Rephrase),
                 settings: false,
                 settings_edit: false,
+                resize_to: None,
             },
             Scenario {
                 name: "error_display",
@@ -371,6 +377,7 @@ impl DiagScenarioRunner {
                 switch_to: None,
                 settings: false,
                 settings_edit: false,
+                resize_to: None,
             },
             Scenario {
                 name: "korean_text",
@@ -379,6 +386,7 @@ impl DiagScenarioRunner {
                 switch_to: None,
                 settings: false,
                 settings_edit: false,
+                resize_to: None,
             },
             Scenario {
                 name: "rephrase_mode",
@@ -387,6 +395,7 @@ impl DiagScenarioRunner {
                 switch_to: None,
                 settings: false,
                 settings_edit: false,
+                resize_to: None,
             },
             Scenario {
                 name: "summarize_mode",
@@ -403,6 +412,7 @@ impl DiagScenarioRunner {
                 switch_to: None,
                 settings: false,
                 settings_edit: false,
+                resize_to: None,
             },
             Scenario {
                 name: "long_single_line",
@@ -411,6 +421,16 @@ impl DiagScenarioRunner {
                 switch_to: None,
                 settings: false,
                 settings_edit: false,
+                resize_to: None,
+            },
+            Scenario {
+                name: "resized",
+                input: "Resize me: the long mock reply must scroll inside the user-sized panel.",
+                mode: ProcessMode::Translate,
+                switch_to: None,
+                settings: false,
+                settings_edit: false,
+                resize_to: Some((640.0, 420.0)),
             },
             Scenario {
                 name: "settings",
@@ -419,6 +439,7 @@ impl DiagScenarioRunner {
                 switch_to: None,
                 settings: true,
                 settings_edit: false,
+                resize_to: None,
             },
             Scenario {
                 name: "settings_edited",
@@ -427,6 +448,7 @@ impl DiagScenarioRunner {
                 switch_to: None,
                 settings: true,
                 settings_edit: true,
+                resize_to: None,
             },
         ]);
         // DIAG_SCENARIO=a,b keeps only the named scenarios.
@@ -491,6 +513,11 @@ impl DiagScenarioRunner {
                         self.phase = RunnerPhase::WaitingForSwitchResult;
                         return ScenarioAction::EditSettingsSample;
                     }
+                    if let Some((w, h)) = self.scenarios.front().and_then(|s| s.resize_to) {
+                        info!("diag: resizing the panel to {w}x{h}");
+                        self.phase = RunnerPhase::WaitingForSwitchResult;
+                        return ScenarioAction::Resize(w, h);
+                    }
 
                     self.delay_until = Instant::now() + RESULT_DISPLAY;
                     self.phase = RunnerPhase::WaitingToHide;
@@ -498,7 +525,7 @@ impl DiagScenarioRunner {
             }
 
             RunnerPhase::WaitingForSwitchResult => {
-                if overlay_state == "Result" || overlay_state == "Error" || overlay_state == "SettingsEdited" {
+                if matches!(overlay_state, "Result" | "Error" | "SettingsEdited" | "Resized") {
                     self.delay_until = Instant::now() + RESULT_DISPLAY;
                     self.phase = RunnerPhase::WaitingToHide;
                 }
@@ -547,6 +574,8 @@ pub enum ScenarioAction {
     /// custom language, a thinking override, a save banner.
     EditSettingsSample,
     CloseSettings,
+    /// Drag the resize grip to this panel size (pseudo-state "Resized").
+    Resize(f32, f32),
     /// All scenarios complete — app should exit.
     Quit,
 }

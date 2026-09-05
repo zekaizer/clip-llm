@@ -37,13 +37,46 @@ const BOTTOM_ROW_HEIGHT: f32 = ACTION_BTN_SIZE;
 /// The frame's inner margin, named so the latch height math can subtract
 /// exactly what this margin adds back around the measured inner content,
 /// instead of duplicating "16, 14" as a second magic literal (see
-/// `pinned_inner_height` in `render()`).
+/// `HeightTarget` in `render()`).
 const FRAME_MARGIN: egui::Margin = egui::Margin::symmetric(16, 14);
 /// Floor for the Result answer text's column when its budget is derived from
 /// a pinned latch height (see `render_result`) — guards against a degenerate
 /// near-zero or negative budget if the surrounding chrome alone already
 /// consumes most/all of the latch.
 const MIN_RESULT_TEXT_HEIGHT: f32 = 24.0;
+/// Smallest panel (frame incl. margin) the resize grip allows: the tab bar
+/// plus pin/close still fit on one row, and one text line plus the bottom
+/// row still fit below the separator.
+pub(crate) const MIN_USER_PANEL: egui::Vec2 = egui::vec2(400.0, 120.0);
+/// Side of the square drag hit-area in the frame's bottom-right corner.
+const RESIZE_GRIP_SIZE: f32 = 16.0;
+
+/// Inner-content height the panel must fill (see `render()`): a floor for the
+/// text column — shorter content pads up to the remainder so the bottom row
+/// stays at the bottom — and, with `cap`, also its ceiling, so the text
+/// scrolls inside the user's size instead of growing the window.
+#[derive(Clone, Copy)]
+struct HeightTarget {
+    /// Target inner height (frame margin already subtracted).
+    inner: f32,
+    /// Top of the whole inner content ui, captured before anything is drawn:
+    /// the reference for how much of `inner` is already used when the text
+    /// column is about to render.
+    content_top: f32,
+    /// User-sized panel: cap the text column at the remainder too.
+    cap: bool,
+}
+
+impl HeightTarget {
+    /// Height left for the text column: the target minus what is drawn above
+    /// the current cursor and what must still follow (`reserved_after`, plus
+    /// the item spacing egui inserts after the column itself).
+    fn remaining(&self, ui: &egui::Ui, reserved_after: f32) -> f32 {
+        let used = ui.cursor().top() - self.content_top;
+        (self.inner - used - reserved_after - ui.spacing().item_spacing.y)
+            .max(MIN_RESULT_TEXT_HEIGHT)
+    }
+}
 
 /// Streaming and think-block display state for Processing/Result rendering.
 pub struct StreamingState<'a> {
@@ -82,6 +115,9 @@ pub enum OverlayAction {
     CopyDebug,
     /// Switch to the next model profile and re-run the current content.
     CycleModel,
+    /// The resize grip was dragged; the new panel (frame) size, already
+    /// clamped to `MIN_USER_PANEL`.
+    Resize(egui::Vec2),
 }
 
 pub struct OverlayOutput {
@@ -131,6 +167,11 @@ pub fn render(
     // content taller than the latch grows the window naturally, up to
     // `MAX_RESULT_HEIGHT` for the answer text (see `render_result`).
     min_result_height: Option<f32>,
+    // Panel (frame) size the user dragged the grip to: replaces both
+    // `OVERLAY_WIDTH` and content-driven height — the text column scrolls
+    // inside it (`HeightTarget::cap`) and the latch is moot. `None` while
+    // the overlay auto-sizes to its content.
+    user_size: Option<egui::Vec2>,
     ctx: &egui::Context,
 ) -> OverlayOutput {
     if matches!(state, OverlayState::Hidden) {
@@ -166,34 +207,36 @@ pub fn render(
         .constrain(false) // Fix (a): see above
         .sense(egui::Sense::drag())
         .show(ctx, |ui| {
-            frame.show(ui, |ui| {
-                ui.set_width(OVERLAY_WIDTH);
+            let frame_resp = frame.show(ui, |ui| {
+                // Both the user size and the latch are the Frame's OUTER size
+                // (`content_size` in `OverlayOutput`, margin included), so
+                // subtract the margin to get targets for the *inner* ui.
+                let user_inner = user_size.map(|s| s.max(MIN_USER_PANEL) - FRAME_MARGIN.sum());
+                ui.set_width(user_inner.map_or(OVERLAY_WIDTH, |v| v.x));
                 let content_top = ui.cursor().top();
 
-                // `min_result_height` (the latch) is the Frame's OUTER size —
-                // `content_size` in `OverlayOutput`, which includes this
-                // margin — so convert it to a target for the *inner* content
-                // ui by subtracting the margin back out. Applying the raw
-                // (un-adjusted) value here would inflate every pinned
-                // Result/Error by the margin on top of the actual latch.
-                let pinned_inner_height = min_result_height
-                    .map(|h| (h - (FRAME_MARGIN.top as f32 + FRAME_MARGIN.bottom as f32)).max(0.0));
+                // User size wins over the latch: it applies in every state and
+                // caps the text column. The latch only floors Result/Error
+                // (never shorter than the last streaming frame; taller content
+                // still grows the window — see `render_result`).
+                let target = match user_inner {
+                    Some(v) => Some(HeightTarget { inner: v.y, content_top, cap: true }),
+                    None => min_result_height
+                        .filter(|_| matches!(state, OverlayState::Result(_) | OverlayState::Error(_)))
+                        .map(|h| HeightTarget {
+                            inner: (h - FRAME_MARGIN.sum().y).max(0.0),
+                            content_top,
+                            cap: false,
+                        }),
+                };
 
-                // Floor: never render Result/Error shorter than the latch.
-                // This MUST run here, at the true top of the whole inner ui
-                // (before anything else is drawn) — `Ui::set_min_height`
-                // reserves space measured from the *current cursor position*,
-                // not from the ui's start, so calling it after some content
-                // is already drawn (e.g. inside render_result, after the
-                // text) would add that much space on TOP of what's already
-                // used instead of acting as a floor for the total. This is
-                // what makes `desired_size` naturally >= the last streaming
-                // frame's size; content taller than the latch grows past it
-                // (the latch is a floor, not a cap — see `render_result`).
-                if let Some(h) = pinned_inner_height
-                    && matches!(state, OverlayState::Result(_) | OverlayState::Error(_))
-                {
-                    ui.set_min_height(h);
+                // Floor for the whole panel. This MUST run here, at the true
+                // top of the inner ui — `Ui::set_min_height` reserves space
+                // from the *current cursor*, so applied after content is drawn
+                // it would add phantom height on top instead of flooring the
+                // total. This is what makes `desired_size` >= the target.
+                if let Some(t) = target {
+                    ui.set_min_height(t.inner);
                 }
 
                 // Picking overlay (hold-to-cycle, before commit). Show the mode
@@ -212,7 +255,7 @@ pub fn render(
                     ui.add_space(4.0);
                     ui.add(egui::Separator::default().spacing(4.0));
                     ui.add_space(4.0);
-                    render_capturing(ui, picking_text, source, elapsed, &mut action);
+                    render_capturing(ui, picking_text, source, elapsed, target, &mut action);
                     return;
                 }
 
@@ -242,6 +285,7 @@ pub fn render(
                             streaming.think_started,
                             streaming.retry_notice,
                             elapsed,
+                            target,
                             &mut action,
                         );
                     }
@@ -260,8 +304,7 @@ pub fn render(
                             source_files,
                             completion_status.as_deref(),
                             model_switchable,
-                            content_top,
-                            pinned_inner_height,
+                            target,
                             &mut action,
                         );
                     }
@@ -278,10 +321,14 @@ pub fn render(
                     OverlayState::Hidden | OverlayState::Capturing => unreachable!(),
                 }
             });
+            if let Some(size) = render_resize_grip(ui, frame_resp.response.rect) {
+                action = OverlayAction::Resize(size);
+            }
         });
 
-    // Drag the OS window when the user drags the overlay area.
-    if area_resp.response.drag_started() {
+    // Drag the OS window when the user drags the overlay area. The grip is a
+    // child widget, so a drag it captured never starts here as well.
+    if area_resp.response.drag_started() && !matches!(action, OverlayAction::Resize(_)) {
         action = OverlayAction::StartDrag;
     }
 
@@ -324,6 +371,40 @@ pub fn render(
         desired_size: Some(desired),
         content_size: Some(content_size),
     }
+}
+
+/// Resize grip in the frame's bottom-right corner (inside the margin, where
+/// no content is drawn). Returns the new panel size while it is dragged.
+fn render_resize_grip(ui: &mut egui::Ui, frame_rect: egui::Rect) -> Option<egui::Vec2> {
+    let grip_rect = egui::Rect::from_min_max(
+        frame_rect.max - egui::vec2(RESIZE_GRIP_SIZE, RESIZE_GRIP_SIZE),
+        frame_rect.max,
+    );
+    let resp = ui
+        .interact(grip_rect, ui.id().with("resize_grip"), egui::Sense::drag())
+        .on_hover_cursor(egui::CursorIcon::ResizeSouthEast);
+    let color = if resp.hovered() || resp.dragged() {
+        egui::Color32::from_gray(170)
+    } else {
+        egui::Color32::from_gray(80)
+    };
+    // Three dots along the corner diagonal, the usual grip glyph.
+    let painter = ui.painter();
+    let corner = frame_rect.max - egui::vec2(5.0, 5.0);
+    for step in 0..3 {
+        let offset = step as f32 * 4.0;
+        painter.circle_filled(corner - egui::vec2(offset, 0.0), 1.2, color);
+        painter.circle_filled(corner - egui::vec2(0.0, offset), 1.2, color);
+    }
+    painter.circle_filled(corner - egui::vec2(4.0, 4.0), 1.2, color);
+    if !resp.dragged() {
+        return None;
+    }
+    let delta = resp.drag_delta();
+    if delta == egui::Vec2::ZERO {
+        return None;
+    }
+    Some((frame_rect.size() + delta).max(MIN_USER_PANEL))
 }
 
 /// The translucent rounded panel every overlay view is drawn in.
@@ -953,6 +1034,32 @@ fn render_scrollable_text(
         });
 }
 
+/// The text column under an optional `HeightTarget`: floors it at the
+/// target's remainder (`reserved_after` = what still follows it), and with
+/// `cap` also scrolls it there; no target = natural height up to
+/// `MAX_RESULT_HEIGHT`. `set_min_height` reserves from the current cursor, so
+/// the floor is scoped to exactly this column.
+fn render_text_column(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash,
+    text: &str,
+    target: Option<HeightTarget>,
+    reserved_after: f32,
+    stick_to_bottom: bool,
+) {
+    match target {
+        Some(t) => {
+            let floor = t.remaining(ui, reserved_after);
+            let max_height = if t.cap { floor } else { MAX_RESULT_HEIGHT };
+            ui.scope(|ui| {
+                ui.set_min_height(floor);
+                render_scrollable_text(ui, id_salt, text, max_height, stick_to_bottom);
+            });
+        }
+        None => render_scrollable_text(ui, id_salt, text, MAX_RESULT_HEIGHT, stick_to_bottom),
+    }
+}
+
 /// Render just the clickable "▶/▼ Thinking" toggle (icon + label, unchanged
 /// styling/size — #6), no expanded content. This is Result's counterpart to
 /// Processing's status row and is rendered inside the shared `TOP_ROW_HEIGHT`
@@ -1033,12 +1140,13 @@ fn render_capturing(
     picking_text: Option<&str>,
     source: CaptureSource,
     elapsed: Option<std::time::Duration>,
+    target: Option<HeightTarget>,
     action: &mut OverlayAction,
 ) {
     if let Some(text) = picking_text {
         // Single-tap picking: the clipboard content has arrived, so show the
         // data that will be processed in the chosen mode on release.
-        render_scrollable_text(ui, "picking", text, MAX_RESULT_HEIGHT, false);
+        render_text_column(ui, "picking", text, target, 4.0 + BOTTOM_ROW_HEIGHT, false);
     } else {
         // Content not yet available — double-tap captures the selection on
         // modifier release (copy simulation needs the modifiers up) and the
@@ -1062,6 +1170,7 @@ fn render_capturing(
     render_cancel_button(ui, action);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_processing(
     ui: &mut egui::Ui,
     mode: ProcessMode,
@@ -1069,6 +1178,7 @@ fn render_processing(
     think_started: bool,
     retry_notice: Option<&str>,
     elapsed: Option<std::time::Duration>,
+    target: Option<HeightTarget>,
     action: &mut OverlayAction,
 ) {
     // Top row: shared slot with Result's think toggle (see `TOP_ROW_HEIGHT`)
@@ -1114,7 +1224,14 @@ fn render_processing(
     });
     if !streaming_text.is_empty() {
         ui.add_space(4.0);
-        render_scrollable_text(ui, ("streaming", mode), streaming_text, MAX_RESULT_HEIGHT, true);
+        render_text_column(
+            ui,
+            ("streaming", mode),
+            streaming_text,
+            target,
+            4.0 + BOTTOM_ROW_HEIGHT,
+            true,
+        );
     }
     ui.add_space(4.0);
     // Bottom row: shared slot with Result's reserved action-button space (see
@@ -1179,23 +1296,12 @@ fn render_result(
     // from).
     completion_status: Option<&str>,
     model_switchable: bool,
-    // Top of the whole inner content ui (captured in `render()` right after
-    // `ui.set_width`, *before* the tab bar/separator) — the reference point
-    // for measuring how much of `pinned_inner_height` has already been used
-    // by the time the answer text is about to render, so the ScrollArea
-    // budget below accounts for the tab bar/separator/rephrase params too,
-    // not just this function's own rows.
-    content_top: f32,
-    // Target inner-content height latched from the last Processing frame
-    // (already margin-adjusted by `render()`, which also applies this as a
-    // floor at the true top of the ui — see `pinned_inner_height` there).
-    // `None` when no latch is active (normal auto-sizing via
-    // `MAX_RESULT_HEIGHT`). A FLOOR while collapsed: the answer text column
-    // pads up to the leftover latched budget when shorter, and grows the
-    // window naturally (up to `MAX_RESULT_HEIGHT`) when taller. Ignored
-    // while `think_expanded`, which is free to grow the window; collapsing
-    // again returns to at least the latched height.
-    pinned_inner_height: Option<f32>,
+    // Height target from `render()` (latch floor, or the user's capped size;
+    // already applied as a floor at the true top of the ui there). Its
+    // remainder budgets the answer text column below. A latch (`cap ==
+    // false`) is ignored while `think_expanded`, which is free to grow the
+    // window; collapsing again returns to at least the latched height.
+    target: Option<HeightTarget>,
     action: &mut OverlayAction,
 ) {
     // Truncation / interruption banner at the very top: the partial reply is
@@ -1227,36 +1333,18 @@ fn render_result(
     }
     ui.add_space(4.0);
 
-    // Answer text: always auto-sizes up to MAX_RESULT_HEIGHT. With a latch
-    // active (and Think collapsed), the leftover latched budget additionally
-    // acts as a FLOOR on the text column: a short answer still owns the
-    // latched space (no empty gap above the bottom row, no shrink-jump at
-    // the Processing→Result seam), while a taller answer is free to grow the
-    // window to its natural size — capping growth at the latch too left the
-    // window shorter than its content whenever the last Processing frame
-    // undershot the final answer (thinking-only streams, cached/fast
-    // responses, post-processed text taller than the streamed preview).
-    // `used_before_text` is measured (not estimated), so it correctly
-    // accounts for the optional incomplete banner above; `reserved_after_text`
-    // is the fixed add_space + bottom row that always follows,
-    // unconditionally.
-    match (pinned_inner_height, think_expanded) {
-        (Some(target), false) => {
-            let used_before_text = ui.cursor().top() - content_top;
-            let reserved_after_text = 4.0 + BOTTOM_ROW_HEIGHT;
-            let floor =
-                (target - used_before_text - reserved_after_text).max(MIN_RESULT_TEXT_HEIGHT);
-            // `set_min_height` reserves space from the current cursor, so
-            // applied here (right before the text, inside its own scope) it
-            // floors exactly the text column: shorter content pads up to the
-            // latch, taller content grows past it up to MAX_RESULT_HEIGHT.
-            ui.scope(|ui| {
-                ui.set_min_height(floor);
-                render_scrollable_text(ui, ("result", mode), text, MAX_RESULT_HEIGHT, false);
-            });
-        }
-        _ => render_scrollable_text(ui, ("result", mode), text, MAX_RESULT_HEIGHT, false),
-    }
+    // Answer text. With a latch (and Think collapsed) the leftover budget is
+    // a FLOOR only: a short answer still owns the latched space (no gap above
+    // the bottom row, no shrink-jump at the Processing→Result seam), while a
+    // taller answer grows the window — capping at the latch left the window
+    // shorter than its content whenever the last Processing frame undershot
+    // the final answer (thinking-only streams, cached/fast responses). A
+    // user size caps as well, expanded Think included: the text scrolls in
+    // whatever the fixed panel has left. The budget is measured from the
+    // cursor, so the optional banner/think rows above are accounted for;
+    // `4.0 + BOTTOM_ROW_HEIGHT` is what unconditionally follows the text.
+    let text_target = target.filter(|t| t.cap || !think_expanded);
+    render_text_column(ui, ("result", mode), text, text_target, 4.0 + BOTTOM_ROW_HEIGHT, false);
 
     // Bottom row: shared slot with Processing's Cancel-button row (see
     // `BOTTOM_ROW_HEIGHT`): the passive completion summary on the left, the
@@ -1640,6 +1728,16 @@ mod tests {
         text: &str,
         min_result_height: Option<f32>,
     ) -> OverlayOutput {
+        render_headless_sized(ctx, state, text, min_result_height, None)
+    }
+
+    fn render_headless_sized(
+        ctx: &egui::Context,
+        state: &OverlayState,
+        text: &str,
+        min_result_height: Option<f32>,
+        user_size: Option<egui::Vec2>,
+    ) -> OverlayOutput {
         let mut output = None;
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             output = Some(render(
@@ -1668,6 +1766,7 @@ mod tests {
                 None,
                 false,
                 min_result_height,
+                user_size,
                 ctx,
             ));
         });
@@ -1787,6 +1886,50 @@ mod tests {
             long_h > short_h + 10.0,
             "without a latch, a much longer result ({long_h}) must render taller \
              than a short one ({short_h})",
+        );
+    }
+
+    /// A user size fixes the panel: a 200-line Result and a one-word Result
+    /// both render at exactly that panel size (the text scrolls inside it),
+    /// and so does a streaming Processing frame — the latch is moot.
+    #[test]
+    fn user_size_fixes_the_panel_in_every_state() {
+        let ctx = egui::Context::default();
+        let size = egui::vec2(640.0, 420.0);
+        let long_text = "line\n".repeat(200);
+        let cases: [(OverlayState, &str); 3] = [
+            (OverlayState::Result(long_text.clone()), ""),
+            (OverlayState::Result("short".into()), ""),
+            (OverlayState::Processing, long_text.as_str()),
+        ];
+        for (state, streaming) in &cases {
+            ctx.memory_mut(|m| m.reset_areas());
+            let mut out = None;
+            for _ in 0..5 {
+                out = Some(render_headless_sized(&ctx, state, streaming, Some(300.0), Some(size)));
+            }
+            let content = out.unwrap().content_size.unwrap();
+            assert!(
+                (content.x - size.x).abs() < 1.0 && (content.y - size.y).abs() < 1.0,
+                "{state:?}: panel {content:?} must match the user size {size:?}",
+            );
+        }
+    }
+
+    /// The grip never reports a size below `MIN_USER_PANEL`, and a delta of
+    /// zero reports nothing (no redundant resize events while merely holding).
+    #[test]
+    fn user_size_below_minimum_grows_the_panel_to_the_minimum() {
+        let ctx = egui::Context::default();
+        let tiny = egui::vec2(100.0, 40.0);
+        let mut out = None;
+        for _ in 0..5 {
+            out = Some(render_headless_sized(&ctx, &OverlayState::Result("x".into()), "", None, Some(tiny)));
+        }
+        let content = out.unwrap().content_size.unwrap();
+        assert!(
+            content.x >= MIN_USER_PANEL.x - 1.0 && content.y >= tiny.y,
+            "the chrome must not collapse below its own size: {content:?}",
         );
     }
 }

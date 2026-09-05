@@ -235,6 +235,11 @@ pub struct OverlayApp {
     /// pins a completely different request — the next Processing→Result
     /// transition re-latches on its own.
     result_latch: Option<ResultLatch>,
+    /// Screen top-left of the window when the resize grip was first dragged;
+    /// re-asserted after every user resize (platforms anchor a programmatic
+    /// resize at the center or bottom-left, which would slide the grip out
+    /// from under the cursor). Lives while `StateMachine::user_size` does.
+    resize_anchor: Option<egui::Pos2>,
     /// Whether the think block section is expanded in the Result state.
     think_expanded: bool,
     /// request_id whose Processing start time is currently tracked; a change
@@ -354,6 +359,7 @@ impl OverlayApp {
             last_content_size: None,
             last_sent_pos: None,
             result_latch: None,
+            resize_anchor: None,
             think_expanded: false,
             processing_request_id: None,
             processing_started_at: None,
@@ -413,6 +419,7 @@ impl OverlayApp {
             last_content_size: None,
             last_sent_pos: None,
             result_latch: None,
+            resize_anchor: None,
             think_expanded: false,
             processing_request_id: None,
             processing_started_at: None,
@@ -1174,6 +1181,11 @@ impl OverlayApp {
                     }
                 }
                 crate::diagnostics::ScenarioAction::CloseSettings => self.close_settings(ctx),
+                crate::diagnostics::ScenarioAction::Resize(w, h) => {
+                    // Same path as a real grip drag (anchor + state machine event).
+                    self.handle_overlay_action(ctx, overlay::OverlayAction::Resize(egui::vec2(w, h)));
+                    self.diag_transition("Resized");
+                }
                 crate::diagnostics::ScenarioAction::Quit => {
                     info!("diag: all scenarios finished, exiting");
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1386,21 +1398,44 @@ impl OverlayApp {
     /// window on the Processing→Result content-height delta (the resize-jump
     /// this fix addresses).
     fn calculate_target_position(&self, win_size: egui::Vec2) -> Option<egui::Pos2> {
-        if matches!(self.sm.state(), OverlayState::Result(_) | OverlayState::Error(_))
-            && let Some(latch) = self.result_latch
-        {
-            let (bounds, scale) = match self.spawn_position {
-                Some(c) => (
-                    self.platform.display_bounds_at_point(c.x as f64, c.y as f64),
-                    self.platform.points_to_screen_scale_at(c.x as f64, c.y as f64) as f32,
-                ),
-                // No spawn point → no bounds, so the anchor passes through
-                // unclamped and the scale is moot.
-                None => (None, 1.0),
-            };
-            return Some(anchored_position_screen(latch.top_left, win_size, scale, bounds));
+        // A user resize keeps the top-left the grip drag started from; below
+        // that, a latched Result/Error keeps its Processing-time top-left.
+        let anchor = self.resize_anchor.or_else(|| {
+            matches!(self.sm.state(), OverlayState::Result(_) | OverlayState::Error(_))
+                .then_some(self.result_latch.map(|l| l.top_left))
+                .flatten()
+        });
+        if let Some(anchor) = anchor {
+            let (bounds, scale) = self.spawn_bounds_and_scale();
+            return Some(anchored_position_screen(anchor, win_size, scale, bounds));
         }
         self.calculate_centered_position(win_size)
+    }
+
+    /// Display work area and points→screen scale at the spawn point. No spawn
+    /// point → no bounds (anchors pass through unclamped) and the scale is moot.
+    fn spawn_bounds_and_scale(&self) -> (Option<(f64, f64, f64, f64)>, f32) {
+        match self.spawn_position {
+            Some(c) => (
+                self.platform.display_bounds_at_point(c.x as f64, c.y as f64),
+                self.platform.points_to_screen_scale_at(c.x as f64, c.y as f64) as f32,
+            ),
+            None => (None, 1.0),
+        }
+    }
+
+    /// The window's current top-left in the screen units `reposition_window`
+    /// takes: the last position this adapter applied while it still owned
+    /// placement, otherwise (the user dragged the window since) the viewport
+    /// rect egui reports, scaled from points.
+    fn current_top_left_screen(&self, ctx: &egui::Context) -> Option<egui::Pos2> {
+        if !self.sm.user_repositioned()
+            && let Some(pos) = self.last_sent_pos
+        {
+            return Some(pos);
+        }
+        let (_, scale) = self.spawn_bounds_and_scale();
+        ctx.input(|i| i.viewport().outer_rect).map(|r| (r.min.to_vec2() * scale).to_pos2())
     }
 
     /// Reposition the window while the overlay is already visible (e.g. after size change).
@@ -1576,22 +1611,29 @@ impl OverlayApp {
         content_size: Option<egui::Vec2>,
     ) {
         self.last_content_size = content_size;
+        if self.sm.user_size().is_none() {
+            self.resize_anchor = None;
+        }
         let Some(size) = desired else { return };
         if self.last_desired_size != Some(size) {
             self.last_desired_size = Some(size);
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
-            // A resize while a Result/Error latch is pinning the top-left can
-            // itself move the OS window (some platforms resize anchored at
-            // the window's center rather than its top-left) — invalidate the
-            // reposition gate so `reposition_window` below re-asserts the
-            // latched position this same frame, even though the *computed*
-            // target position hasn't changed. Streaming (no latch) keeps the
-            // original gating untouched.
-            if self.result_latch.is_some() {
+            // A resize while a Result/Error latch or a user resize is pinning
+            // the top-left can itself move the OS window (some platforms
+            // resize anchored at the window's center or bottom-left rather
+            // than its top-left) — invalidate the reposition gate so
+            // `reposition_window` below re-asserts the anchored position this
+            // same frame, even though the *computed* target position hasn't
+            // changed. Streaming (no anchor) keeps the original gating.
+            if self.result_latch.is_some() || self.resize_anchor.is_some() {
                 self.last_sent_pos = None;
             }
         }
-        if !matches!(self.sm.state(), OverlayState::Hidden) && !self.sm.user_repositioned() {
+        // A user drag hands placement to the OS for good — except that a
+        // user resize (which also sets `user_repositioned`) must keep
+        // re-asserting its anchor, see `resize_anchor`.
+        let owns_placement = !self.sm.user_repositioned() || self.resize_anchor.is_some();
+        if !matches!(self.sm.state(), OverlayState::Hidden) && owns_placement {
             self.reposition_window(ctx, size);
         }
     }
@@ -1614,6 +1656,12 @@ impl OverlayApp {
             overlay::OverlayAction::StartDrag => {
                 ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 UiEvent::UserStartDrag
+            }
+            overlay::OverlayAction::Resize(size) => {
+                if self.resize_anchor.is_none() {
+                    self.resize_anchor = self.current_top_left_screen(ctx);
+                }
+                UiEvent::UserResize { width: size.x, height: size.y }
             }
             overlay::OverlayAction::SwitchMode(mode) => UiEvent::UserSwitchMode(mode),
             overlay::OverlayAction::ToggleThink => {
@@ -1838,6 +1886,7 @@ impl eframe::App for OverlayApp {
                 self.last_debug.as_ref().and_then(format_completion_status),
                 self.model_count() > 1,
                 self.result_latch.map(|l| l.min_content_height),
+                self.sm.user_size().map(|(w, h)| egui::vec2(w, h)),
                 ctx,
             );
             let action = std::mem::replace(&mut output.action, overlay::OverlayAction::None);
@@ -2780,5 +2829,64 @@ mod tests {
 
         assert!(matches!(app.sm.state(), OverlayState::Processing));
         assert!(app.result_latch.is_none(), "retry must drop the previous answer's latch");
+    }
+
+    // --- resize grip: anchor + placement ---
+
+    /// A grip drag records the size in the state machine and anchors the
+    /// window's current top-left (the last position this adapter applied), so
+    /// the reposition pass keeps re-asserting it while the size changes
+    /// instead of re-centering (which would slide the grip away).
+    #[test]
+    fn resize_action_anchors_the_current_top_left() {
+        let _lock = crate::clipboard::test_support::lock_clipboard();
+        let (mut app, _resp_tx) = new_test_app();
+        let ctx = egui::Context::default();
+
+        app.sm_handle(UiEvent::ContentReady {
+            content: crate::ClipboardContent::text_only("only".into()),
+            auto_copy: true,
+        });
+        app.last_sent_pos = Some(egui::pos2(100.0, 200.0));
+
+        app.handle_overlay_action(&ctx, overlay::OverlayAction::Resize(egui::vec2(640.0, 420.0)));
+
+        assert_eq!(app.sm.user_size(), Some((640.0, 420.0)));
+        assert_eq!(app.resize_anchor, Some(egui::pos2(100.0, 200.0)));
+        // No spawn point → no display bounds, so the anchor passes through.
+        assert_eq!(
+            app.calculate_target_position(egui::vec2(680.0, 460.0)),
+            Some(egui::pos2(100.0, 200.0)),
+        );
+        // A second drag keeps the first anchor (the grip, not the window, moves).
+        app.last_sent_pos = Some(egui::pos2(0.0, 0.0));
+        app.handle_overlay_action(&ctx, overlay::OverlayAction::Resize(egui::vec2(700.0, 500.0)));
+        assert_eq!(app.resize_anchor, Some(egui::pos2(100.0, 200.0)));
+    }
+
+    /// The anchor lives exactly as long as the user size: a new trigger resets
+    /// the size in the state machine and the next viewport pass drops the anchor.
+    #[test]
+    fn next_trigger_drops_the_resize_anchor() {
+        let _lock = crate::clipboard::test_support::lock_clipboard();
+        let (mut app, _resp_tx) = new_test_app();
+        let ctx = egui::Context::default();
+
+        app.sm_handle(UiEvent::ContentReady {
+            content: crate::ClipboardContent::text_only("only".into()),
+            auto_copy: true,
+        });
+        app.last_sent_pos = Some(egui::pos2(100.0, 200.0));
+        app.handle_overlay_action(&ctx, overlay::OverlayAction::Resize(egui::vec2(640.0, 420.0)));
+        app.update_viewport(&ctx, Some(egui::vec2(680.0, 460.0)), Some(egui::vec2(640.0, 420.0)));
+        assert!(app.resize_anchor.is_some());
+
+        app.sm_handle(UiEvent::ContentReady {
+            content: crate::ClipboardContent::text_only("next".into()),
+            auto_copy: true,
+        });
+        assert_eq!(app.sm.user_size(), None);
+        app.update_viewport(&ctx, Some(egui::vec2(520.0, 200.0)), Some(egui::vec2(480.0, 160.0)));
+        assert!(app.resize_anchor.is_none());
     }
 }
