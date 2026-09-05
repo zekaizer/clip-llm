@@ -36,6 +36,10 @@ streaming = true                          # set false to disable SSE (like CLIP_
 # api_key = "..."                         # CLIP_LLM_API_KEY (plain text — keep the file private; omit if unused)
 # auth_file = "~/.grok/auth.json"         # grok-oauth only: override the credential-store path (no ~ expansion;
                                           # use an absolute path)
+# thinking_control = "auto"               # how "No Think" is sent to this model:
+                                          #   auto (default) probes once and keeps the first knob that really
+                                          #   stops reasoning; or force reasoning_effort (LM Studio, Groq, OpenAI),
+                                          #   chat_template_kwargs (vLLM Qwen3), prompt_tag (/no_think), none.
 
 # Custom HTTP headers (like CLIP_LLM_CUSTOM_HEADERS). One key = value per line.
 [api.headers]
@@ -55,6 +59,7 @@ streaming = true                          # set false to disable SSE (like CLIP_
 # api_key      = "gsk_..."
 # max_tokens   = 40960                             # overrides [generation].max_tokens for this profile
 # token_budget = 6000                              # overrides [generation].token_budget (Groq TPM cap)
+# thinking_control = "reasoning_effort"           # same choices as [api].thinking_control
 #
 # [[models]]
 # name     = "grok"

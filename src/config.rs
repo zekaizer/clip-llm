@@ -347,6 +347,9 @@ struct ApiConfig {
     streaming: Option<bool>,
     /// `[api.headers]` — custom HTTP headers (alternative to `CLIP_LLM_CUSTOM_HEADERS`).
     headers: BTreeMap<String, String>,
+    /// How to switch thinking off for this model: `"auto"` (probe, default),
+    /// `"reasoning_effort"`, `"chat_template_kwargs"`, `"prompt_tag"`, `"none"`.
+    thinking_control: Option<String>,
 }
 
 /// One `[[models]]` entry: a selectable connection profile with the same keys
@@ -367,6 +370,8 @@ struct ModelProfile {
     max_tokens: Option<u32>,
     /// Overrides `[generation].token_budget` for this profile.
     token_budget: Option<u32>,
+    /// See `ApiConfig::thinking_control`.
+    thinking_control: Option<String>,
 }
 
 /// A resolved model profile: what the API client needs to connect to one
@@ -383,6 +388,8 @@ pub struct ModelSpec {
     pub headers: BTreeMap<String, String>,
     pub max_tokens: Option<u32>,
     pub token_budget: Option<u32>,
+    /// Thinking-control override (`auto`/absent = probe).
+    pub thinking_control: Option<String>,
     pub from_api_section: bool,
 }
 
@@ -602,6 +609,7 @@ impl Config {
                 headers: self.api.headers.clone(),
                 max_tokens: None,
                 token_budget: None,
+                thinking_control: self.api.thinking_control.clone(),
                 from_api_section: true,
             });
         }
@@ -626,6 +634,7 @@ impl Config {
                 headers: m.headers.clone(),
                 max_tokens: m.max_tokens,
                 token_budget: m.token_budget,
+                thinking_control: m.thinking_control.clone(),
                 from_api_section: false,
             });
         }
@@ -1157,6 +1166,7 @@ fn starter_template() -> String {
     t.push_str("api_key  = \"\"   # REQUIRED — access token; use any non-empty value if the server needs none (or CLIP_LLM_API_KEY)\n");
     t.push_str(&s("auth_file", "~/.grok/auth.json", "grok-oauth only: override the credential-store path"));
     t.push_str(&r("streaming", "true", "false disables SSE (like CLIP_LLM_NO_STREAM)"));
+    t.push_str(&s("thinking_control", "auto", "how No Think is sent: auto (probe) | reasoning_effort | chat_template_kwargs | prompt_tag | none"));
     t.push('\n');
 
     // [api.headers] — custom HTTP headers (like CLIP_LLM_CUSTOM_HEADERS).
@@ -1620,6 +1630,18 @@ X-Test = "1"
         assert_eq!(specs[1].token_budget, Some(6000));
         assert_eq!(specs[2].provider, None, "provider defaults later, at client build");
         assert_eq!(specs[2].headers.get("X-Test").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn model_specs_carry_thinking_control() {
+        let c: Config = toml::from_str(
+            "[api]\nmodel = \"m\"\nthinking_control = \"none\"\n[[models]]\nname = \"x\"\nmodel = \"y\"\nthinking_control = \"reasoning_effort\"\n[[models]]\nname = \"z\"\nmodel = \"w\"\n",
+        )
+        .unwrap();
+        let specs = c.model_specs().unwrap();
+        assert_eq!(specs[0].thinking_control.as_deref(), Some("none"));
+        assert_eq!(specs[1].thinking_control.as_deref(), Some("reasoning_effort"));
+        assert_eq!(specs[2].thinking_control, None);
     }
 
     #[test]

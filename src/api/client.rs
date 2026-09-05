@@ -95,11 +95,88 @@ struct ChatRequest<'a> {
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     chat_template_kwargs: Option<ChatTemplateKwargs>,
+    /// OpenAI-style `reasoning_effort`; `"none"` disables thinking on servers
+    /// that honor it (LM Studio, Groq, OpenAI). Omitted otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'static str>,
 }
 
 #[derive(Serialize)]
-struct ChatTemplateKwargs {
+pub(crate) struct ChatTemplateKwargs {
     enable_thinking: bool,
+}
+
+/// Request knobs that express a thinking mode for the chat-completions
+/// flavor. At most one of them is set, per the resolved control method.
+#[derive(Default)]
+pub(crate) struct ThinkingKnobs {
+    /// System-prompt prefix (`/think\n` / `/no_think\n`).
+    pub prefix: Option<&'static str>,
+    pub kwargs: Option<ChatTemplateKwargs>,
+    pub reasoning_effort: Option<&'static str>,
+}
+
+/// What one thinking-control probe attempt told us.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProbeVerdict {
+    /// 2xx and the reply carries no reasoning: the knob works.
+    Effective,
+    /// 2xx but the model still reasoned: the knob is silently ignored.
+    Ineffective,
+    /// 400/422: the server understood and refused the knob.
+    Rejected,
+    /// 429: stop probing for the session.
+    RateLimited,
+    /// Anything else (auth, 404, 5xx, unparsable): do not cache, retry later.
+    Inconclusive,
+}
+
+/// Whether a non-streaming chat response shows the model reasoned: a
+/// `reasoning_tokens` count, a `reasoning_content`/`reasoning` message field,
+/// or an inline `<think>`/`<thought>` block at the start of the content.
+pub(crate) fn reasoning_present(body: &serde_json::Value) -> bool {
+    let reasoning_tokens = body
+        .pointer("/usage/completion_tokens_details/reasoning_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    if reasoning_tokens > 0 {
+        return true;
+    }
+    let message = body.pointer("/choices/0/message");
+    let field_text = |key: &str| {
+        message
+            .and_then(|m| m.get(key))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|t| !t.trim().is_empty())
+    };
+    if field_text("reasoning_content") || field_text("reasoning") {
+        return true;
+    }
+    let content = message
+        .and_then(|m| m.get("content"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .trim_start();
+    content.starts_with("<think>") || content.starts_with("<thought>")
+}
+
+/// Classify one probe attempt from its HTTP status and (for 2xx) body.
+pub(crate) fn judge_probe_response(status: u16, body: Option<&serde_json::Value>) -> ProbeVerdict {
+    match status {
+        200..=299 => match body {
+            Some(body) if body.get("choices").is_some() => {
+                if reasoning_present(body) {
+                    ProbeVerdict::Ineffective
+                } else {
+                    ProbeVerdict::Effective
+                }
+            }
+            _ => ProbeVerdict::Inconclusive,
+        },
+        400 | 422 => ProbeVerdict::Rejected,
+        429 => ProbeVerdict::RateLimited,
+        _ => ProbeVerdict::Inconclusive,
+    }
 }
 
 #[derive(Serialize)]
@@ -587,6 +664,35 @@ pub enum ThinkingControlMethod {
     Unsupported,
 }
 
+impl ThinkingControlMethod {
+    /// Probe order for the chat-completions flavor: the OpenAI-standard knob
+    /// first, then the vLLM template switch, then the Qwen prompt tag.
+    pub const CHAT_CANDIDATES: &[Self] =
+        &[Self::ReasoningEffort, Self::ChatTemplateKwargs, Self::SystemPromptTag];
+
+    /// Config/UI name of the method.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::ChatTemplateKwargs => "chat_template_kwargs",
+            Self::SystemPromptTag => "prompt_tag",
+            Self::ReasoningEffort => "reasoning_effort",
+            Self::Unsupported => "none",
+        }
+    }
+
+    /// Parse a `thinking_control` setting. `None` = auto (probe); unknown
+    /// spellings are also `None` (the caller warns).
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "reasoning_effort" => Some(Self::ReasoningEffort),
+            "chat_template_kwargs" | "kwargs" => Some(Self::ChatTemplateKwargs),
+            "prompt_tag" | "no_think" | "no_think_tag" => Some(Self::SystemPromptTag),
+            "none" | "unsupported" | "off" => Some(Self::Unsupported),
+            _ => None,
+        }
+    }
+}
+
 /// Which request/response protocol the endpoint speaks. Selected by
 /// `[api].provider`; every protocol-dependent branch in the client keys off
 /// this, and the streaming worker stays flavor-agnostic behind [`SseEvent`].
@@ -614,6 +720,29 @@ struct LlmClientInner {
     initial_response_timeout: Duration,
     supports_vision: OnceCell<bool>,
     thinking_control: OnceCell<ThinkingControlMethod>,
+}
+
+/// A profile's `thinking_control` override as a pre-filled probe cache; empty
+/// (= probe on first use) for `auto`, absent, or an unknown spelling.
+fn preset_thinking_control(spec: &crate::config::ModelSpec) -> OnceCell<ThinkingControlMethod> {
+    let Some(raw) = spec.thinking_control.as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
+        return OnceCell::new();
+    };
+    match ThinkingControlMethod::parse(raw) {
+        Some(method) => {
+            info!("profile {:?}: thinking_control forced to {}", spec.name, method.key());
+            OnceCell::from(method)
+        }
+        None => {
+            if !raw.eq_ignore_ascii_case("auto") {
+                warn!(
+                    "profile {:?}: unknown thinking_control {raw:?} (expected auto | reasoning_effort | chat_template_kwargs | prompt_tag | none); probing instead",
+                    spec.name
+                );
+            }
+            OnceCell::new()
+        }
+    }
 }
 
 /// Minimal 1x1 transparent PNG for vision probe (67 bytes).
@@ -984,7 +1113,7 @@ impl LlmClient {
             token_budget,
             initial_response_timeout,
             supports_vision: OnceCell::new(),
-            thinking_control: OnceCell::new(),
+            thinking_control: preset_thinking_control(spec),
         }), None))
     }
 
@@ -1049,6 +1178,7 @@ impl LlmClient {
             max_tokens: 1,
             stream: None,
             chat_template_kwargs: None,
+            reasoning_effort: None,
         };
 
         info!("probing model vision support...");
@@ -1127,8 +1257,7 @@ impl LlmClient {
         let probe = if inner.flavor == ApiFlavor::GrokResponses {
             self.probe_reasoning_effort(inner).await
         } else {
-            // Step 1: try chat_template_kwargs with enable_thinking=true
-            self.probe_thinking_kwargs(inner).await
+            self.probe_thinking_chat(inner).await
         };
         let method = match probe {
             Some(method) => method,
@@ -1208,152 +1337,68 @@ impl LlmClient {
         }
     }
 
-    /// Try `chat_template_kwargs: { enable_thinking: true }`.
-    /// Returns `None` on network error (caller should not cache).
-    async fn probe_thinking_kwargs(&self, inner: &LlmClientInner) -> Option<ThinkingControlMethod> {
-        let body = ChatRequest {
-            model: &inner.model,
-            messages: vec![Message {
-                role: "user",
-                content: MessageContent::Text("Say hi."),
-            }],
-            temperature: 0.0,
-            max_tokens: 128,
-            stream: None,
-            chat_template_kwargs: Some(ChatTemplateKwargs { enable_thinking: true }),
-        };
-
-        if tracing::enabled!(tracing::Level::TRACE)
-            && let Ok(json) = serde_json::to_string_pretty(&body)
-        {
-            trace!("thinking kwargs probe request:\n{json}");
-        }
-        let req = match inner.apply_auth(inner.client.post(&inner.endpoint).json(&body)).await {
-            Ok(req) => req,
-            Err(e) => {
-                warn!("thinking kwargs probe auth failed (will retry): {e}");
-                return None;
-            }
-        };
-
-        match req.send().await {
-            Ok(resp) if resp.status().is_success() => {
-                trace!("thinking kwargs probe response: HTTP {}", resp.status().as_u16());
-                // HTTP 200 + kwargs accepted = model supports chat_template_kwargs.
-                // Don't require <think> in the response — the model may skip thinking
-                // for trivial prompts even with enable_thinking=true.
-                Some(ThinkingControlMethod::ChatTemplateKwargs)
-            }
-            Ok(resp) if resp.status().as_u16() == 400 || resp.status().as_u16() == 422 => {
-                trace!("thinking kwargs probe rejected: HTTP {}", resp.status().as_u16());
-                // Server understood but rejected the kwargs field — try the
-                // system-prompt tag fallback to determine the real method.
-                self.probe_thinking_prompt_tag(inner).await
-            }
-            Ok(resp) if resp.status().as_u16() == 429 => {
-                // Rate limited: re-probing per request amplifies the limit (#63).
-                // Cache the conservative default (no thinking control) for the
-                // session via the Some(...) the caller stores; a restart re-probes
-                // once quota recovers.
-                warn!("thinking kwargs probe rate limited (HTTP 429); assuming no thinking control for this session");
-                Some(ThinkingControlMethod::Unsupported)
-            }
-            Ok(resp) => {
-                // Other transient or ambiguous (401/403/404/5xx): don't cache,
-                // retry next time rather than permanently deciding the method.
-                warn!(
-                    "thinking kwargs probe inconclusive (HTTP {}); will retry",
-                    resp.status().as_u16()
-                );
-                None
-            }
-            Err(e) => {
-                warn!("thinking probe failed (will retry): {e}");
-                None
-            }
-        }
-    }
-
-    /// Fallback: try `/think` tag in the system prompt.
-    /// Returns `None` on network error.
-    async fn probe_thinking_prompt_tag(
-        &self,
-        inner: &LlmClientInner,
-    ) -> Option<ThinkingControlMethod> {
-        let body = ChatRequest {
-            model: &inner.model,
-            messages: vec![
-                Message {
-                    role: "system",
-                    content: MessageContent::Text("/think"),
-                },
-                Message {
-                    role: "user",
-                    content: MessageContent::Text("Say hi."),
-                },
-            ],
-            temperature: 0.0,
-            max_tokens: 128,
-            stream: None,
-            chat_template_kwargs: None,
-        };
-
-        if tracing::enabled!(tracing::Level::TRACE)
-            && let Ok(json) = serde_json::to_string_pretty(&body)
-        {
-            trace!("thinking prompt-tag probe request:\n{json}");
-        }
-        let req = match inner.apply_auth(inner.client.post(&inner.endpoint).json(&body)).await {
-            Ok(req) => req,
-            Err(e) => {
-                warn!("thinking prompt-tag probe auth failed (will retry): {e}");
-                return None;
-            }
-        };
-
-        match req.send().await {
-            Ok(resp) if resp.status().is_success() => {
-                let text = resp.text().await.unwrap_or_default();
-                trace!("thinking prompt-tag probe response:\n{text}");
-                if let Ok(chat) = serde_json::from_str::<ChatResponse>(&text) {
-                    let content = chat
-                        .choices
-                        .first()
-                        .map(|c| c.message.content.as_str())
-                        .unwrap_or("");
-                    if content.contains("<think>") {
-                        Some(ThinkingControlMethod::SystemPromptTag)
-                    } else {
-                        Some(ThinkingControlMethod::Unsupported)
-                    }
-                } else {
-                    Some(ThinkingControlMethod::Unsupported)
+    /// Chat-completions flavor: try each control in `CHAT_CANDIDATES` with
+    /// thinking switched OFF on a prompt that makes reasoning models think, and
+    /// keep the first one whose reply carries no reasoning — acceptance alone
+    /// proves nothing (LM Studio returns 200 for unknown fields and keeps
+    /// thinking). 400/422 or a still-reasoning reply moves to the next
+    /// candidate; none left = `Unsupported` (cached). `None` = inconclusive
+    /// (network/auth/5xx), so the caller retries later instead of caching.
+    async fn probe_thinking_chat(&self, inner: &LlmClientInner) -> Option<ThinkingControlMethod> {
+        for &method in ThinkingControlMethod::CHAT_CANDIDATES {
+            let knobs = Self::resolve_thinking(ThinkingMode::NoThink, method);
+            let system = format!(
+                "{}Translate the user's text to Korean. Output only the translation.",
+                knobs.prefix.unwrap_or("")
+            );
+            let body = ChatRequest {
+                model: &inner.model,
+                messages: vec![
+                    Message { role: "system", content: MessageContent::Text(&system) },
+                    Message { role: "user", content: MessageContent::Text("Good morning.") },
+                ],
+                temperature: 0.0,
+                max_tokens: 64,
+                stream: None,
+                chat_template_kwargs: knobs.kwargs,
+                reasoning_effort: knobs.reasoning_effort,
+            };
+            let req = match inner.apply_auth(inner.client.post(&inner.endpoint).json(&body)).await {
+                Ok(req) => req,
+                Err(e) => {
+                    warn!("thinking probe ({}) auth failed (will retry): {e}", method.key());
+                    return None;
+                }
+            };
+            let resp = match req.send().await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    warn!("thinking probe ({}) failed (will retry): {e}", method.key());
+                    return None;
+                }
+            };
+            let status = resp.status().as_u16();
+            let text = resp.text().await.unwrap_or_default();
+            let json = serde_json::from_str::<serde_json::Value>(&text).ok();
+            let verdict = judge_probe_response(status, json.as_ref());
+            debug!("thinking probe ({}): HTTP {status} -> {verdict:?}", method.key());
+            match verdict {
+                ProbeVerdict::Effective => return Some(method),
+                ProbeVerdict::Ineffective | ProbeVerdict::Rejected => continue,
+                ProbeVerdict::RateLimited => {
+                    // Re-probing per request amplifies the limit (#63): cache the
+                    // conservative default for the session.
+                    warn!("thinking probe rate limited (HTTP 429); assuming no thinking control for this session");
+                    return Some(ThinkingControlMethod::Unsupported);
+                }
+                ProbeVerdict::Inconclusive => {
+                    warn!("thinking probe ({}) inconclusive (HTTP {status}); will retry", method.key());
+                    return None;
                 }
             }
-            Ok(resp) if resp.status().as_u16() == 400 || resp.status().as_u16() == 422 => {
-                // Server understood and rejected the /think system tag —
-                // thinking is definitively uncontrollable. Worth caching.
-                Some(ThinkingControlMethod::Unsupported)
-            }
-            Ok(resp) if resp.status().as_u16() == 429 => {
-                // Rate limited: cache the conservative default for the session
-                // rather than re-probing on every request (#63).
-                warn!("thinking prompt-tag probe rate limited (HTTP 429); assuming no thinking control for this session");
-                Some(ThinkingControlMethod::Unsupported)
-            }
-            Ok(resp) => {
-                // Other transient or ambiguous (401/403/404/5xx): don't cache, retry.
-                warn!(
-                    "thinking prompt-tag probe inconclusive (HTTP {}); will retry",
-                    resp.status().as_u16()
-                );
-                None
-            }
-            Err(e) => {
-                warn!("thinking prompt-tag probe failed (will retry): {e}");
-                None
-            }
         }
+        info!("no thinking control works for this model; thinking stays at the server default");
+        Some(ThinkingControlMethod::Unsupported)
     }
 
     /// Build user message content: multimodal parts if images should be included,
@@ -1387,27 +1432,28 @@ impl LlmClient {
     }
 
     /// Resolve thinking mode into API-level controls based on probe result.
-    fn resolve_thinking(
-        thinking_mode: ThinkingMode,
-        control: ThinkingControlMethod,
-    ) -> (Option<&'static str>, Option<ChatTemplateKwargs>) {
+    fn resolve_thinking(thinking_mode: ThinkingMode, control: ThinkingControlMethod) -> ThinkingKnobs {
         match (thinking_mode, control) {
-            (_, ThinkingControlMethod::Unsupported) => (None, None),
-            (ThinkingMode::Think, ThinkingControlMethod::ChatTemplateKwargs) => {
-                (None, Some(ChatTemplateKwargs { enable_thinking: true }))
-            }
-            (ThinkingMode::NoThink, ThinkingControlMethod::ChatTemplateKwargs) => {
-                (None, Some(ChatTemplateKwargs { enable_thinking: false }))
-            }
+            (_, ThinkingControlMethod::Unsupported) => ThinkingKnobs::default(),
+            (ThinkingMode::Think, ThinkingControlMethod::ChatTemplateKwargs) => ThinkingKnobs {
+                kwargs: Some(ChatTemplateKwargs { enable_thinking: true }),
+                ..Default::default()
+            },
+            (ThinkingMode::NoThink, ThinkingControlMethod::ChatTemplateKwargs) => ThinkingKnobs {
+                kwargs: Some(ChatTemplateKwargs { enable_thinking: false }),
+                ..Default::default()
+            },
             (ThinkingMode::Think, ThinkingControlMethod::SystemPromptTag) => {
-                (Some("/think\n"), None)
+                ThinkingKnobs { prefix: Some("/think\n"), ..Default::default() }
             }
             (ThinkingMode::NoThink, ThinkingControlMethod::SystemPromptTag) => {
-                (Some("/no_think\n"), None)
+                ThinkingKnobs { prefix: Some("/no_think\n"), ..Default::default() }
             }
-            // Responses-API control; expressed via resolve_reasoning instead
-            // of the chat-completions knobs this function returns.
-            (_, ThinkingControlMethod::ReasoningEffort) => (None, None),
+            (ThinkingMode::NoThink, ThinkingControlMethod::ReasoningEffort) => {
+                ThinkingKnobs { reasoning_effort: Some("none"), ..Default::default() }
+            }
+            // Think: omit the field so the server default (full reasoning) applies.
+            (ThinkingMode::Think, ThinkingControlMethod::ReasoningEffort) => ThinkingKnobs::default(),
         }
     }
 
@@ -1446,8 +1492,10 @@ impl LlmClient {
         let inner = &self.0;
         let vision = self.probe_vision().await;
         let thinking_control = self.probe_thinking().await;
-        let (sys_prefix, template_kwargs) =
-            Self::resolve_thinking(thinking_mode, thinking_control);
+        let knobs = Self::resolve_thinking(thinking_mode, thinking_control);
+        let sys_prefix = knobs.prefix;
+        let template_kwargs = knobs.kwargs;
+        let reasoning_effort = knobs.reasoning_effort;
 
         let use_images = should_use_images(mode, vision, content.has_images());
 
@@ -1497,6 +1545,7 @@ impl LlmClient {
                     max_tokens,
                     stream: if stream { Some(true) } else { None },
                     chat_template_kwargs: template_kwargs,
+                    reasoning_effort,
                 };
                 (
                     client.post(&inner.endpoint).json(&body),
@@ -2447,14 +2496,80 @@ mod tests {
     }
 
     #[test]
-    fn resolve_thinking_reasoning_effort_returns_chat_noops() {
-        // The Responses-API control must not leak chat-completions knobs.
-        let (prefix, kwargs) = LlmClient::resolve_thinking(
-            ThinkingMode::NoThink,
-            ThinkingControlMethod::ReasoningEffort,
-        );
-        assert!(prefix.is_none());
-        assert!(kwargs.is_none());
+    fn resolve_thinking_reasoning_effort_sets_only_that_knob() {
+        // NoThink -> reasoning_effort "none"; Think -> server default (omitted).
+        let knobs = LlmClient::resolve_thinking(ThinkingMode::NoThink, ThinkingControlMethod::ReasoningEffort);
+        assert!(knobs.prefix.is_none());
+        assert!(knobs.kwargs.is_none());
+        assert_eq!(knobs.reasoning_effort, Some("none"));
+        let knobs = LlmClient::resolve_thinking(ThinkingMode::Think, ThinkingControlMethod::ReasoningEffort);
+        assert!(knobs.reasoning_effort.is_none() && knobs.prefix.is_none() && knobs.kwargs.is_none());
+        // The other methods never set reasoning_effort.
+        let knobs = LlmClient::resolve_thinking(ThinkingMode::NoThink, ThinkingControlMethod::ChatTemplateKwargs);
+        assert!(knobs.reasoning_effort.is_none());
+        assert!(matches!(knobs.kwargs, Some(ChatTemplateKwargs { enable_thinking: false })));
+        let knobs = LlmClient::resolve_thinking(ThinkingMode::NoThink, ThinkingControlMethod::SystemPromptTag);
+        assert_eq!(knobs.prefix, Some("/no_think\n"));
+    }
+
+    #[test]
+    fn reasoning_present_detects_every_reporting_style() {
+        let j = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
+        // LM Studio / OpenAI: usage.completion_tokens_details.reasoning_tokens
+        assert!(reasoning_present(&j(r#"{"choices":[{"message":{"role":"assistant","content":""}}],"usage":{"completion_tokens":20,"completion_tokens_details":{"reasoning_tokens":17}}}"#)));
+        assert!(!reasoning_present(&j(r#"{"choices":[{"message":{"role":"assistant","content":"OK"}}],"usage":{"completion_tokens":2,"completion_tokens_details":{"reasoning_tokens":0}}}"#)));
+        // vLLM / DeepSeek: message.reasoning_content
+        assert!(reasoning_present(&j(r#"{"choices":[{"message":{"content":"OK","reasoning_content":"let me think"}}]}"#)));
+        assert!(!reasoning_present(&j(r#"{"choices":[{"message":{"content":"OK","reasoning_content":""}}]}"#)));
+        // Ollama / OpenRouter: message.reasoning
+        assert!(reasoning_present(&j(r#"{"choices":[{"message":{"content":"OK","reasoning":"hmm"}}]}"#)));
+        // Inline tags in content
+        assert!(reasoning_present(&j(r#"{"choices":[{"message":{"content":"<think>\nhmm\n</think>OK"}}]}"#)));
+        assert!(reasoning_present(&j(r#"{"choices":[{"message":{"content":"  <thought>hmm</thought>OK"}}]}"#)));
+        assert!(!reasoning_present(&j(r#"{"choices":[{"message":{"content":"OK"}}]}"#)));
+        assert!(!reasoning_present(&j(r#"{"error":"nope"}"#)));
+    }
+
+    #[test]
+    fn judge_probe_response_maps_status_and_body() {
+        let j = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
+        let quiet = j(r#"{"choices":[{"message":{"content":"OK"}}]}"#);
+        let loud = j(r#"{"choices":[{"message":{"content":"","reasoning_content":"x"}}]}"#);
+        assert_eq!(judge_probe_response(200, Some(&quiet)), ProbeVerdict::Effective);
+        assert_eq!(judge_probe_response(200, Some(&loud)), ProbeVerdict::Ineffective);
+        assert_eq!(judge_probe_response(200, None), ProbeVerdict::Inconclusive, "unparsable 2xx");
+        assert_eq!(judge_probe_response(400, None), ProbeVerdict::Rejected);
+        assert_eq!(judge_probe_response(422, None), ProbeVerdict::Rejected);
+        assert_eq!(judge_probe_response(429, None), ProbeVerdict::RateLimited);
+        assert_eq!(judge_probe_response(401, None), ProbeVerdict::Inconclusive);
+        assert_eq!(judge_probe_response(503, None), ProbeVerdict::Inconclusive);
+    }
+
+    #[test]
+    fn thinking_control_parse_and_keys_round_trip() {
+        use ThinkingControlMethod as M;
+        for m in [M::ReasoningEffort, M::ChatTemplateKwargs, M::SystemPromptTag, M::Unsupported] {
+            assert_eq!(M::parse(m.key()), Some(m), "{m:?}");
+        }
+        assert_eq!(M::parse("kwargs"), Some(M::ChatTemplateKwargs));
+        assert_eq!(M::parse("no_think"), Some(M::SystemPromptTag));
+        assert_eq!(M::parse(" Reasoning_Effort "), Some(M::ReasoningEffort));
+        assert_eq!(M::parse("off"), Some(M::Unsupported));
+        assert_eq!(M::parse("auto"), None);
+        assert_eq!(M::parse(""), None);
+        assert_eq!(M::parse("bogus"), None);
+    }
+
+    #[test]
+    fn for_spec_presets_thinking_control_override() {
+        let mut spec = openai_spec("forced");
+        spec.thinking_control = Some("reasoning_effort".into());
+        let c = LlmClient::for_spec(&spec).unwrap();
+        assert_eq!(c.0.thinking_control.get(), Some(&ThinkingControlMethod::ReasoningEffort));
+        let mut spec = openai_spec("auto");
+        spec.thinking_control = Some("auto".into());
+        assert!(LlmClient::for_spec(&spec).unwrap().0.thinking_control.get().is_none());
+        assert!(LlmClient::for_spec(&openai_spec("unset")).unwrap().0.thinking_control.get().is_none());
     }
 
     #[test]
@@ -2744,7 +2859,7 @@ mod tests {
 
     #[test]
     fn resolve_thinking_unsupported_returns_none() {
-        let (prefix, kwargs) = LlmClient::resolve_thinking(
+        let ThinkingKnobs { prefix, kwargs, .. } = LlmClient::resolve_thinking(
             ThinkingMode::Think,
             ThinkingControlMethod::Unsupported,
         );
@@ -2754,7 +2869,7 @@ mod tests {
 
     #[test]
     fn resolve_thinking_think_with_kwargs() {
-        let (prefix, kwargs) = LlmClient::resolve_thinking(
+        let ThinkingKnobs { prefix, kwargs, .. } = LlmClient::resolve_thinking(
             ThinkingMode::Think,
             ThinkingControlMethod::ChatTemplateKwargs,
         );
@@ -2764,7 +2879,7 @@ mod tests {
 
     #[test]
     fn resolve_thinking_nothink_with_kwargs() {
-        let (prefix, kwargs) = LlmClient::resolve_thinking(
+        let ThinkingKnobs { prefix, kwargs, .. } = LlmClient::resolve_thinking(
             ThinkingMode::NoThink,
             ThinkingControlMethod::ChatTemplateKwargs,
         );
@@ -2774,7 +2889,7 @@ mod tests {
 
     #[test]
     fn resolve_thinking_think_with_prompt_tag() {
-        let (prefix, kwargs) = LlmClient::resolve_thinking(
+        let ThinkingKnobs { prefix, kwargs, .. } = LlmClient::resolve_thinking(
             ThinkingMode::Think,
             ThinkingControlMethod::SystemPromptTag,
         );
@@ -2784,7 +2899,7 @@ mod tests {
 
     #[test]
     fn resolve_thinking_nothink_with_prompt_tag() {
-        let (prefix, kwargs) = LlmClient::resolve_thinking(
+        let ThinkingKnobs { prefix, kwargs, .. } = LlmClient::resolve_thinking(
             ThinkingMode::NoThink,
             ThinkingControlMethod::SystemPromptTag,
         );

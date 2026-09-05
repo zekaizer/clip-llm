@@ -132,6 +132,7 @@ on `WorkerCommand::SelectModel`, re-probing capabilities per profile):
 - Endpoint: OpenAI-compatible `/v1/chat/completions`
 - Response parsing: extract `choices[0].message.content`
 - Think-block stripping: regex `(?s)<think>.*?</think>`, trim whitespace after
+- Thinking control (No Think) is probed per profile by **effect**, not acceptance: `reasoning_effort:"none"` → `chat_template_kwargs.enable_thinking=false` → `/no_think`, keeping the first whose reply shows no reasoning (`reasoning_tokens`, `reasoning_content`, inline `<think>`). LM Studio accepts unknown fields with 200 and keeps thinking, which is why acceptance was never enough. `thinking_control` in a profile forces the method.
 - SSE (Phase 2+): parse `data: {...}` lines, accumulate `choices[0].delta.content`, finalize on `[DONE]`
 
 ### `grok-oauth`
