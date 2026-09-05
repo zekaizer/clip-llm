@@ -749,6 +749,40 @@ fn sanitize_debug_json(v: &mut serde_json::Value) {
     }
 }
 
+/// Clients for every model profile that could be built, in spec order, plus
+/// the profiles that could not (name, reason).
+pub struct ProfileSet {
+    pub clients: Vec<LlmClient>,
+    pub unavailable: Vec<(String, String)>,
+}
+
+impl ProfileSet {
+    /// Display labels of the usable profiles, in pool order.
+    pub fn labels(&self) -> Vec<String> {
+        self.clients.iter().map(|c| c.label().to_string()).collect()
+    }
+}
+
+/// Build a client per profile. The first (default) profile must build — its
+/// error is returned as-is; a later failure only lands in `unavailable`.
+pub fn build_profiles(specs: &[crate::config::ModelSpec]) -> Result<ProfileSet, ApiError> {
+    let mut set = ProfileSet { clients: Vec::with_capacity(specs.len()), unavailable: Vec::new() };
+    for (index, spec) in specs.iter().enumerate() {
+        match LlmClient::for_spec(spec) {
+            Ok(client) => set.clients.push(client),
+            Err(e) if index == 0 => return Err(e),
+            Err(e) => {
+                warn!("model profile {:?} unavailable: {e}", spec.name);
+                set.unavailable.push((spec.name.clone(), e.to_string()));
+            }
+        }
+    }
+    if set.clients.is_empty() {
+        return Err(ApiError::MissingConfig("api.model"));
+    }
+    Ok(set)
+}
+
 impl LlmClient {
     /// Profile name for display.
     pub fn label(&self) -> &str {
@@ -1734,6 +1768,23 @@ mod tests {
             token_budget: Some(4000),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn build_profiles_first_must_build_later_may_fail() {
+        let mut broken = openai_spec("broken");
+        broken.api_key = None;
+        let set = build_profiles(&[openai_spec("a"), broken.clone(), openai_spec("c")]).unwrap();
+        assert_eq!(set.labels(), vec!["a".to_string(), "c".to_string()]);
+        assert_eq!(set.unavailable.len(), 1);
+        assert_eq!(set.unavailable[0].0, "broken");
+        assert!(set.unavailable[0].1.contains("api_key"));
+
+        assert!(matches!(
+            build_profiles(&[broken, openai_spec("c")]),
+            Err(ApiError::InvalidConfig(_))
+        ));
+        assert!(matches!(build_profiles(&[]), Err(ApiError::MissingConfig("api.model"))));
     }
 
     #[test]

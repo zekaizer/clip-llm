@@ -124,6 +124,18 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 static TRAY_QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// "Reload Config" clicked; consumed by `poll_tray_events` on the main thread,
+/// which owns the config swap and the worker notification.
+static TRAY_RELOAD_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// A tray menu action the main thread must carry out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrayAction {
+    /// A model profile was picked in the "Model" submenu (pool index).
+    SelectModel(usize),
+    /// "Reload Config" was clicked.
+    ReloadConfig,
+}
 /// Model profile index picked in the tray "Model" submenu, consumed by
 /// `poll_tray_events` on the main thread. `NO_MODEL_SELECTED` = nothing pending.
 static TRAY_MODEL_SELECTED: AtomicUsize = AtomicUsize::new(NO_MODEL_SELECTED);
@@ -161,6 +173,7 @@ static TRAY_LAUNCH_AT_LOGIN_REVERT: AtomicBool = AtomicBool::new(false);
 /// touched from the main thread — which is where `init_tray` and the
 /// `update_tray_*` callers (inside `OverlayApp::update`) both run.
 struct TrayStatusRows {
+    config: tray_icon::menu::MenuItem,
     model: tray_icon::menu::MenuItem,
     vision: tray_icon::menu::MenuItem,
     thinking: tray_icon::menu::MenuItem,
@@ -179,6 +192,15 @@ thread_local! {
     /// only, pool order) and their labels. Main thread only.
     static TRAY_MODEL_ITEMS: RefCell<Vec<(String, tray_icon::menu::CheckMenuItem)>> =
         const { RefCell::new(Vec::new()) };
+}
+
+/// Replace the Status submenu's Config row (reload outcome). Main thread only.
+pub fn update_tray_config(text: &str) {
+    TRAY_STATUS.with(|s| {
+        if let Some(rows) = s.borrow().as_ref() {
+            rows.config.set_text(text);
+        }
+    });
 }
 
 /// Reflect the active model profile: check exactly its item in the "Model"
@@ -305,6 +327,8 @@ pub fn init_tray(ctx: &eframe::egui::Context, models: &[TrayModel]) {
     let about_id = about_item.id().clone();
     let config_item = MenuItem::new("Open Config", true, None);
     let config_id = config_item.id().clone();
+    let reload_item = MenuItem::new("Reload Config", true, None);
+    let reload_id = reload_item.id().clone();
     let launch_at_login_enabled = NativePlatform.launch_at_login_enabled();
     TRAY_LAUNCH_AT_LOGIN_STATE.store(launch_at_login_enabled, Ordering::SeqCst);
     let launch_at_login_item =
@@ -364,6 +388,7 @@ pub fn init_tray(ctx: &eframe::egui::Context, models: &[TrayModel]) {
     // Keep handles to the dynamic rows for later main-thread updates.
     TRAY_STATUS.with(|s| {
         *s.borrow_mut() = Some(TrayStatusRows {
+            config: config_row.clone(),
             model: model_row.clone(),
             vision: vision_row.clone(),
             thinking: thinking_row.clone(),
@@ -379,6 +404,7 @@ pub fn init_tray(ctx: &eframe::egui::Context, models: &[TrayModel]) {
     let menu = Menu::new();
     menu.append(&about_item).expect("failed to build tray menu");
     menu.append(&config_item).expect("failed to build tray menu");
+    menu.append(&reload_item).expect("failed to build tray menu");
     if let Some(model_menu) = &model_menu {
         menu.append(model_menu).expect("failed to build tray menu");
     }
@@ -432,6 +458,13 @@ pub fn init_tray(ctx: &eframe::egui::Context, models: &[TrayModel]) {
                 } else if event.id() == &config_id {
                     // Spawning an editor process needs no main-thread round-trip.
                     open_config_file();
+                } else if event.id() == &reload_id {
+                    // The swap touches the worker and UI state, so it runs on
+                    // the main thread inside poll_tray_events.
+                    TRAY_RELOAD_REQUESTED.store(true, Ordering::SeqCst);
+                    #[cfg(target_os = "windows")]
+                    windows::show_no_activate();
+                    ctx.request_repaint();
                 } else if let Some(index) = model_ids.iter().position(|id| id == event.id()) {
                     // The native check item toggled itself; the main thread
                     // re-checks the whole radio group via update_tray_model
@@ -500,17 +533,20 @@ fn open_config_file() {
 /// Poll for tray menu actions inside `update()` (main thread): show the About
 /// dialog (macOS only — NSAlert requires the main thread; Windows shows its
 /// message box directly from the menu handler) and/or quit. Called every frame
-/// from `OverlayApp::update`. Returns the model profile index picked in the
-/// "Model" submenu since the last poll, if any.
-pub fn poll_tray_events(ctx: &eframe::egui::Context) -> Option<usize> {
+/// from `OverlayApp::update`. Returns the action the caller must carry out
+/// (model pick or config reload), if one was requested since the last poll.
+pub fn poll_tray_events(ctx: &eframe::egui::Context) -> Option<TrayAction> {
     #[cfg(target_os = "macos")]
     if TRAY_ABOUT_REQUESTED.swap(false, Ordering::SeqCst) {
         macos::show_about();
     }
-    let selected = match TRAY_MODEL_SELECTED.swap(NO_MODEL_SELECTED, Ordering::SeqCst) {
+    let mut action = match TRAY_MODEL_SELECTED.swap(NO_MODEL_SELECTED, Ordering::SeqCst) {
         NO_MODEL_SELECTED => None,
-        index => Some(index),
+        index => Some(TrayAction::SelectModel(index)),
     };
+    if TRAY_RELOAD_REQUESTED.swap(false, Ordering::SeqCst) {
+        action = action.or(Some(TrayAction::ReloadConfig));
+    }
     if TRAY_LAUNCH_AT_LOGIN_REVERT.swap(false, Ordering::SeqCst) {
         // Re-query reality rather than assuming "not target" — a concurrent
         // successful toggle could have landed between the failed attempt and
@@ -527,7 +563,7 @@ pub fn poll_tray_events(ctx: &eframe::egui::Context) -> Option<usize> {
         tracing::info!("quit requested from tray menu");
         ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
     }
-    selected
+    action
 }
 
 /// Show a native, modal alert with the given title and message, blocking until

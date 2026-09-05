@@ -43,7 +43,7 @@ Settings come from a `config.toml` next to the executable (inside
 - [ ] Phase 4 — Config File + Multiple Templates (partial: TOML config for prompts + API settings done)
 - [x] Phase 5 — Template Cycle Selection UI
 - [x] Phase 6 — Windows Build & Distribution (partial: no CI/E2E tests)
-- [ ] Phase 7 — Extended Features
+- [ ] Phase 7 — Extended Features (partial: config reload, model profiles, file clipboard; no history / per-template hotkeys)
 
 ## Environment Variables
 
@@ -76,8 +76,14 @@ startup clip-llm reads, in order of precedence:
 2. otherwise `config.toml` next to the executable.
 
 If no file is found — or it is malformed — the built-in defaults are used. Every
-key is optional; you only specify what you want to change. The file holds these
-kinds of settings:
+key is optional; you only specify what you want to change.
+
+After editing the file, pick **Reload Config** from the tray menu: prompts,
+languages, `[generation]`, `[ui]` pin defaults, per-mode thinking and the model
+profiles' connection settings apply at once (the tray *Status → Config* row
+reports the outcome; a broken file is rejected and the previous settings stay
+active). `[ui].tabs`, `[hotkey]`, `[telemetry]` and a changed set of model
+profiles still need a restart. The file holds these kinds of settings:
 
 - **`[api]`** — connection settings (provider, endpoint, model, API key, custom
   headers, streaming). Each mirrors a `CLIP_LLM_*` environment variable; the

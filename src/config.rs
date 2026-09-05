@@ -14,18 +14,19 @@
 //! applied by the consumers (`LlmClient::new`, the worker), so the order is
 //! env var > config file > built-in default.
 //!
-//! The resolved config is stored once in a process-global [`OnceLock`] and read
-//! through [`get`]. Both call sites of `ProcessMode::system_prompt`
-//! (the worker thread and the UI thread's cache key) read the same immutable
-//! snapshot without any plumbing.
+//! The resolved config lives in a process-global [`ConfigStore`] and is read
+//! through [`get`], which hands out an `Arc` snapshot: every caller (the worker
+//! building a request, the UI computing a cache key) sees one consistent
+//! config for the duration of its use.
 //!
-//! Limitation: the config is immutable after init — there is no hot-reload.
-//! Phase 7 may replace the `OnceLock` with an `ArcSwap`/`RwLock` to support it.
+//! [`reload`] swaps in a freshly parsed file (tray "Reload Config"). Settings
+//! read once at startup — `[ui].tabs`, `[hotkey]`, `[telemetry]` — still need
+//! a restart; `Config::restart_required_changes` names them.
 
 use std::collections::BTreeMap;
 use std::env;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, RwLock};
 
 use serde::Deserialize;
 use tracing::{debug, info, warn};
@@ -563,6 +564,24 @@ fn parse_mode_name(raw: &str) -> Option<ProcessMode> {
 }
 
 impl Config {
+    /// Settings read once at startup that a reload cannot apply. Returns the
+    /// human-readable names of those that differ between `self` (old) and `new`.
+    pub fn restart_required_changes(&self, new: &Config) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if self.ui_tab_order() != new.ui_tab_order() {
+            out.push("[ui].tabs");
+        }
+        if self.hotkey_double_tap_timeout_ms() != new.hotkey_double_tap_timeout_ms() {
+            out.push("[hotkey]");
+        }
+        if (self.telemetry_url(), self.telemetry_level(), self.telemetry_batch_max())
+            != (new.telemetry_url(), new.telemetry_level(), new.telemetry_batch_max())
+        {
+            out.push("[telemetry]");
+        }
+        out
+    }
+
     /// All selectable model profiles in display order: the `[api]` section
     /// first (when it names a model, or when no `[[models]]` exist so the
     /// `CLIP_LLM_*` variables can still fill it), then each `[[models]]` entry.
@@ -905,7 +924,113 @@ pub fn substitute(template: &str, primary: &str, secondary: &str) -> String {
     )
 }
 
-static CONFIG: OnceLock<Config> = OnceLock::new();
+/// Swappable holder for the process-global config: readers take a cheap
+/// `Arc` snapshot per use, so a reload never invalidates a value a caller is
+/// still holding.
+pub(crate) struct ConfigStore {
+    inner: RwLock<Option<Arc<Config>>>,
+}
+
+impl ConfigStore {
+    pub(crate) const fn new() -> Self {
+        Self { inner: RwLock::new(None) }
+    }
+
+    /// Current snapshot; built-in defaults when nothing was loaded yet.
+    pub(crate) fn get(&self) -> Arc<Config> {
+        if let Some(cfg) = self.read().as_ref() {
+            return Arc::clone(cfg);
+        }
+        let mut guard = self.write();
+        Arc::clone(guard.get_or_insert_with(|| Arc::new(Config::default())))
+    }
+
+    /// First-time load; a later call is a no-op (mirrors `OnceLock` init).
+    pub(crate) fn init_with(&self, load: impl FnOnce() -> Config) {
+        let mut guard = self.write();
+        if guard.is_none() {
+            *guard = Some(Arc::new(load()));
+        }
+    }
+
+    /// Swap in a new config; returns the previous snapshot.
+    pub(crate) fn replace(&self, config: Config) -> Arc<Config> {
+        let mut guard = self.write();
+        guard
+            .replace(Arc::new(config))
+            .unwrap_or_else(|| Arc::new(Config::default()))
+    }
+
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, Option<Arc<Config>>> {
+        self.inner.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, Option<Arc<Config>>> {
+        self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+static CONFIG: ConfigStore = ConfigStore::new();
+
+/// Why a config file could not be used. Generic by design: file contents must
+/// not leak into logs or the UI.
+pub type LoadFailure = &'static str;
+
+/// Reads, size-checks, parses and sanitizes one config file. No fallback: the
+/// caller decides what a failure means (defaults at startup, keep-previous on
+/// reload).
+pub fn load_file(path: &std::path::Path) -> Result<Config, LoadFailure> {
+    // Reject non-regular files (a FIFO would otherwise block forever) and
+    // oversized files before reading anything into memory.
+    match std::fs::metadata(path) {
+        Ok(meta) if !meta.is_file() => return Err("not a regular file"),
+        Ok(meta) if meta.len() > MAX_CONFIG_BYTES => {
+            warn!("config: {}: file too large ({} bytes)", path.display(), meta.len());
+            return Err("file too large");
+        }
+        Ok(_) => {}
+        Err(e) => {
+            debug!("config metadata error: {e}");
+            return Err("file not accessible");
+        }
+    }
+    let contents = std::fs::read_to_string(path).map_err(|e| {
+        debug!("config read error: {e}");
+        "file could not be read"
+    })?;
+    // A parse error is reported via `message()` + a computed line/column
+    // only — never via the error's full `Display` impl, which would render a
+    // snippet of the offending source line (potentially an `api_key` line).
+    match toml::from_str::<Config>(&contents) {
+        Ok(mut config) => {
+            config.generation = sanitize_generation(config.generation);
+            Ok(config)
+        }
+        Err(e) => {
+            let location = e
+                .span()
+                .map(|span| {
+                    let (line, column) = line_col_at(&contents, span.start);
+                    format!(" at line {line}, column {column}")
+                })
+                .unwrap_or_default();
+            warn!("config: {}: invalid TOML{location}: {}", path.display(), e.message());
+            debug!("config parse error: {e}");
+            Err("invalid TOML")
+        }
+    }
+}
+
+/// Re-reads the config file and swaps it in. `Ok(path)` on success; on any
+/// failure the active config is left untouched and the reason is returned.
+pub fn reload() -> Result<PathBuf, LoadFailure> {
+    let path = resolve_path().ok_or("no config file")?;
+    let config = load_file(&path)?;
+    CONFIG.replace(config);
+    record_outcome(LoadOutcome::Loaded(path.clone()));
+    info!("config: reloaded from {}", path.display());
+    Ok(path)
+}
 
 /// What happened when the external config was loaded at startup. Consumed by
 /// UI surfacing (tray menu, startup notice) — the silent stderr/log fallback
@@ -921,31 +1046,35 @@ pub enum LoadOutcome {
     Failed { path: PathBuf, reason: &'static str },
 }
 
-static LOAD_OUTCOME: OnceLock<LoadOutcome> = OnceLock::new();
+static LOAD_OUTCOME: RwLock<Option<LoadOutcome>> = RwLock::new(None);
 
-/// Returns the result of the startup config load. Reports `NoFile` when
-/// called before [`init`] (e.g. in tests that never load a config).
-pub fn load_outcome() -> &'static LoadOutcome {
-    LOAD_OUTCOME.get_or_init(|| LoadOutcome::NoFile)
+/// Returns the result of the most recent config load (startup or reload).
+/// Reports `NoFile` when called before [`init`] (e.g. in tests that never load
+/// a config).
+pub fn load_outcome() -> LoadOutcome {
+    LOAD_OUTCOME
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .unwrap_or(LoadOutcome::NoFile)
 }
 
-/// Records the load outcome; only the first call wins (mirrors the config
-/// `OnceLock` semantics).
+/// Records the outcome of a load; a reload overwrites the startup outcome.
 fn record_outcome(outcome: LoadOutcome) {
-    let _ = LOAD_OUTCOME.set(outcome);
+    *LOAD_OUTCOME.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(outcome);
 }
 
 /// Returns the process-global configuration (prompts and `[api]` settings),
 /// initializing it to the built-in defaults if [`init`] was never called
 /// (e.g. in tests).
-pub fn get() -> &'static Config {
-    CONFIG.get_or_init(Config::default)
+pub fn get() -> Arc<Config> {
+    CONFIG.get()
 }
 
 /// Loads the external config once at startup. Safe to call multiple times; only
 /// the first call has any effect. Never panics — any error falls back to defaults.
 pub fn init() {
-    CONFIG.get_or_init(load_or_default);
+    CONFIG.init_with(load_or_default);
 }
 
 /// The explicit config path from `CLIP_LLM_CONFIG`, if set. An exported-but-
@@ -1026,6 +1155,18 @@ fn starter_template() -> String {
     t.push_str("# [api.headers]\n");
     t.push_str("# X-Dep-Ticket = \"abc\"\n");
     t.push_str("# User-Id = \"u1\"\n\n");
+
+    // [[models]] — extra profiles, selectable from the tray "Model" submenu.
+    t.push_str("# Additional model profiles (same keys as [api], plus name/max_tokens/token_budget).\n");
+    t.push_str("# [api] is the first profile; switch in the tray \"Model\" submenu or by clicking\n");
+    t.push_str("# the model name under a result.\n");
+    t.push_str("# [[models]]\n");
+    t.push_str("# name     = \"groq-qwen\"\n");
+    t.push_str("# provider = \"openai\"\n");
+    t.push_str("# endpoint = \"https://api.groq.com/openai/v1\"\n");
+    t.push_str("# model    = \"qwen/qwen3-32b\"\n");
+    t.push_str("# api_key  = \"gsk_...\"\n");
+    t.push_str("# token_budget = 6000\n\n");
 
     // [generation] — no env-var equivalent.
     t.push_str("# [generation]\n");
@@ -1254,68 +1395,17 @@ fn load_or_default() -> Config {
         return Config::default();
     };
 
-    // Reject non-regular files (a FIFO would otherwise block startup forever) and
-    // oversized files before reading anything into memory.
-    match std::fs::metadata(&path) {
-        Ok(meta) if !meta.is_file() => {
-            warn!("config: {}: not a regular file — using built-in defaults", path.display());
-            record_outcome(LoadOutcome::Failed { path, reason: "not a regular file" });
-            return Config::default();
+    match load_file(&path) {
+        Ok(config) => {
+            info!("config: loaded from {}", path.display());
+            eprintln!("clip-llm: config loaded from {}", path.display());
+            record_outcome(LoadOutcome::Loaded(path));
+            config
         }
-        Ok(meta) if meta.len() > MAX_CONFIG_BYTES => {
-            warn!(
-                "config: {}: file too large ({} bytes) — using built-in defaults",
-                path.display(),
-                meta.len()
-            );
-            record_outcome(LoadOutcome::Failed { path, reason: "file too large" });
-            return Config::default();
-        }
-        Ok(_) => {}
-        Err(e) => {
-            warn!("config: {}: cannot read metadata — using built-in defaults", path.display());
-            debug!("config metadata error: {e}");
-            record_outcome(LoadOutcome::Failed { path, reason: "file not accessible" });
-            return Config::default();
-        }
-    }
-
-    match std::fs::read_to_string(&path) {
-        Ok(contents) => match toml::from_str::<Config>(&contents) {
-            Ok(mut config) => {
-                config.generation = sanitize_generation(config.generation);
-                info!("config: loaded from {}", path.display());
-                eprintln!("clip-llm: config loaded from {}", path.display());
-                record_outcome(LoadOutcome::Loaded(path));
-                config
-            }
-            Err(e) => {
-                let location = e
-                    .span()
-                    .map(|span| {
-                        let (line, column) = line_col_at(&contents, span.start);
-                        format!(" at line {line}, column {column}")
-                    })
-                    .unwrap_or_default();
-                warn!(
-                    "config: {}: invalid TOML{location}: {} — using built-in defaults",
-                    path.display(),
-                    e.message()
-                );
-                eprintln!(
-                    "clip-llm: {}: invalid TOML{location}: {} — using built-in defaults",
-                    path.display(),
-                    e.message()
-                );
-                debug!("config parse error: {e}");
-                record_outcome(LoadOutcome::Failed { path, reason: "invalid TOML" });
-                Config::default()
-            }
-        },
-        Err(e) => {
-            warn!("config: {}: read failed — using built-in defaults", path.display());
-            debug!("config read error: {e}");
-            record_outcome(LoadOutcome::Failed { path, reason: "file could not be read" });
+        Err(reason) => {
+            warn!("config: {}: {reason} — using built-in defaults", path.display());
+            eprintln!("clip-llm: {}: {reason} — using built-in defaults", path.display());
+            record_outcome(LoadOutcome::Failed { path, reason });
             Config::default()
         }
     }
@@ -1395,6 +1485,67 @@ mod tests {
         assert_eq!(
             substitute("{primary_lang}->{secondary_lang}", "{secondary_lang}", "English"),
             "{secondary_lang}->English",
+        );
+    }
+
+    // --- reload: file loader, store, restart diff ---
+
+    fn tmp_config(name: &str, body: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("clip-llm-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    #[test]
+    fn load_file_parses_and_sanitizes() {
+        let p = tmp_config("ok.toml", "[languages]\nprimary = \"Japanese\"\n[generation]\nmax_tokens = 0\n");
+        let cfg = load_file(&p).unwrap();
+        assert_eq!(cfg.primary_lang(), "Japanese");
+        assert_eq!(cfg.generation_max_tokens(), None, "0 is sanitized to the default");
+    }
+
+    #[test]
+    fn load_file_reports_generic_failures() {
+        let bad = tmp_config("bad.toml", "[languages\nprimary = 1");
+        assert_eq!(load_file(&bad).err(), Some("invalid TOML"));
+        let missing = std::env::temp_dir().join("clip-llm-definitely-missing.toml");
+        assert_eq!(load_file(&missing).err(), Some("file not accessible"));
+        let dir = std::env::temp_dir();
+        assert_eq!(load_file(&dir).err(), Some("not a regular file"));
+    }
+
+    #[test]
+    fn config_store_replace_and_init_semantics() {
+        let store = ConfigStore::new();
+        assert_eq!(store.get().primary_lang(), "Korean");
+        let jp: Config = toml::from_str("[languages]\nprimary = \"Japanese\"\n").unwrap();
+        let previous = store.replace(jp);
+        assert_eq!(previous.primary_lang(), "Korean");
+        assert_eq!(store.get().primary_lang(), "Japanese");
+        // init_with after a value exists must not clobber it.
+        store.init_with(Config::default);
+        assert_eq!(store.get().primary_lang(), "Japanese");
+        // Snapshots taken before a replace stay valid.
+        let snapshot = store.get();
+        store.replace(Config::default());
+        assert_eq!(snapshot.primary_lang(), "Japanese");
+        assert_eq!(store.get().primary_lang(), "Korean");
+    }
+
+    #[test]
+    fn restart_required_changes_names_startup_only_settings() {
+        let old = Config::default();
+        let same: Config = toml::from_str("[languages]\nprimary = \"Japanese\"\n").unwrap();
+        assert!(old.restart_required_changes(&same).is_empty(), "prompts/languages apply live");
+        let new: Config = toml::from_str(
+            "[ui]\ntabs = [\"summarize\"]\n[hotkey]\ndouble_tap_timeout_ms = 200\n[telemetry]\nurl = \"http://l:9428\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            old.restart_required_changes(&new),
+            vec!["[ui].tabs", "[hotkey]", "[telemetry]"]
         );
     }
 

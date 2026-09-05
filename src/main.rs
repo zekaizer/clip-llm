@@ -7,7 +7,7 @@ use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
 use tracing::{debug, error, info, warn};
 
-use clip_llm::api::client::LlmClient;
+use clip_llm::api::client::build_profiles;
 use clip_llm::clipboard::ClipboardManager;
 use clip_llm::hotkey::TapEvent;
 use clip_llm::ui::OverlayApp;
@@ -189,37 +189,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let specs = clip_llm::config::get()
         .model_specs()
         .map_err(clip_llm::ApiError::InvalidConfig)?;
-    let mut clients = Vec::with_capacity(specs.len());
-    let mut tray_models = Vec::with_capacity(specs.len());
-    let mut unavailable = Vec::new();
-    for (index, spec) in specs.iter().enumerate() {
-        match LlmClient::for_spec(spec) {
-            Ok(llm) => {
-                clients.push(llm);
-                tray_models.push(TrayModel { label: spec.name.clone(), unavailable: None });
+    let profiles = match build_profiles(&specs) {
+        Ok(set) => set,
+        Err(e @ clip_llm::ApiError::MissingConfig(_)) => {
+            match clip_llm::config::ensure_config_file() {
+                Some(path) => error!(
+                    "{e}. Wrote a starter config to {} — set the required keys there and relaunch.",
+                    path.display()
+                ),
+                None => error!("{e}"),
             }
-            Err(e @ clip_llm::ApiError::MissingConfig(_)) if index == 0 => {
-                match clip_llm::config::ensure_config_file() {
-                    Some(path) => error!(
-                        "{e}. Wrote a starter config to {} — set the required keys there and relaunch.",
-                        path.display()
-                    ),
-                    None => error!("{e}"),
-                }
-                return Err(e.into());
-            }
-            Err(e) if index == 0 => return Err(e.into()),
-            Err(e) => {
-                warn!("model profile {:?} unavailable: {e}", spec.name);
-                unavailable.push(TrayModel {
-                    label: spec.name.clone(),
-                    unavailable: Some(e.to_string()),
-                });
-            }
+            return Err(e.into());
         }
-    }
-    tray_models.extend(unavailable);
-    let model_count = clients.len();
+        Err(e) => return Err(e.into()),
+    };
+    let model_names = profiles.labels();
+    let mut tray_models: Vec<TrayModel> = model_names
+        .iter()
+        .map(|label| TrayModel { label: label.clone(), unavailable: None })
+        .collect();
+    tray_models.extend(profiles.unavailable.iter().map(|(label, why)| TrayModel {
+        label: label.clone(),
+        unavailable: Some(why.clone()),
+    }));
+    let clients = profiles.clients;
     let clipboard = ClipboardManager::new()?;
 
     info!("starting eframe overlay");
@@ -293,7 +286,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let app = OverlayApp::new(cmd_tx, resp_rx, clipboard, tap_rx, modifier_state);
             let app = app
                 .with_startup_notice(startup_notice)
-                .with_model_count(model_count);
+                .with_model_names(model_names);
 
             Ok(Box::new(app))
         }),
