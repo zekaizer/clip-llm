@@ -59,7 +59,11 @@ Rules:
 ## 3. Design language: tokens only
 
 `theme.rs` is the single source of truth. Views use the roles below; a new
-role is added to the theme, never inlined.
+role is added to the theme, never inlined. Every color role exists in a dark
+and a light palette (`[ui].theme`: `dark` default, `light`, `system`);
+`theme::color::apply(ctx)` selects the frame's palette from egui's resolved
+theme, so a role is always read through its function (`color::text()`), never
+cached across frames.
 
 **Type scale** (`theme::font`): `TITLE` 16 (settings title), `BODY` 15
 (content: picked text, answer, error message), `LABEL` 13 (tabs, every
@@ -67,20 +71,21 @@ status-row label — so the row keeps one weight across states — Think toggle,
 row labels), `CAPTION` 12 (pills, hints, buttons, elapsed time), `MICRO` 11
 (section headers, thinking pills).
 
-**Text tones** (`theme::color`): `TEXT` content and selected controls ·
-`TEXT_SOFT` form labels · `TEXT_SECONDARY` idle interactive controls ·
-`TEXT_MUTED` captions, hints, unselected tabs, Think content ·
-`TEXT_DISABLED` unavailable controls and the idle grip.
+**Text tones** (`theme::color`): `text` content and selected controls ·
+`text_soft` form labels · `text_secondary` idle interactive controls ·
+`text_muted` captions, hints, unselected tabs, Think content ·
+`text_disabled` unavailable controls and the idle grip.
 
-**Semantic colors**: `ACCENT` selection underline (`ACCENT_PREVIEW` while
-cycling, `ACCENT_DIM` on hover, `ACCENT_FILL` for selected accent pills) ·
-`DANGER` errors and Cancel (`DANGER_FILL` behind Cancel) · `WARNING`
-degraded-but-running notices (retry pending, incomplete result) · `SUCCESS`
+**Semantic colors**: `accent` selection underline (`accent_preview` while
+cycling, `accent_dim` on hover, `accent_fill` for selected accent pills) ·
+`danger` errors and Cancel (`danger_fill` behind Cancel) · `warning`
+degraded-but-running notices (retry pending, incomplete result) · `success`
 confirmations.
 
-**Surfaces**: `SURFACE` the frame · `SURFACE_RAISED` a selected neutral
-control · `SURFACE_HOVER` hovered docked button · `SURFACE_SUBTLE` idle pill
-or docked button.
+**Surfaces**: `surface` the frame (also the color body text fades into) ·
+`surface_raised` a selected neutral control · `surface_hover` hovered docked
+button · `surface_subtle` idle pill or docked button · `rule` form separators
+· `shadow` the frame's drop shadow.
 
 **Spacing and shape** (`theme::space`, `theme::size`): gaps `XS` 2 / `SM` 4 /
 `MD` 8 / `LG` 10; `ROW` 24 for status rows and pills; `ACTION_BTN` 26;

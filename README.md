@@ -132,7 +132,8 @@ file holds these kinds of settings:
   centers the overlay on the trigger point; `"remembered"` reopens it where
   you last left it (the app writes `panel_position` for you). `zoom = 1.0`
   scales the whole UI (0.5–3.0); Cmd/Ctrl +/−/0 change it at runtime and the
-  value is written back.
+  value is written back. `theme = "dark"` (default) | `"light"` | `"system"`
+  picks the palette (`system` follows the OS appearance).
 - **per-mode thinking** — `[translate|rephrase|summarize|explain|transcribe].thinking =
   "think" | "no_think"` overrides that mode's default thinking (built-ins:
   translate/rephrase/transcribe = `no_think`, summarize/explain = `think`); applies only
