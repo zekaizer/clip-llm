@@ -1,4 +1,7 @@
 mod overlay;
+mod panel;
+pub mod theme;
+mod widgets;
 pub mod state_machine;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,6 +18,7 @@ use crate::platform::{ModifierState, NativePlatform, Platform};
 use crate::worker::{ProcessTask, WorkerCommand, WorkerResponse};
 
 pub use state_machine::OverlayState;
+use crate::config::PanelPlacement;
 use state_machine::{StateMachine, UiEffect, UiEvent};
 
 /// Polling interval for diagnostics scenario runner.
@@ -135,6 +139,24 @@ fn format_retry_label(
 /// within `OVERLAY_WIDTH`.
 const MODEL_LABEL_MAX_CHARS: usize = 24;
 
+/// Remember a value the UI owns (`[ui].panel_size` / `panel_position` /
+/// `zoom`; `None` removes the key). A failed write only costs the user that
+/// preference on the next launch.
+fn persist_ui_value(key: &str, value: Option<toml_edit::Value>) {
+    match crate::settings::save_ui_value(key, value) {
+        Ok(path) => debug!("[ui].{key} saved to {}", path.display()),
+        Err(e) => warn!("[ui].{key} not saved: {e}"),
+    }
+}
+
+/// `[ui].panel_size`, or the built-in default, clamped to the minimum.
+fn panel_size_from_config() -> egui::Vec2 {
+    crate::config::get()
+        .ui_panel_size()
+        .map_or(theme::size::DEFAULT_PANEL, |(w, h)| egui::vec2(w, h))
+        .max(theme::size::MIN_PANEL)
+}
+
 /// Shorten a model id for the Result bottom row: drop the org namespace
 /// (`MiniMaxAI/MiniMax-M2.5` → `MiniMax-M2.5`) and cap the length.
 fn short_model_label(model: &str) -> String {
@@ -145,22 +167,6 @@ fn short_model_label(model: &str) -> String {
     let mut out: String = name.chars().take(MODEL_LABEL_MAX_CHARS - 1).collect();
     out.push('\u{2026}');
     out
-}
-
-/// Window geometry latched at a Processing→Result/Error transition. See
-/// `OverlayApp::result_latch`.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct ResultLatch {
-    /// Floor for `ui.set_min_height` in the Result/Error content: the
-    /// content may still render taller (e.g. an expanded Think section), but
-    /// never renders shorter — even after that growth reverts (e.g.
-    /// collapsing Think returns to exactly this floor, not to whatever
-    /// egui would auto-measure).
-    min_content_height: f32,
-    /// The window's top-left, last actually applied while Processing; kept
-    /// fixed for the Result/Error display, clamped only if a taller render
-    /// would overflow the display work area (`anchored_clamped_to_bounds`).
-    top_left: egui::Pos2,
 }
 
 pub struct OverlayApp {
@@ -205,10 +211,26 @@ pub struct OverlayApp {
     tap_rx: mpsc::Receiver<TapEvent>,
     /// Cached desired_size to avoid redundant send_viewport_cmd calls.
     last_desired_size: Option<egui::Vec2>,
-    /// Raw content size (pre shadow-padding) from the last rendered frame,
-    /// regardless of state. Used to latch the Result/Error minimum height at
-    /// a Processing→Result/Error transition — see `result_latch`.
+    /// Raw content size (pre shadow-padding) from the last rendered frame
+    /// (diagnostics).
     last_content_size: Option<egui::Vec2>,
+    /// Panel (frame incl. margin) size: `[ui].panel_size` at startup, then
+    /// whatever the grip set (docs/UI-GUIDELINES.md §1).
+    panel_size: egui::Vec2,
+    /// `[ui].position`: center on the cursor, or reopen where last left.
+    placement: PanelPlacement,
+    /// Screen top-left to reopen at (`Remembered` only); refreshed on hide.
+    remembered_pos: Option<egui::Pos2>,
+    /// `[ui].zoom` as last written; compared on hide to persist keyboard zoom.
+    saved_zoom: f32,
+    /// Zoom factor seen by the last viewport pass — a change re-sends the
+    /// window size, which eframe converts with the new pixels-per-point.
+    last_zoom: f32,
+    /// `[ui].zoom` has been applied to the context (first frame).
+    zoom_applied: bool,
+    /// Diagnostics: key presses to feed into the next frame's input.
+    #[cfg(feature = "diagnostics")]
+    diag_keys: Vec<egui::Key>,
     /// The window position last actually applied (native reposition or
     /// `OuterPosition`), so repeated per-frame repositioning to the same spot
     /// is skipped. `send_viewport_cmd` internally triggers `request_repaint`,
@@ -218,23 +240,12 @@ pub struct OverlayApp {
     /// trigger updates `spawn_position`, so the next display still centers
     /// correctly.
     last_sent_pos: Option<egui::Pos2>,
-    /// Window geometry latched at a Processing→Result/Error transition, so
-    /// the final answer's frame renders at (at least) the same size and
-    /// position as the last streaming (Processing) frame — this is the fix
-    /// for the visible jump at that transition. Streaming-time positioning
-    /// itself is unaffected and keeps re-centering as before; only the
-    /// Result/Error display honors this latch (see `calculate_target_position`).
-    ///
-    /// Captured by `latch_result_geometry` (invoked from `sm_handle`) on every
-    /// genuine Processing→Result/Error transition — covers both the streamed
-    /// answer and a mode-switch/retry that resolves straight from Processing
-    /// via the cache. Cleared at session boundaries (`ShowWindow`,
-    /// `ShowWindowNoActivate`, `HideWindow`, a new trigger's fresh
-    /// `spawn_position`) and whenever the state leaves Result/Error back into
-    /// Processing/Capturing, so a stale latch from a previous answer never
-    /// pins a completely different request — the next Processing→Result
-    /// transition re-latches on its own.
-    result_latch: Option<ResultLatch>,
+    /// Screen top-left of the window when the current grip drag started;
+    /// re-asserted after every size step (platforms anchor a programmatic
+    /// resize at the center or bottom-left, which would slide the grip out
+    /// from under the cursor). Lives for the drag gesture only — afterwards
+    /// the user owns placement like after a window drag.
+    resize_anchor: Option<egui::Pos2>,
     /// Whether the think block section is expanded in the Result state.
     think_expanded: bool,
     /// request_id whose Processing start time is currently tracked; a change
@@ -353,7 +364,15 @@ impl OverlayApp {
             last_desired_size: None,
             last_content_size: None,
             last_sent_pos: None,
-            result_latch: None,
+            panel_size: panel_size_from_config(),
+            placement: crate::config::get().ui_placement(),
+            remembered_pos: crate::config::get().ui_panel_position().map(|(x, y)| egui::pos2(x, y)),
+            saved_zoom: crate::config::get().ui_zoom(),
+            last_zoom: 1.0,
+            zoom_applied: false,
+            #[cfg(feature = "diagnostics")]
+            diag_keys: Vec::new(),
+            resize_anchor: None,
             think_expanded: false,
             processing_request_id: None,
             processing_started_at: None,
@@ -412,7 +431,15 @@ impl OverlayApp {
             last_desired_size: None,
             last_content_size: None,
             last_sent_pos: None,
-            result_latch: None,
+            panel_size: panel_size_from_config(),
+            placement: crate::config::get().ui_placement(),
+            remembered_pos: crate::config::get().ui_panel_position().map(|(x, y)| egui::pos2(x, y)),
+            saved_zoom: crate::config::get().ui_zoom(),
+            last_zoom: 1.0,
+            zoom_applied: false,
+            #[cfg(feature = "diagnostics")]
+            diag_keys: Vec::new(),
+            resize_anchor: None,
             think_expanded: false,
             processing_request_id: None,
             processing_started_at: None,
@@ -488,11 +515,26 @@ impl OverlayApp {
     /// session in progress is closed first — the panel takes the window.
     fn open_settings(&mut self, ctx: &egui::Context) {
         if self.settings.is_some() {
+            // Already open: bring the window back rather than ignoring the
+            // click — the panel may have ended up hidden (see below).
+            if self.platform.show_window(None) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            }
+            ctx.request_repaint();
             return;
         }
         if !matches!(self.sm.state(), OverlayState::Hidden) {
+            // Close the session but keep the window: the panel takes it over.
+            // `HideWindow` would queue `Visible(false)` for the end of this
+            // frame, after the native show below — the window then vanished
+            // with the panel "open" behind it (macOS applies viewport
+            // commands at frame end, the native show runs now).
             let effects = self.sm_handle(UiEvent::UserClose);
+            let effects = effects.into_iter().filter(|e| *e != UiEffect::HideWindow).collect();
             self.execute_effects(effects, ctx);
+            self.preview_mode = None;
+            self.pending_capture = false;
+            self.spawn_position = None;
         }
         let active = self.model_names.get(self.sm.active_model()).map(String::as_str);
         let form = crate::settings::SettingsForm::from_config(&crate::config::get(), active);
@@ -502,11 +544,10 @@ impl OverlayApp {
         self.profile_test_result = None;
         self.capture_mouse_position();
         self.last_sent_pos = None;
-        self.result_latch = None;
         self.last_desired_size = None;
         // Centered on the cursor's monitor from an estimated size; the real
         // size lands on the first frame and only grows the window in place.
-        let estimated = egui::vec2(overlay::SETTINGS_WIDTH + overlay::SHADOW_PAD * 2.0, 520.0);
+        let estimated = egui::vec2(theme::size::SETTINGS_WIDTH + theme::size::SHADOW_PAD * 2.0, 520.0);
         let pos = self.calculate_centered_position(estimated).map(|p| (p.x, p.y));
         if self.platform.show_window(pos) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -568,6 +609,7 @@ impl OverlayApp {
     /// Render the settings panel for this frame and act on its result.
     fn render_settings_panel(&mut self, ctx: &egui::Context) -> overlay::OverlayOutput {
         let path = crate::config::candidate_path().map(|p| p.display().to_string());
+        self.sync_settings_model();
         // Collect a finished connection test before rendering.
         if let Some((index, rx)) = &self.profile_test {
             match rx.try_recv() {
@@ -611,6 +653,7 @@ impl OverlayApp {
             form,
             self.settings_baseline.as_ref(),
             path.as_deref(),
+            self.panel_size,
             test,
             caps,
         );
@@ -620,6 +663,21 @@ impl OverlayApp {
             overlay::SettingsAction::Cancel => self.close_settings(ctx),
             overlay::SettingsAction::OpenConfig => crate::platform::open_config_file(),
             overlay::SettingsAction::Save => self.save_settings(ctx),
+            overlay::SettingsAction::SelectModel(i) => match self.pool_index_of_profile(i) {
+                Some(index) => self.select_model(ctx, index),
+                None => {
+                    if let Some(form) = self.settings.as_mut() {
+                        form.error = Some(
+                            "This profile is not available (it failed to start); fix it and Save first.".into(),
+                        );
+                    }
+                }
+            },
+            overlay::SettingsAction::ResetPanelSize => {
+                // The overlay is hidden behind the panel: no anchor needed.
+                self.panel_size = theme::size::DEFAULT_PANEL;
+                persist_ui_value("panel_size", None);
+            }
             overlay::SettingsAction::TestProfile(index) => self.start_profile_test(ctx, index),
         }
         output
@@ -729,64 +787,40 @@ impl OverlayApp {
         crate::platform::update_tray_models(&tray, active);
     }
 
-    /// Apply a model-profile choice from the tray or the overlay.
+    /// Keep the settings panel's model radio on the profile that is actually
+    /// active (tray and ⇄ switches included), matched by profile name.
+    fn sync_settings_model(&mut self) {
+        let Some(active) = self.model_names.get(self.sm.active_model()) else { return };
+        if let Some(form) = self.settings.as_mut()
+            && let Some(i) = form.profiles.iter().position(|p| p.name.trim() == active.trim())
+        {
+            form.default_model = i;
+        }
+    }
+
+    /// The pool index of the settings form's profile `i`, if it built.
+    fn pool_index_of_profile(&self, i: usize) -> Option<usize> {
+        let name = self.settings.as_ref()?.profiles.get(i)?.name.trim().to_string();
+        self.model_names.iter().position(|l| l.trim() == name)
+    }
+
+    /// Apply a model-profile choice from the tray, the overlay or Settings.
     fn select_model(&mut self, ctx: &egui::Context, index: usize) {
         let effects = self.sm_handle(UiEvent::UserSelectModel(index));
         self.execute_effects(effects, ctx);
+        // Re-assert the tray's radio group regardless of whether the state
+        // machine changed anything: a native check item toggles itself on
+        // click, so clicking the already-active profile would otherwise leave
+        // it unchecked (or, if the tray was out of step, two items checked).
+        crate::platform::update_tray_model(self.sm.active_model());
     }
 
     // -- State machine dispatch --
 
-    /// Dispatch an event to the state machine, additionally maintaining
-    /// `result_latch` alongside the transition it produces. This is the sole
-    /// entry point into `StateMachine::handle` from the adapter (all
-    /// `sm.handle` call sites route through here) so every real
-    /// Processing→Result/Error transition gets latched, however it was
-    /// reached — a streamed answer, or a mode-switch/retry that resolves
-    /// straight from Processing via the cache.
+    /// Dispatch an event to the state machine. The sole entry point into
+    /// `StateMachine::handle` from the adapter.
     fn sm_handle(&mut self, event: UiEvent) -> Vec<UiEffect> {
-        let old_state = self.sm.state().clone();
-        let effects = self.sm.handle(event);
-        let was_processing = matches!(old_state, OverlayState::Processing);
-        let was_result_or_error =
-            matches!(old_state, OverlayState::Result(_) | OverlayState::Error(_));
-        match self.sm.state() {
-            OverlayState::Result(_) | OverlayState::Error(_) if was_processing => {
-                self.latch_result_geometry();
-            }
-            // Leaving Result/Error back into Processing/Capturing (mode
-            // switch, retry, a debounced param change, a re-trigger): the
-            // latch belongs to the answer being left behind, not whatever
-            // comes next. The next Processing→Result/Error transition
-            // re-latches on its own; session-boundary resets (ShowWindow /
-            // ShowWindowNoActivate / HideWindow / new spawn_position) cover
-            // the rest.
-            OverlayState::Processing | OverlayState::Capturing if was_result_or_error => {
-                self.result_latch = None;
-            }
-            _ => {}
-        }
-        effects
-    }
-
-    /// Latch this session's Result/Error window geometry from the
-    /// just-finished Processing frame: the content height last rendered (so
-    /// the Result/Error view never renders shorter, avoiding a visible
-    /// shrink) and the top-left position last actually applied to the OS
-    /// window (so it never re-centers). `last_content_size`/`last_sent_pos`
-    /// still hold the *previous* frame's (Processing) values at this point —
-    /// this runs from `sm_handle`, before `update_viewport` has processed the
-    /// current (now-Result/Error) frame.
-    fn latch_result_geometry(&mut self) {
-        self.result_latch = match (self.last_content_size, self.last_sent_pos) {
-            (Some(size), Some(pos)) => {
-                Some(ResultLatch { min_content_height: size.y, top_left: pos })
-            }
-            // No known Processing-time geometry (e.g. a request resolved on
-            // the very first Processing frame) — fall back to normal
-            // centering/auto-sizing rather than latching a bogus value.
-            _ => None,
-        };
+        self.sm.handle(event)
     }
 
     // -- Effect execution --
@@ -861,15 +895,11 @@ impl OverlayApp {
                     // (below); invalidate the reposition cache so the first
                     // subsequent per-frame reposition_window call isn't gated
                     // out by a position left over from a previous display.
-                    // A new session also drops any Result/Error latch from a
-                    // previous answer — this trigger has no known geometry yet.
                     self.last_sent_pos = None;
-                    self.result_latch = None;
                     self.show_window(ctx);
                 }
                 UiEffect::ShowWindowNoActivate => {
                     self.last_sent_pos = None;
-                    self.result_latch = None;
                     self.show_window_no_activate(ctx);
                 }
                 UiEffect::StartCapture => {
@@ -883,11 +913,20 @@ impl OverlayApp {
                     self.capture_target_pid = self.platform.frontmost_app_pid();
                 }
                 UiEffect::HideWindow => {
+                    #[cfg(feature = "diagnostics")]
+                    {
+                        // Not a captured transition (nothing to screenshot),
+                        // but the chain must show the window was hidden so
+                        // the next show is not judged as an in-place move.
+                        self.prev_state_name = "Hidden";
+                        let _ = self.diag_state_tx.send("Hidden");
+                    }
                     ctx.memory_mut(|m| m.reset_areas());
+                    self.remember_position(ctx);
+                    self.persist_zoom(ctx);
                     self.hide_window(ctx);
                     self.spawn_position = None;
                     self.last_sent_pos = None;
-                    self.result_latch = None;
                     // Cancel any in-progress cycling gesture / deferred capture,
                     // and drop a debounce-parked request (overlay is closing).
                     self.preview_mode = None;
@@ -980,10 +1019,8 @@ impl OverlayApp {
                 // A new trigger's spawn point invalidates any cached
                 // reposition target — a re-trigger that skips HideWindow
                 // (e.g. re-double-tap while Result is still shown) must
-                // still reposition to the new cursor location. Also drops any
-                // Result/Error latch from a previous answer at this spot.
+                // still reposition to the new cursor location.
                 self.last_sent_pos = None;
-                self.result_latch = None;
             }
 
             match tap_event.action {
@@ -1157,6 +1194,12 @@ impl OverlayApp {
                     self.execute_effects(effects, ctx);
                 }
                 crate::diagnostics::ScenarioAction::OpenSettings => self.open_settings(ctx),
+                crate::diagnostics::ScenarioAction::SelectModel(index) => {
+                    // A tray-style switch while the panel is open: its radio
+                    // must follow (pseudo-state "SettingsSwitched").
+                    self.select_model(ctx, index);
+                    self.diag_transition("SettingsSwitched");
+                }
                 crate::diagnostics::ScenarioAction::EditSettingsSample => {
                     if let Some(form) = self.settings.as_mut() {
                         form.secondary = "Klingon".into();
@@ -1174,6 +1217,28 @@ impl OverlayApp {
                     }
                 }
                 crate::diagnostics::ScenarioAction::CloseSettings => self.close_settings(ctx),
+                crate::diagnostics::ScenarioAction::BeginCapture { text } => {
+                    let effects = self.sm_handle(UiEvent::CaptureStarted {
+                        source: state_machine::CaptureSource::Clipboard,
+                    });
+                    self.execute_effects(effects, ctx);
+                    // No real capture runs: stand in for the clipboard read
+                    // that would have parked its content here.
+                    self.pending_capture = false;
+                    self.pending_content = Some(crate::ClipboardContent::text_only(text));
+                }
+                crate::diagnostics::ScenarioAction::ScrollBody { pages } => {
+                    // Fed into the next frame's input, where the body's keyboard
+                    // scrolling consumes it like a real key press.
+                    self.diag_keys.extend(std::iter::repeat_n(egui::Key::PageDown, pages as usize));
+                    ctx.request_repaint();
+                    self.diag_transition("Scrolled");
+                }
+                crate::diagnostics::ScenarioAction::Resize(w, h) => {
+                    // Same path as a real grip drag (anchor + state machine event).
+                    self.handle_overlay_action(ctx, overlay::OverlayAction::Resize(egui::vec2(w, h)));
+                    self.diag_transition("Resized");
+                }
                 crate::diagnostics::ScenarioAction::Quit => {
                     info!("diag: all scenarios finished, exiting");
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1377,30 +1442,97 @@ impl OverlayApp {
         Some(centered_position_screen(cursor, win_size, scale, bounds))
     }
 
-    /// Position for this frame's reposition pass. Streaming-time positioning
-    /// (Capturing/Processing, or Result/Error with no active latch) is
-    /// unchanged from before this fix: always centers on `spawn_position`.
-    /// Only a Result/Error display with an active `result_latch` deviates —
-    /// it keeps the latched top-left fixed (only clamped if the render grew
-    /// taller than the display work area), instead of re-centering the whole
-    /// window on the Processing→Result content-height delta (the resize-jump
-    /// this fix addresses).
+    /// Position for this frame's reposition pass (`win_size` in OS points —
+    /// see `os_window_size`): centered on the spawn point, except during a
+    /// grip drag, which keeps the top-left the drag started from, or with
+    /// `Remembered` placement, which reopens at the stored top-left. Anchors
+    /// are clamped only if the panel would leave the display work area.
     fn calculate_target_position(&self, win_size: egui::Vec2) -> Option<egui::Pos2> {
-        if matches!(self.sm.state(), OverlayState::Result(_) | OverlayState::Error(_))
-            && let Some(latch) = self.result_latch
-        {
-            let (bounds, scale) = match self.spawn_position {
-                Some(c) => (
-                    self.platform.display_bounds_at_point(c.x as f64, c.y as f64),
-                    self.platform.points_to_screen_scale_at(c.x as f64, c.y as f64) as f32,
-                ),
-                // No spawn point → no bounds, so the anchor passes through
-                // unclamped and the scale is moot.
-                None => (None, 1.0),
-            };
-            return Some(anchored_position_screen(latch.top_left, win_size, scale, bounds));
+        let anchor = self.resize_anchor.or(match self.placement {
+            PanelPlacement::Remembered => self.remembered_pos,
+            PanelPlacement::Cursor => None,
+        });
+        if let Some(anchor) = anchor {
+            let (bounds, scale) = self.spawn_bounds_and_scale();
+            return Some(anchored_position_screen(anchor, win_size, scale, bounds));
         }
         self.calculate_centered_position(win_size)
+    }
+
+    /// Display work area and points→screen scale at the spawn point. No spawn
+    /// point → no bounds (anchors pass through unclamped) and the scale is moot.
+    fn spawn_bounds_and_scale(&self) -> (Option<(f64, f64, f64, f64)>, f32) {
+        match self.spawn_position {
+            Some(c) => (
+                self.platform.display_bounds_at_point(c.x as f64, c.y as f64),
+                self.platform.points_to_screen_scale_at(c.x as f64, c.y as f64) as f32,
+            ),
+            None => (None, 1.0),
+        }
+    }
+
+    /// The window's current top-left in the screen units `reposition_window`
+    /// takes: the last position this adapter applied while it still owned
+    /// placement, otherwise (the user dragged the window since) the viewport
+    /// rect egui reports, scaled from points.
+    fn current_top_left_screen(&self, ctx: &egui::Context) -> Option<egui::Pos2> {
+        if !self.sm.user_repositioned()
+            && let Some(pos) = self.last_sent_pos
+        {
+            return Some(pos);
+        }
+        // egui points → OS points is the zoom factor; → screen units the
+        // platform scale (1 on macOS, the DPI factor on Windows).
+        let (_, scale) = self.spawn_bounds_and_scale();
+        let zoom = ctx.zoom_factor();
+        ctx.input(|i| i.viewport().outer_rect).map(|r| (r.min.to_vec2() * zoom * scale).to_pos2())
+    }
+
+    /// Window size in egui points for the current panel size (frame plus
+    /// shadow pad) — what `ViewportCommand::InnerSize` takes.
+    fn window_size(&self) -> egui::Vec2 {
+        self.panel_size.max(theme::size::MIN_PANEL) + egui::Vec2::splat(theme::size::SHADOW_PAD * 2.0)
+    }
+
+    /// The same in OS points — what positioning math takes: eframe scales
+    /// `InnerSize` by the zoom factor when it reaches the window.
+    fn os_window_size(&self, ctx: &egui::Context) -> egui::Vec2 {
+        self.window_size() * ctx.zoom_factor()
+    }
+
+    /// `Remembered` placement: store where the window is (before it hides)
+    /// for the next trigger and the next launch.
+    fn remember_position(&mut self, ctx: &egui::Context) {
+        if self.placement != PanelPlacement::Remembered {
+            return;
+        }
+        let Some(pos) = self.current_top_left_screen(ctx) else { return };
+        if self.remembered_pos.is_some_and(|p| (p - pos).length() < 1.0) {
+            return;
+        }
+        self.remembered_pos = Some(pos);
+        persist_ui_value("panel_position", Some(crate::settings::point_pair(pos.x, pos.y)));
+    }
+
+    /// Persist a zoom the user changed with Cmd/Ctrl +/−/0 (egui handles the
+    /// keys); called on hide so a session's zoom survives a restart.
+    fn persist_zoom(&mut self, ctx: &egui::Context) {
+        let zoom = ctx.zoom_factor();
+        if (zoom - self.saved_zoom).abs() < 1e-3 {
+            return;
+        }
+        self.saved_zoom = zoom;
+        let rounded = f64::from((zoom * 100.0).round() / 100.0);
+        persist_ui_value("zoom", Some(toml_edit::Value::from(rounded)));
+    }
+
+    /// Apply a new panel size, anchoring the window's top-left for the
+    /// resize (see `resize_anchor`).
+    fn set_panel_size(&mut self, ctx: &egui::Context, size: egui::Vec2) {
+        if self.resize_anchor.is_none() {
+            self.resize_anchor = self.current_top_left_screen(ctx);
+        }
+        self.panel_size = size.max(theme::size::MIN_PANEL);
     }
 
     /// Reposition the window while the overlay is already visible (e.g. after size change).
@@ -1419,6 +1551,7 @@ impl OverlayApp {
             return;
         }
         self.last_sent_pos = Some(pos);
+        debug!("viewport: OuterPosition {pos:?} in {:?}", self.sm.state().variant_name());
         if !self.platform.reposition_window(pos.x, pos.y) {
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
         }
@@ -1430,9 +1563,7 @@ impl OverlayApp {
         let pos = if self.sm.user_repositioned() {
             None
         } else {
-            self.last_desired_size
-                .and_then(|s| self.calculate_centered_position(s))
-                .map(|p| (p.x, p.y))
+            self.calculate_target_position(self.os_window_size(ctx)).map(|p| (p.x, p.y))
         };
 
         if self.platform.show_window(pos) {
@@ -1442,17 +1573,12 @@ impl OverlayApp {
     }
 
     /// Show the overlay during capture WITHOUT taking focus, so the user's app
-    /// stays key and the simulated Cmd+C/Ctrl+C targets it. Positions at the
-    /// spawn point (cursor) on first show; `update_viewport` re-centers once the
-    /// rendered size is known.
+    /// stays key and the simulated Cmd+C/Ctrl+C targets it.
     fn show_window_no_activate(&self, ctx: &egui::Context) {
         let pos = if self.sm.user_repositioned() {
             None
         } else {
-            self.last_desired_size
-                .and_then(|s| self.calculate_centered_position(s))
-                .map(|p| (p.x, p.y))
-                .or_else(|| self.spawn_position.map(|p| (p.x, p.y)))
+            self.calculate_target_position(self.os_window_size(ctx)).map(|p| (p.x, p.y))
         };
 
         if self.platform.show_window_no_activate(pos) {
@@ -1577,22 +1703,38 @@ impl OverlayApp {
     ) {
         self.last_content_size = content_size;
         let Some(size) = desired else { return };
+        let zoom = ctx.zoom_factor();
+        if zoom != self.last_zoom {
+            // The window's pixel size follows egui points × zoom, so the same
+            // point size must be re-sent after a zoom change.
+            self.last_zoom = zoom;
+            self.last_desired_size = None;
+        }
         if self.last_desired_size != Some(size) {
             self.last_desired_size = Some(size);
+            // Every window resize is a potential whole-window flash on macOS
+            // (the wgpu surface is reconfigured), so each one is logged.
+            debug!("viewport: InnerSize {size:?} in {:?}", self.sm.state().variant_name());
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
-            // A resize while a Result/Error latch is pinning the top-left can
-            // itself move the OS window (some platforms resize anchored at
-            // the window's center rather than its top-left) — invalidate the
-            // reposition gate so `reposition_window` below re-asserts the
-            // latched position this same frame, even though the *computed*
-            // target position hasn't changed. Streaming (no latch) keeps the
-            // original gating untouched.
-            if self.result_latch.is_some() {
+            // A programmatic resize can itself move the OS window (platforms
+            // anchor it at the center or bottom-left rather than the top-left)
+            // — invalidate the reposition gate so `reposition_window` below
+            // re-asserts the anchored position this same frame, even though
+            // the *computed* target position hasn't changed.
+            if self.resize_anchor.is_some() {
                 self.last_sent_pos = None;
             }
+        } else {
+            // The anchor lives while the size is changing: one settled frame
+            // ends the gesture, so a later trigger centers afresh.
+            self.resize_anchor = None;
         }
-        if !matches!(self.sm.state(), OverlayState::Hidden) && !self.sm.user_repositioned() {
-            self.reposition_window(ctx, size);
+        // A user drag hands placement to the OS for good — except that a
+        // user resize (which also sets `user_repositioned`) must keep
+        // re-asserting its anchor, see `resize_anchor`.
+        let owns_placement = !self.sm.user_repositioned() || self.resize_anchor.is_some();
+        if !matches!(self.sm.state(), OverlayState::Hidden) && owns_placement {
+            self.reposition_window(ctx, size * zoom);
         }
     }
 
@@ -1614,6 +1756,20 @@ impl OverlayApp {
             overlay::OverlayAction::StartDrag => {
                 ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 UiEvent::UserStartDrag
+            }
+            overlay::OverlayAction::Resize(size) => {
+                self.set_panel_size(ctx, size);
+                UiEvent::UserResize
+            }
+            overlay::OverlayAction::ResetSize => {
+                self.set_panel_size(ctx, theme::size::DEFAULT_PANEL);
+                persist_ui_value("panel_size", None);
+                UiEvent::UserResize
+            }
+            overlay::OverlayAction::ResizeDone => {
+                let size = crate::settings::point_pair(self.panel_size.x, self.panel_size.y);
+                persist_ui_value("panel_size", Some(size));
+                return;
             }
             overlay::OverlayAction::SwitchMode(mode) => UiEvent::UserSwitchMode(mode),
             overlay::OverlayAction::ToggleThink => {
@@ -1758,6 +1914,23 @@ impl OverlayApp {
 
 impl eframe::App for OverlayApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        theme::color::apply(ctx);
+        #[cfg(feature = "diagnostics")]
+        for key in std::mem::take(&mut self.diag_keys) {
+            ctx.input_mut(|i| {
+                i.events.push(egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            });
+        }
+        if !self.zoom_applied {
+            self.zoom_applied = true;
+            ctx.set_zoom_factor(self.saved_zoom);
+        }
         let startup_settled = self.initial_hide_done;
         self.maybe_initial_hide(ctx);
 
@@ -1837,7 +2010,7 @@ impl eframe::App for OverlayApp {
                 self.last_debug.is_some(),
                 self.last_debug.as_ref().and_then(format_completion_status),
                 self.model_count() > 1,
-                self.result_latch.map(|l| l.min_content_height),
+                self.panel_size,
                 ctx,
             );
             let action = std::mem::replace(&mut output.action, overlay::OverlayAction::None);
@@ -1861,6 +2034,7 @@ impl eframe::App for OverlayApp {
                     .map(|r| [r.min.x, r.min.y, r.max.x, r.max.y]),
                 spawn_position: self.spawn_position.map(|p| [p.x, p.y]),
                 user_repositioned: self.sm.user_repositioned(),
+                panel_size: [self.panel_size.x, self.panel_size.y],
             });
             self.diag.tick_screenshot(ctx);
             self.diag.flush_pending_if_stale();
@@ -2673,100 +2847,101 @@ mod tests {
         assert_eq!(format_completion_status(&debug), None);
     }
 
-    // --- result_latch: Processing→Result/Error geometry latching (the
-    // resize-jump fix) ---
+    // --- resize grip: anchor + placement ---
 
-    /// A genuine Processing→Result transition (a worker response landing via
-    /// `poll_responses`, which routes through `sm_handle`) must latch the
-    /// window geometry from the last Processing-time frame — i.e. whatever
-    /// `last_content_size`/`last_sent_pos` held just before the transition,
-    /// simulating that a Processing frame's `update_viewport` had already run.
+    /// A grip drag sets the panel size and anchors the window's current
+    /// top-left (the last position this adapter applied), so the reposition
+    /// pass keeps re-asserting it while the size changes instead of
+    /// re-centering (which would slide the grip away).
     #[test]
-    fn poll_responses_latches_result_geometry_from_last_processing_frame() {
+    fn resize_action_sets_the_size_and_anchors_the_top_left() {
         let _lock = crate::clipboard::test_support::lock_clipboard();
-        let (mut app, resp_tx) = new_test_app();
+        let (mut app, _resp_tx) = new_test_app();
         let ctx = egui::Context::default();
 
         app.sm_handle(UiEvent::ContentReady {
             content: crate::ClipboardContent::text_only("only".into()),
             auto_copy: true,
         });
-        let current_id = app.sm.current_request_id();
-
-        // Simulate the last Processing frame's applied geometry.
-        app.last_content_size = Some(egui::vec2(400.0, 150.0));
         app.last_sent_pos = Some(egui::pos2(100.0, 200.0));
 
-        resp_tx
-            .send(WorkerResponse::Complete {
-                result: "fresh answer".into(),
-                think_content: None,
-                request_id: current_id,
-                incomplete: None,
-                debug: crate::DebugCapture::default(),
-            })
-            .unwrap();
-        app.poll_responses(&ctx);
+        app.handle_overlay_action(&ctx, overlay::OverlayAction::Resize(egui::vec2(640.0, 420.0)));
 
+        assert_eq!(app.panel_size, egui::vec2(640.0, 420.0));
+        assert!(app.sm.user_repositioned());
+        assert_eq!(app.resize_anchor, Some(egui::pos2(100.0, 200.0)));
+        // No spawn point → no display bounds, so the anchor passes through.
         assert_eq!(
-            app.result_latch,
-            Some(ResultLatch { min_content_height: 150.0, top_left: egui::pos2(100.0, 200.0) }),
+            app.calculate_target_position(egui::vec2(680.0, 460.0)),
+            Some(egui::pos2(100.0, 200.0)),
         );
+        // Further steps of the same gesture keep the first anchor.
+        app.last_sent_pos = Some(egui::pos2(0.0, 0.0));
+        app.handle_overlay_action(&ctx, overlay::OverlayAction::Resize(egui::vec2(700.0, 500.0)));
+        assert_eq!(app.resize_anchor, Some(egui::pos2(100.0, 200.0)));
     }
 
-    /// Without any known Processing-time geometry (`last_content_size`/
-    /// `last_sent_pos` still `None`, e.g. a response resolving before any
-    /// Processing frame ever ran `update_viewport`), the transition must not
-    /// latch a bogus value — it falls back to normal auto-sizing/centering.
+    /// The anchor lives while the size keeps changing; the first settled
+    /// frame drops it, so the next trigger centers the (still fixed-size)
+    /// panel on the new spawn point instead of reusing a stale corner.
     #[test]
-    fn poll_responses_no_latch_without_known_processing_geometry() {
+    fn a_settled_frame_drops_the_resize_anchor() {
         let _lock = crate::clipboard::test_support::lock_clipboard();
-        let (mut app, resp_tx) = new_test_app();
+        let (mut app, _resp_tx) = new_test_app();
         let ctx = egui::Context::default();
 
         app.sm_handle(UiEvent::ContentReady {
             content: crate::ClipboardContent::text_only("only".into()),
             auto_copy: true,
         });
-        let current_id = app.sm.current_request_id();
-        assert!(app.last_content_size.is_none());
-        assert!(app.last_sent_pos.is_none());
-
-        resp_tx
-            .send(WorkerResponse::Complete {
-                result: "fresh answer".into(),
-                think_content: None,
-                request_id: current_id,
-                incomplete: None,
-                debug: crate::DebugCapture::default(),
-            })
-            .unwrap();
-        app.poll_responses(&ctx);
-
-        assert!(app.result_latch.is_none());
-    }
-
-    /// Retrying from Result re-sends the request and transitions back to
-    /// Processing directly inside `reprocess_or_cache` (no `poll_responses`
-    /// round trip) — `sm_handle` must still drop the stale latch from the
-    /// answer being left behind, so it cannot pin the window for whatever
-    /// comes next.
-    #[test]
-    fn retry_from_result_clears_stale_latch() {
-        let _lock = crate::clipboard::test_support::lock_clipboard();
-        let (mut app, resp_tx) = new_test_app();
-        let ctx = egui::Context::default();
-
-        app.sm_handle(UiEvent::ContentReady {
-            content: crate::ClipboardContent::text_only("only".into()),
-            auto_copy: true,
-        });
-        let current_id = app.sm.current_request_id();
-        app.last_content_size = Some(egui::vec2(400.0, 150.0));
         app.last_sent_pos = Some(egui::pos2(100.0, 200.0));
+        app.handle_overlay_action(&ctx, overlay::OverlayAction::Resize(egui::vec2(640.0, 420.0)));
+        let win = app.window_size();
+        app.update_viewport(&ctx, Some(win), Some(app.panel_size));
+        assert!(app.resize_anchor.is_some(), "size changed this frame: still anchored");
+
+        app.update_viewport(&ctx, Some(win), Some(app.panel_size));
+        assert!(app.resize_anchor.is_none(), "unchanged size: gesture over");
+        assert_eq!(app.panel_size, egui::vec2(640.0, 420.0), "the size itself stays");
+    }
+
+    /// Double-clicking the grip returns to the default size, clamped like
+    /// any other size, and hands placement to the user like a drag.
+    #[test]
+    fn reset_size_restores_the_default_panel() {
+        let _lock = crate::clipboard::test_support::lock_clipboard();
+        let (mut app, _resp_tx) = new_test_app();
+        let ctx = egui::Context::default();
+        app.sm_handle(UiEvent::ContentReady {
+            content: crate::ClipboardContent::text_only("only".into()),
+            auto_copy: true,
+        });
+        app.handle_overlay_action(&ctx, overlay::OverlayAction::Resize(egui::vec2(100.0, 100.0)));
+        assert_eq!(app.panel_size, theme::size::MIN_PANEL, "clamped");
+
+        app.handle_overlay_action(&ctx, overlay::OverlayAction::ResetSize);
+        assert_eq!(app.panel_size, theme::size::DEFAULT_PANEL);
+        assert!(app.sm.user_repositioned());
+    }
+
+    // --- settings panel takes over a visible overlay ---
+
+    /// Opening Settings while a result is showing must not hide the window:
+    /// `HideWindow`'s `Visible(false)` is applied at frame end, after the
+    /// native show, so the panel would open behind a hidden window.
+    #[test]
+    fn open_settings_over_a_result_keeps_the_window_visible() {
+        let _lock = crate::clipboard::test_support::lock_clipboard();
+        let (mut app, resp_tx) = new_test_app();
+        let ctx = egui::Context::default();
+        app.sm_handle(UiEvent::ContentReady {
+            content: crate::ClipboardContent::text_only("only".into()),
+            auto_copy: true,
+        });
+        let current_id = app.sm.current_request_id();
         resp_tx
             .send(WorkerResponse::Complete {
-                result: "fresh answer".into(),
+                result: "answer".into(),
                 think_content: None,
                 request_id: current_id,
                 incomplete: None,
@@ -2774,11 +2949,92 @@ mod tests {
             })
             .unwrap();
         app.poll_responses(&ctx);
-        assert!(app.result_latch.is_some(), "test setup must reach a latched Result");
+        assert!(matches!(app.sm.state(), OverlayState::Result(_)));
 
-        app.sm_handle(UiEvent::UserRetry);
+        let full = ctx.run(egui::RawInput::default(), |ctx| app.open_settings(ctx));
 
-        assert!(matches!(app.sm.state(), OverlayState::Processing));
-        assert!(app.result_latch.is_none(), "retry must drop the previous answer's latch");
+        assert!(app.settings.is_some());
+        assert_eq!(*app.sm.state(), OverlayState::Hidden);
+        let hid = full
+            .viewport_output
+            .values()
+            .flat_map(|v| v.commands.iter())
+            .any(|c| matches!(c, egui::ViewportCommand::Visible(false)));
+        assert!(!hid, "settings must not queue Visible(false) in the frame it opens");
+    }
+
+    /// A second "Settings…" while the panel is already open re-shows the
+    /// window instead of being ignored — the recovery path for a panel that
+    /// ended up hidden.
+    #[test]
+    fn reopening_settings_is_not_a_no_op() {
+        let _lock = crate::clipboard::test_support::lock_clipboard();
+        let (mut app, _resp_tx) = new_test_app();
+        let ctx = egui::Context::default();
+        app.open_settings(&ctx);
+        assert!(app.settings.is_some());
+        let full = ctx.run(egui::RawInput::default(), |ctx| app.open_settings(ctx));
+        assert!(app.settings.is_some());
+        // A request for a repaint is the observable "do something" here: the
+        // native show has no egui footprint on macOS.
+        assert!(full.viewport_output.values().any(|v| v.repaint_delay.is_zero()));
+    }
+
+    // --- placement and zoom ---
+
+    /// `Remembered` placement reopens at the stored top-left instead of
+    /// centering on the cursor; the grip anchor still wins during a drag.
+    #[test]
+    fn remembered_placement_anchors_the_stored_position() {
+        let _lock = crate::clipboard::test_support::lock_clipboard();
+        let (mut app, _resp_tx) = new_test_app();
+        app.spawn_position = Some(egui::pos2(900.0, 900.0));
+        let win = egui::vec2(552.0, 420.0);
+
+        app.placement = PanelPlacement::Remembered;
+        app.remembered_pos = None;
+        let centered = app.calculate_target_position(win);
+        app.remembered_pos = Some(egui::pos2(300.0, 400.0));
+        // No display bounds in tests (mock platform), so the anchor passes through.
+        assert_eq!(app.calculate_target_position(win), Some(egui::pos2(300.0, 400.0)));
+        assert_ne!(centered, Some(egui::pos2(300.0, 400.0)), "without a stored position it centers");
+
+        // Inside the mock display's work area, so no clamping applies.
+        app.resize_anchor = Some(egui::pos2(60.0, 80.0));
+        assert_eq!(app.calculate_target_position(win), Some(egui::pos2(60.0, 80.0)));
+    }
+
+    /// A zoom change re-sends the (unchanged) point size, so eframe applies
+    /// the new pixels-per-point to the window; the same size at the same zoom
+    /// is not re-sent.
+    #[test]
+    fn zoom_change_resends_the_window_size() {
+        let _lock = crate::clipboard::test_support::lock_clipboard();
+        let (mut app, _resp_tx) = new_test_app();
+        let ctx = egui::Context::default();
+        let win = app.window_size();
+        let inner_sizes = |full: &egui::FullOutput| {
+            full.viewport_output
+                .values()
+                .flat_map(|v| v.commands.iter())
+                .filter(|c| matches!(c, egui::ViewportCommand::InnerSize(_)))
+                .count()
+        };
+
+        let first = ctx.run(egui::RawInput::default(), |ctx| {
+            app.update_viewport(ctx, Some(win), Some(app.panel_size));
+        });
+        assert_eq!(inner_sizes(&first), 1);
+        let same = ctx.run(egui::RawInput::default(), |ctx| {
+            app.update_viewport(ctx, Some(win), Some(app.panel_size));
+        });
+        assert_eq!(inner_sizes(&same), 0, "unchanged size and zoom: nothing sent");
+
+        let _ = ctx.run(egui::RawInput::default(), |ctx| ctx.set_zoom_factor(1.5));
+        let zoomed = ctx.run(egui::RawInput::default(), |ctx| {
+            assert_eq!(ctx.zoom_factor(), 1.5);
+            app.update_viewport(ctx, Some(win), Some(app.panel_size));
+        });
+        assert_eq!(inner_sizes(&zoomed), 1, "zoom changed: size re-sent");
     }
 }

@@ -135,6 +135,10 @@ pub enum UiEvent {
     UserSelectModel(usize),
     /// User started dragging the overlay.
     UserStartDrag,
+    /// User resized the overlay via the grip (the size itself is presentation
+    /// state owned by the adapter); like a drag, this hands placement to the
+    /// user until the next trigger.
+    UserResize,
     /// Window gained focus.
     FocusGained,
     /// Window lost focus (after having been focused at least once).
@@ -402,6 +406,12 @@ impl StateMachine {
                 vec![]
             }
             UiEvent::UserStartDrag => {
+                self.user_repositioned = true;
+                vec![]
+            }
+            UiEvent::UserResize => {
+                // The grip anchors the top-left; re-centering on the new size
+                // would slide the grip out from under the cursor.
                 self.user_repositioned = true;
                 vec![]
             }
@@ -2753,5 +2763,18 @@ mod tests {
             auto_copy: true,
         });
         assert_eq!(sm.capture_source(), CaptureSource::Selection);
+    }
+
+    #[test]
+    fn user_resize_pins_placement_until_the_next_trigger() {
+        let mut sm = new_sm();
+        start_processing(&mut sm, "hello");
+        assert!(!sm.user_repositioned());
+
+        assert!(sm.handle(UiEvent::UserResize).is_empty());
+        assert!(sm.user_repositioned(), "a resize anchors the window like a drag");
+
+        start_processing(&mut sm, "again");
+        assert!(!sm.user_repositioned(), "a new trigger re-centers");
     }
 }
