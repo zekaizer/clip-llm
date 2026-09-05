@@ -943,15 +943,22 @@ mod tests {
         let scenario_count = runner.scenarios.len();
         expire_delay(&mut runner);
 
-        // Scenarios: short_text, long_text, mode_switch, error_display,
-        //            korean_text, correct_mode, summarize_mode, long_single_line
-        // mode_switch (index 2) returns SwitchMode on first Result.
-        // error_display (index 3) produces Error state.
+        // Every scenario: inject, reach its result state, take at most one
+        // follow-up step (mode switch, settings edit, model switch, resize,
+        // scroll), then hide. error_display (index 3) produces the Error state.
         for i in 0..scenario_count {
             let settings = runner.scenarios.front().is_some_and(|s| s.settings);
-            let action = runner.tick("Hidden"); // ShowOverlay / OpenSettings
+            let capture_first = runner.scenarios.front().is_some_and(|s| s.capture_first);
+            let action = runner.tick("Hidden"); // ShowOverlay / OpenSettings / BeginCapture
             if settings {
                 assert!(matches!(action, ScenarioAction::OpenSettings), "scenario {i}: {action:?}");
+            } else if capture_first {
+                // The capture is displayed for CAPTURE_DISPLAY, then committed.
+                assert!(matches!(action, ScenarioAction::BeginCapture { .. }), "scenario {i}: {action:?}");
+                expire_delay(&mut runner);
+                let commit = runner.tick("Capturing");
+                assert!(matches!(commit, ScenarioAction::ShowOverlay { .. }),
+                    "scenario {i}: expected ShowOverlay after the capture, got {commit:?}");
             } else {
                 assert!(matches!(action, ScenarioAction::ShowOverlay { .. }),
                     "scenario {i}: expected ShowOverlay, got {action:?}");
@@ -961,22 +968,33 @@ mod tests {
             // the rest produce Result.
             let result_state = if settings { "Settings" } else if i == 3 { "Error" } else { "Result" };
 
-            let action = runner.tick(result_state);
-            if matches!(action, ScenarioAction::SwitchMode(_)) {
-                // mode_switch: wait for re-processing, then new result.
-                runner.tick("Processing");
-                runner.tick("Result");
-            }
-            if matches!(action, ScenarioAction::EditSettingsSample) {
-                runner.tick("SettingsEdited");
+            // A follow-up step makes the runner wait for the state it produces.
+            match runner.tick(result_state) {
+                ScenarioAction::SwitchMode(_) => {
+                    runner.tick("Processing");
+                    runner.tick("Result");
+                }
+                ScenarioAction::EditSettingsSample => {
+                    runner.tick("SettingsEdited");
+                }
+                ScenarioAction::SelectModel(_) => {
+                    runner.tick("SettingsSwitched");
+                }
+                ScenarioAction::Resize(..) => {
+                    runner.tick("Resized");
+                }
+                ScenarioAction::ScrollBody { .. } => {
+                    runner.tick("Scrolled");
+                }
+                _ => {}
             }
             // Expire display delay and hide.
             expire_delay(&mut runner);
             let hide = runner.tick(result_state);
             if settings {
-                assert!(matches!(hide, ScenarioAction::CloseSettings), "{hide:?}");
+                assert!(matches!(hide, ScenarioAction::CloseSettings), "scenario {i}: {hide:?}");
             } else {
-                assert!(matches!(hide, ScenarioAction::HideOverlay), "{hide:?}");
+                assert!(matches!(hide, ScenarioAction::HideOverlay), "scenario {i}: {hide:?}");
             }
             expire_delay(&mut runner);
         }
