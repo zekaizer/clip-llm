@@ -228,6 +228,9 @@ pub struct OverlayApp {
     last_zoom: f32,
     /// `[ui].zoom` has been applied to the context (first frame).
     zoom_applied: bool,
+    /// Diagnostics: key presses to feed into the next frame's input.
+    #[cfg(feature = "diagnostics")]
+    diag_keys: Vec<egui::Key>,
     /// The window position last actually applied (native reposition or
     /// `OuterPosition`), so repeated per-frame repositioning to the same spot
     /// is skipped. `send_viewport_cmd` internally triggers `request_repaint`,
@@ -367,6 +370,8 @@ impl OverlayApp {
             saved_zoom: crate::config::get().ui_zoom(),
             last_zoom: 1.0,
             zoom_applied: false,
+            #[cfg(feature = "diagnostics")]
+            diag_keys: Vec::new(),
             resize_anchor: None,
             think_expanded: false,
             processing_request_id: None,
@@ -432,6 +437,8 @@ impl OverlayApp {
             saved_zoom: crate::config::get().ui_zoom(),
             last_zoom: 1.0,
             zoom_applied: false,
+            #[cfg(feature = "diagnostics")]
+            diag_keys: Vec::new(),
             resize_anchor: None,
             think_expanded: false,
             processing_request_id: None,
@@ -1181,6 +1188,13 @@ impl OverlayApp {
                     self.pending_capture = false;
                     self.pending_content = Some(crate::ClipboardContent::text_only(text));
                 }
+                crate::diagnostics::ScenarioAction::ScrollBody { pages } => {
+                    // Fed into the next frame's input, where the body's keyboard
+                    // scrolling consumes it like a real key press.
+                    self.diag_keys.extend(std::iter::repeat_n(egui::Key::PageDown, pages as usize));
+                    ctx.request_repaint();
+                    self.diag_transition("Scrolled");
+                }
                 crate::diagnostics::ScenarioAction::Resize(w, h) => {
                     // Same path as a real grip drag (anchor + state machine event).
                     self.handle_overlay_action(ctx, overlay::OverlayAction::Resize(egui::vec2(w, h)));
@@ -1862,6 +1876,18 @@ impl OverlayApp {
 impl eframe::App for OverlayApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         theme::color::apply(ctx);
+        #[cfg(feature = "diagnostics")]
+        for key in std::mem::take(&mut self.diag_keys) {
+            ctx.input_mut(|i| {
+                i.events.push(egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            });
+        }
         if !self.zoom_applied {
             self.zoom_applied = true;
             ctx.set_zoom_factor(self.saved_zoom);

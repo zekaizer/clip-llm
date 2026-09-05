@@ -241,7 +241,7 @@ impl DiagCollector {
         tctx.post_frames = self.ring.iter().filter(|f| f.frame >= tctx.frame).cloned().collect();
         // "Resized" changes the size on purpose; hidden/settings states are
         // not overlay geometry.
-        let visible = |s: &str| !matches!(s, "Hidden" | "Settings" | "SettingsEdited" | "Resized");
+        let visible = |s: &str| !matches!(s, "Hidden" | "Settings" | "SettingsEdited" | "Resized" | "Scrolled");
         if !(visible(tctx.from) && visible(tctx.to)) {
             return;
         }
@@ -290,9 +290,12 @@ fn save_color_image_as_png(
     path: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let [w, h] = image.size;
-    // Alpha-composite onto a dark background so transparent regions
-    // render as visible dark gray instead of white/invisible in PNG.
-    let bg: [u8; 3] = [20, 20, 20];
+    // Alpha-composite onto a background so transparent regions render as a
+    // visible color in the PNG: dark gray by default, or `DIAG_BG=<0-255>`
+    // for a gray of that level (a light one shows what the translucent
+    // frame looks like over a light desktop).
+    let level: u8 = std::env::var("DIAG_BG").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(20);
+    let bg: [u8; 3] = [level; 3];
     // egui::Color32 uses premultiplied alpha — r()/g()/b() already have
     // alpha baked in. Composite: out = src_premul + bg * (1 - src_a).
     let rgba: Vec<u8> = image
@@ -334,6 +337,9 @@ struct Scenario {
     /// Enter Capturing first (the single-tap picking view with `input` as the
     /// picked text), then commit to Processing after a short hold.
     capture_first: bool,
+    /// After the result arrives, press PageDown this many times (pseudo-state
+    /// "Scrolled") and capture again — shows the top fade and a mid-scroll body.
+    scroll_pages: u8,
 }
 
 #[derive(Debug, PartialEq)]
@@ -383,6 +389,7 @@ impl DiagScenarioRunner {
                 settings_edit: false,
                 resize_to: None,
                 capture_first: false,
+                scroll_pages: 0,
             },
             Scenario {
                 name: "long_text",
@@ -404,6 +411,7 @@ impl DiagScenarioRunner {
                 settings_edit: false,
                 resize_to: None,
                 capture_first: false,
+                scroll_pages: 0,
             },
             Scenario {
                 name: "mode_switch",
@@ -414,6 +422,7 @@ impl DiagScenarioRunner {
                 settings_edit: false,
                 resize_to: None,
                 capture_first: false,
+                scroll_pages: 0,
             },
             Scenario {
                 name: "error_display",
@@ -424,6 +433,7 @@ impl DiagScenarioRunner {
                 settings_edit: false,
                 resize_to: None,
                 capture_first: false,
+                scroll_pages: 0,
             },
             Scenario {
                 name: "korean_text",
@@ -434,6 +444,7 @@ impl DiagScenarioRunner {
                 settings_edit: false,
                 resize_to: None,
                 capture_first: false,
+                scroll_pages: 0,
             },
             Scenario {
                 name: "rephrase_mode",
@@ -444,6 +455,7 @@ impl DiagScenarioRunner {
                 settings_edit: false,
                 resize_to: None,
                 capture_first: false,
+                scroll_pages: 0,
             },
             Scenario {
                 name: "summarize_mode",
@@ -462,6 +474,7 @@ impl DiagScenarioRunner {
                 settings_edit: false,
                 resize_to: None,
                 capture_first: false,
+                scroll_pages: 0,
             },
             Scenario {
                 name: "long_single_line",
@@ -472,6 +485,7 @@ impl DiagScenarioRunner {
                 settings_edit: false,
                 resize_to: None,
                 capture_first: false,
+                scroll_pages: 0,
             },
             Scenario {
                 name: "capturing",
@@ -482,6 +496,18 @@ impl DiagScenarioRunner {
                 settings_edit: false,
                 resize_to: None,
                 capture_first: true,
+                scroll_pages: 0,
+            },
+            Scenario {
+                name: "scrolled",
+                input: "Scroll me: the long mock reply is paged down once so both fades show.",
+                mode: ProcessMode::Translate,
+                switch_to: None,
+                settings: false,
+                settings_edit: false,
+                resize_to: None,
+                capture_first: false,
+                scroll_pages: 1,
             },
             Scenario {
                 name: "resized_min",
@@ -494,6 +520,7 @@ impl DiagScenarioRunner {
                 // where the header row is tightest.
                 resize_to: Some((100.0, 100.0)),
                 capture_first: false,
+                scroll_pages: 0,
             },
             Scenario {
                 name: "settings",
@@ -504,6 +531,7 @@ impl DiagScenarioRunner {
                 settings_edit: false,
                 resize_to: None,
                 capture_first: false,
+                scroll_pages: 0,
             },
             Scenario {
                 name: "settings_edited",
@@ -514,6 +542,7 @@ impl DiagScenarioRunner {
                 settings_edit: true,
                 resize_to: None,
                 capture_first: false,
+                scroll_pages: 0,
             },
         ]);
         // DIAG_SCENARIO=a,b keeps only the named scenarios.
@@ -602,6 +631,11 @@ impl DiagScenarioRunner {
                         self.phase = RunnerPhase::WaitingForSwitchResult;
                         return ScenarioAction::Resize(w, h);
                     }
+                    if let Some(pages) = self.scenarios.front().map(|s| s.scroll_pages).filter(|p| *p > 0) {
+                        info!("diag: scrolling the body {pages} page(s)");
+                        self.phase = RunnerPhase::WaitingForSwitchResult;
+                        return ScenarioAction::ScrollBody { pages };
+                    }
 
                     self.delay_until = Instant::now() + RESULT_DISPLAY;
                     self.phase = RunnerPhase::WaitingToHide;
@@ -609,7 +643,7 @@ impl DiagScenarioRunner {
             }
 
             RunnerPhase::WaitingForSwitchResult => {
-                if matches!(overlay_state, "Result" | "Error" | "SettingsEdited" | "Resized") {
+                if matches!(overlay_state, "Result" | "Error" | "SettingsEdited" | "Resized" | "Scrolled") {
                     self.delay_until = Instant::now() + RESULT_DISPLAY;
                     self.phase = RunnerPhase::WaitingToHide;
                 }
@@ -662,6 +696,8 @@ pub enum ScenarioAction {
     Resize(f32, f32),
     /// Enter Capturing (single-tap picking) with `text` as the picked content.
     BeginCapture { text: String },
+    /// Press PageDown `pages` times in the body (pseudo-state "Scrolled").
+    ScrollBody { pages: u8 },
     /// All scenarios complete — app should exit.
     Quit,
 }
