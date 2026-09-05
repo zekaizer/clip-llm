@@ -13,6 +13,7 @@ System-wide LLM clipboard assistant. Captures text via global hotkey, sends it t
 - **Thinking mode** — toggle Think / NoThink per mode with configurable per-mode defaults; model capability auto-detected at startup
 - **Floating overlay** — draggable popup with streaming response and docked action buttons (copy/paste, retry, copy-debug)
 - **Two API providers** — `openai`: vLLM or any `/v1/chat/completions` endpoint; `grok-oauth`: xAI's Responses API through the official Grok CLI's sign-in (no API key — tokens auto-refresh and write back to `~/.grok/auth.json`)
+- **Model profiles** — several backends in one config (`[[models]]`); switch from the tray's *Model* submenu or by clicking the model name under a result, which re-runs the same text on the new model
 - **Single binary, cross-platform** — macOS & Windows 11, no runtime dependencies
 
 ## Install
@@ -86,6 +87,15 @@ kinds of settings:
   required: sign in once with the Grok CLI (`grok`) and clip-llm reuses (and
   auto-refreshes) its session from `~/.grok/auth.json` (`auth_file` overrides
   the path).
+- **`[[models]]`** — additional model profiles, each with the same keys as
+  `[api]` (`provider`, `endpoint`, `model`, `api_key`, `auth_file`, `headers`)
+  plus optional `name` (display label, defaults to `model`), `max_tokens` and
+  `token_budget` overrides. The `[api]` section is the first profile (and the
+  only one the `CLIP_LLM_*` variables apply to); when `[[models]]` entries exist
+  and `[api]` names no model, the profiles alone are used. The first profile is
+  active at startup; pick another from the tray *Model* submenu or click the
+  model name under a result. A profile that fails to build (missing key, unknown
+  provider) is listed as unavailable in the tray instead of stopping the app.
 - **`[generation]`** — request parameters (`temperature`, `max_tokens`,
   `request_timeout_secs`, `initial_response_timeout_secs`). No
   environment-variable equivalent: **config file > built-in default**.

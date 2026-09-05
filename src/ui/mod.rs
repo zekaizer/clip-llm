@@ -140,6 +140,9 @@ pub struct OverlayApp {
     /// One-shot startup notice (e.g. a failed config load) surfaced via the
     /// error overlay on the first frame after the initial hide settles.
     startup_notice: Option<String>,
+    /// Number of selectable model profiles; >1 makes the Result status label a
+    /// "switch model" control.
+    model_count: usize,
     /// Tap events from coordinator thread (hotkey detection runs off-UI).
     tap_rx: mpsc::Receiver<TapEvent>,
     /// Cached desired_size to avoid redundant send_viewport_cmd calls.
@@ -282,6 +285,7 @@ impl OverlayApp {
             initial_hide_done: false,
             pending_taskbar_exclude: false,
             startup_notice: None,
+            model_count: 1,
             tap_rx,
             last_desired_size: None,
             last_content_size: None,
@@ -335,6 +339,7 @@ impl OverlayApp {
             initial_hide_done: false,
             pending_taskbar_exclude: false,
             startup_notice: None,
+            model_count: 1,
             tap_rx,
             last_desired_size: None,
             last_content_size: None,
@@ -370,6 +375,18 @@ impl OverlayApp {
     pub fn with_startup_notice(mut self, notice: Option<String>) -> Self {
         self.startup_notice = notice;
         self
+    }
+
+    /// Number of model profiles the worker can switch between (≥ 1).
+    pub fn with_model_count(mut self, count: usize) -> Self {
+        self.model_count = count.max(1);
+        self
+    }
+
+    /// Apply a model-profile choice from the tray or the overlay.
+    fn select_model(&mut self, ctx: &egui::Context, index: usize) {
+        let effects = self.sm_handle(UiEvent::UserSelectModel(index));
+        self.execute_effects(effects, ctx);
     }
 
     // -- State machine dispatch --
@@ -453,6 +470,11 @@ impl OverlayApp {
                 UiEffect::SendCancel => {
                     debug!("ui: cancel in-flight request");
                     let _ = self.cmd_tx.send(WorkerCommand::Cancel);
+                }
+                UiEffect::SelectModel(index) => {
+                    info!("ui: select model profile #{index}");
+                    let _ = self.cmd_tx.send(WorkerCommand::SelectModel(index));
+                    crate::platform::update_tray_model(index);
                 }
                 UiEffect::WriteClipboard(text) => {
                     // Skip rewriting identical content that is still on the
@@ -880,8 +902,14 @@ impl OverlayApp {
                         label: format_retry_label(attempt, max_attempts, delay, rate_limited),
                     }
                 }
-                WorkerResponse::ProbeComplete { vision_supported, thinking_method } => {
+                WorkerResponse::ProbeComplete { vision_supported, thinking_method, model_index } => {
                     use crate::api::client::ThinkingControlMethod as Tcm;
+                    // A slow probe of a profile the user already left must not
+                    // describe the current one.
+                    if model_index != self.sm.active_model() {
+                        debug!("ui: dropping stale probe result for model profile #{model_index}");
+                        continue;
+                    }
                     let thinking_label = match thinking_method {
                         Tcm::ChatTemplateKwargs => "kwargs",
                         Tcm::SystemPromptTag => "prompt tag",
@@ -1231,6 +1259,11 @@ impl OverlayApp {
             overlay::OverlayAction::PasteReplace => UiEvent::UserPaste,
             overlay::OverlayAction::TogglePin => UiEvent::UserTogglePin,
             overlay::OverlayAction::Retry => UiEvent::UserRetry,
+            overlay::OverlayAction::CycleModel => {
+                let next = (self.sm.active_model() + 1) % self.model_count;
+                self.select_model(ctx, next);
+                return;
+            }
             overlay::OverlayAction::CopyDebug => {
                 // Side channel, not a state-machine event: write the raw
                 // request/response snapshot straight to the clipboard. Bypasses
@@ -1424,6 +1457,7 @@ impl eframe::App for OverlayApp {
             elapsed,
             self.last_debug.is_some(),
             self.last_debug.as_ref().and_then(format_completion_status),
+            self.model_count > 1,
             self.result_latch.map(|l| l.min_content_height),
             ctx,
         );
@@ -1451,7 +1485,9 @@ impl eframe::App for OverlayApp {
             self.diag.flush_pending_if_stale();
         }
 
-        crate::platform::poll_tray_events(ctx);
+        if let Some(index) = crate::platform::poll_tray_events(ctx) {
+            self.select_model(ctx, index);
+        }
 
         // Focus-loss auto-hide (skip during diagnostics).
         #[cfg(not(feature = "diagnostics"))]

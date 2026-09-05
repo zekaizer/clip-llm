@@ -121,7 +121,10 @@ The UI uses an **event-driven** repaint model to minimize idle CPU/GPU usage:
 
 ## API Integration
 
-Two provider flavors, selected by `[api].provider` (`CLIP_LLM_PROVIDER`):
+Two provider flavors, selected by `[api].provider` (`CLIP_LLM_PROVIDER`). Several
+backends can coexist as `[[models]]` profiles (`config::Config::model_specs` →
+`LlmClient::for_spec` each; the worker holds them in a `ModelPool` and switches
+on `WorkerCommand::SelectModel`, re-probing capabilities per profile):
 
 ### `openai` (default)
 

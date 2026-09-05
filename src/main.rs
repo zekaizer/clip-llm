@@ -12,6 +12,7 @@ use clip_llm::clipboard::ClipboardManager;
 use clip_llm::hotkey::TapEvent;
 use clip_llm::ui::OverlayApp;
 use clip_llm::worker::{spawn_worker, WorkerCommand, WorkerResponse};
+use clip_llm::platform::TrayModel;
 use clip_llm::HotkeyError;
 
 fn main() {
@@ -181,20 +182,44 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // app cannot run and — since it exits before the tray exists — the user can't
     // reach Open Config. So write the starter template here, point at it, and
     // exit so the next launch finds a file to fill in.
-    let llm = match LlmClient::new() {
-        Ok(llm) => llm,
-        Err(e @ clip_llm::ApiError::MissingConfig(_)) => {
-            match clip_llm::config::ensure_config_file() {
-                Some(path) => error!(
-                    "{e}. Wrote a starter config to {} — set the required keys there and relaunch.",
-                    path.display()
-                ),
-                None => error!("{e}"),
+    // Model profiles: [api] first, then each [[models]] entry. The first
+    // (default) profile must build or the app cannot run; a later one that
+    // fails is listed in the tray as unavailable with the reason instead of
+    // taking the whole app down.
+    let specs = clip_llm::config::get()
+        .model_specs()
+        .map_err(clip_llm::ApiError::InvalidConfig)?;
+    let mut clients = Vec::with_capacity(specs.len());
+    let mut tray_models = Vec::with_capacity(specs.len());
+    let mut unavailable = Vec::new();
+    for (index, spec) in specs.iter().enumerate() {
+        match LlmClient::for_spec(spec) {
+            Ok(llm) => {
+                clients.push(llm);
+                tray_models.push(TrayModel { label: spec.name.clone(), unavailable: None });
             }
-            return Err(e.into());
+            Err(e @ clip_llm::ApiError::MissingConfig(_)) if index == 0 => {
+                match clip_llm::config::ensure_config_file() {
+                    Some(path) => error!(
+                        "{e}. Wrote a starter config to {} — set the required keys there and relaunch.",
+                        path.display()
+                    ),
+                    None => error!("{e}"),
+                }
+                return Err(e.into());
+            }
+            Err(e) if index == 0 => return Err(e.into()),
+            Err(e) => {
+                warn!("model profile {:?} unavailable: {e}", spec.name);
+                unavailable.push(TrayModel {
+                    label: spec.name.clone(),
+                    unavailable: Some(e.to_string()),
+                });
+            }
         }
-        Err(e) => return Err(e.into()),
-    };
+    }
+    tray_models.extend(unavailable);
+    let model_count = clients.len();
     let clipboard = ClipboardManager::new()?;
 
     info!("starting eframe overlay");
@@ -222,7 +247,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }));
 
             // System tray icon (Windows: replaces taskbar icon).
-            clip_llm::platform::init_tray(&cc.egui_ctx);
+            clip_llm::platform::init_tray(&cc.egui_ctx, &tray_models);
 
             // Listen-only OS keyboard watcher for the Ctrl+Shift release (commit)
             // signal that global-hotkey cannot observe. Accessibility was already
@@ -257,7 +282,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             // Worker thread: async LLM calls. Spawned here (not before
             // run_native) so it gets the egui Context and can wake the UI loop
             // when the one-shot startup probe completes.
-            let _worker = spawn_worker(cmd_rx, resp_tx, llm, cc.egui_ctx.clone());
+            let _worker = spawn_worker(cmd_rx, resp_tx, clients, cc.egui_ctx.clone());
 
             #[cfg(feature = "diagnostics")]
             let app = OverlayApp::new(
@@ -266,7 +291,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             );
             #[cfg(not(feature = "diagnostics"))]
             let app = OverlayApp::new(cmd_tx, resp_rx, clipboard, tap_rx, modifier_state);
-            let app = app.with_startup_notice(startup_notice);
+            let app = app
+                .with_startup_notice(startup_notice)
+                .with_model_count(model_count);
 
             Ok(Box::new(app))
         }),

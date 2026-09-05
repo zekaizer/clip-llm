@@ -604,6 +604,8 @@ struct LlmClientInner {
     flavor: ApiFlavor,
     endpoint: String,
     model: String,
+    /// Profile name shown in the tray/overlay (`[[models]].name`, else the model).
+    label: String,
     auth: TokenProvider,
     custom_headers: Vec<(String, String)>,
     temperature: f64,
@@ -748,22 +750,56 @@ fn sanitize_debug_json(v: &mut serde_json::Value) {
 }
 
 impl LlmClient {
-    pub fn new() -> Result<Self, ApiError> {
-        // Precedence for every setting: env var > config file > built-in default.
+    /// Profile name for display.
+    pub fn label(&self) -> &str {
+        &self.0.label
+    }
+
+    /// Model id sent in requests.
+    pub fn model_name(&self) -> &str {
+        &self.0.model
+    }
+
+    /// Build a client for one model profile. `CLIP_LLM_*` environment variables
+    /// apply only when `spec.from_api_section`; a `[[models]]` entry missing a
+    /// required setting fails with [`ApiError::InvalidConfig`] naming the profile.
+    pub fn for_spec(spec: &crate::config::ModelSpec) -> Result<Self, ApiError> {
+        // Precedence for every setting: env var (the [api] profile only) >
+        // profile > built-in default.
         let config = crate::config::get();
+        let env = |key: &str| -> Option<String> {
+            if spec.from_api_section {
+                env::var(key).ok().filter(|s| !s.is_empty())
+            } else {
+                None
+            }
+        };
+        // A [[models]] entry has no CLIP_LLM_* fallback, so its error names the
+        // profile instead of pointing at the environment.
+        let profile_error = |e: ApiError| -> ApiError {
+            match e {
+                ApiError::MissingConfig(setting) if !spec.from_api_section => {
+                    ApiError::InvalidConfig(format!(
+                        "[[models]] \"{}\": `{}` is required",
+                        spec.name,
+                        setting.trim_start_matches("api.")
+                    ))
+                }
+                other => other,
+            }
+        };
 
         // Provider selects the protocol flavor and the auth source.
-        let provider = env::var("CLIP_LLM_PROVIDER")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| config.api_provider().map(str::to_owned))
+        let provider = env("CLIP_LLM_PROVIDER")
+            .or_else(|| spec.provider.clone())
             .unwrap_or_else(|| "openai".to_owned());
         let flavor = match provider.as_str() {
             "openai" => ApiFlavor::OpenAiChat,
             "grok-oauth" => ApiFlavor::GrokResponses,
             other => {
                 return Err(ApiError::InvalidConfig(format!(
-                    "unknown [api].provider {other:?} (expected \"openai\" or \"grok-oauth\")"
+                    "unknown provider {other:?} in profile \"{}\" (expected \"openai\" or \"grok-oauth\")",
+                    spec.name
                 )))
             }
         };
@@ -776,60 +812,56 @@ impl LlmClient {
         // server. The grok-oauth flavor differs: the endpoint is xAI's public
         // API (overridable), and auth comes from the Grok CLI's credential
         // store instead of an api_key.
-        let env_endpoint = env::var("CLIP_LLM_API_ENDPOINT").ok();
+        let env_endpoint = env("CLIP_LLM_API_ENDPOINT");
         let (base, path) = match flavor {
             ApiFlavor::OpenAiChat => (
-                require_setting(env_endpoint, config.api_endpoint(), "api.endpoint")?,
+                require_setting(env_endpoint, spec.endpoint.as_deref(), "api.endpoint")
+                    .map_err(profile_error)?,
                 CHAT_COMPLETIONS_PATH,
             ),
             ApiFlavor::GrokResponses => (
-                require_setting(env_endpoint, config.api_endpoint(), "api.endpoint")
+                require_setting(env_endpoint, spec.endpoint.as_deref(), "api.endpoint")
                     .unwrap_or_else(|_| GROK_DEFAULT_ENDPOINT.to_owned()),
                 RESPONSES_PATH,
             ),
         };
-        // A leftover [api].endpoint (e.g. a vLLM URL from a previous provider)
+        // A leftover endpoint (e.g. a vLLM URL from a previous provider)
         // silently overrides the xAI default and every request then fails
         // against the wrong server — make that visible at startup.
         if flavor == ApiFlavor::GrokResponses && base != GROK_DEFAULT_ENDPOINT {
             warn!(
                 "grok-oauth: using custom endpoint {base} instead of {GROK_DEFAULT_ENDPOINT} — \
-                 remove [api].endpoint from config.toml unless this is intentional"
+                 remove the endpoint from profile \"{}\" unless this is intentional",
+                spec.name
             );
         }
         let endpoint = format!("{}{}", base.trim_end_matches('/'), path);
-        let model = require_setting(
-            env::var("CLIP_LLM_MODEL").ok(),
-            config.api_model(),
-            "api.model",
-        )?;
+        let model = require_setting(env("CLIP_LLM_MODEL"), spec.model.as_deref(), "api.model")
+            .map_err(profile_error)?;
         let auth = match flavor {
-            ApiFlavor::OpenAiChat => TokenProvider::Static(Some(require_setting(
-                env::var("CLIP_LLM_API_KEY").ok(),
-                config.api_key(),
-                "api.api_key",
-            )?)),
+            ApiFlavor::OpenAiChat => TokenProvider::Static(Some(
+                require_setting(env("CLIP_LLM_API_KEY"), spec.api_key.as_deref(), "api.api_key")
+                    .map_err(profile_error)?,
+            )),
             // Any configured api_key is ignored: the OAuth surface only
             // accepts the CLI session's bearer tokens.
             ApiFlavor::GrokResponses => TokenProvider::GrokCli(GrokCliAuth::load(
-                config.api_auth_file().map(std::path::PathBuf::from),
+                spec.auth_file.as_deref().map(std::path::PathBuf::from),
             )?),
         };
         // Empty env var = unset, so it does not silently suppress configured headers.
-        let custom_headers: Vec<(String, String)> =
-            match env::var("CLIP_LLM_CUSTOM_HEADERS").ok().filter(|s| !s.is_empty()) {
-                Some(raw) => parse_custom_headers(&raw),
-                None => config
-                    .api_headers()
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect(),
-            };
+        let custom_headers: Vec<(String, String)> = match env("CLIP_LLM_CUSTOM_HEADERS") {
+            Some(raw) => parse_custom_headers(&raw),
+            None => spec.headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        };
 
-        // Generation parameters: config file > built-in default (no env var).
+        // Generation parameters: profile > config file > built-in default (no env var).
         let temperature = config.generation_temperature().unwrap_or(TEMPERATURE);
-        let max_tokens = config.generation_max_tokens().unwrap_or(MAX_TOKENS);
-        let token_budget = config.generation_token_budget();
+        let max_tokens = spec
+            .max_tokens
+            .or_else(|| config.generation_max_tokens())
+            .unwrap_or(MAX_TOKENS);
+        let token_budget = spec.token_budget.or_else(|| config.generation_token_budget());
         let timeout = Duration::from_secs(
             config
                 .generation_request_timeout_secs()
@@ -843,9 +875,10 @@ impl LlmClient {
 
         // The endpoint URL stays at debug: it may carry embedded credentials in
         // some gateway setups, and info-level records ship to remote telemetry.
-        debug!("endpoint={endpoint}");
+        debug!("profile {:?}: endpoint={endpoint}", spec.name);
         info!(
-            "provider={provider}, model={model}, auth={}, custom_headers={}, temperature={temperature}, max_tokens={max_tokens}, timeout={}s, initial_response_timeout={}s",
+            "profile={:?}, provider={provider}, model={model}, auth={}, custom_headers={}, temperature={temperature}, max_tokens={max_tokens}, timeout={}s, initial_response_timeout={}s",
+            spec.name,
             auth.describe(),
             if custom_headers.is_empty() {
                 "none".to_string()
@@ -882,6 +915,7 @@ impl LlmClient {
             streaming_client,
             flavor,
             endpoint,
+            label: spec.name.clone(),
             model,
             auth,
             custom_headers,
@@ -893,6 +927,14 @@ impl LlmClient {
             thinking_control: OnceCell::new(),
         }), None))
     }
+
+    /// The default profile: the first entry of [`crate::config::Config::model_specs`].
+    pub fn new() -> Result<Self, ApiError> {
+        let specs = crate::config::get().model_specs().map_err(ApiError::InvalidConfig)?;
+        let first = specs.first().ok_or(ApiError::MissingConfig("api.model"))?;
+        Self::for_spec(first)
+    }
+
 
     /// A handle sharing this client's connection pool and probe caches that
     /// reports automatic retries to `notifier`.
@@ -1678,6 +1720,60 @@ impl LlmClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- for_spec: per-profile client construction ---
+
+    fn openai_spec(name: &str) -> crate::config::ModelSpec {
+        crate::config::ModelSpec {
+            name: name.into(),
+            provider: None,
+            endpoint: Some("http://h/v1/".into()),
+            model: Some("m".into()),
+            api_key: Some("k".into()),
+            max_tokens: Some(123),
+            token_budget: Some(4000),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn for_spec_builds_openai_profile() {
+        let c = LlmClient::for_spec(&openai_spec("prof")).unwrap();
+        assert_eq!(c.label(), "prof");
+        assert_eq!(c.model_name(), "m");
+        assert_eq!(c.0.endpoint, "http://h/v1/chat/completions");
+        assert_eq!(c.0.flavor, ApiFlavor::OpenAiChat);
+        assert_eq!(c.0.max_tokens, 123);
+        assert_eq!(c.0.token_budget, Some(4000));
+    }
+
+    #[test]
+    fn for_spec_profile_errors_name_the_profile() {
+        let mut spec = openai_spec("prof");
+        spec.api_key = None;
+        match LlmClient::for_spec(&spec) {
+            Err(ApiError::InvalidConfig(m)) => {
+                assert!(m.contains("prof") && m.contains("api_key"), "{m}");
+            }
+            Err(other) => panic!("expected InvalidConfig, got {other:?}"),
+            Ok(_) => panic!("expected InvalidConfig, got a client"),
+        }
+        let mut spec = openai_spec("prof");
+        spec.provider = Some("bogus".into());
+        assert!(matches!(LlmClient::for_spec(&spec), Err(ApiError::InvalidConfig(_))));
+    }
+
+    #[test]
+    fn for_spec_api_section_missing_setting_is_missing_config() {
+        // The [api] profile keeps the classic error that points at CLIP_LLM_*.
+        let mut spec = openai_spec("default");
+        spec.from_api_section = true;
+        spec.model = None;
+        assert!(matches!(
+            LlmClient::for_spec(&spec),
+            Err(ApiError::MissingConfig("api.model"))
+        ));
+    }
 
     #[test]
     fn require_setting_precedence_and_missing() {

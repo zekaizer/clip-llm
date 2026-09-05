@@ -38,6 +38,38 @@ pub struct ProcessTask {
 pub enum WorkerCommand {
     Process(ProcessTask),
     Cancel,
+    /// Make the model profile at this pool index the target of later requests.
+    SelectModel(usize),
+}
+
+/// The worker's model profiles with one active selection.
+pub struct ModelPool<T> {
+    items: Vec<T>,
+    active: usize,
+}
+
+impl<T> ModelPool<T> {
+    /// `items` must be non-empty; the first is active.
+    pub fn new(items: Vec<T>) -> Self {
+        Self { items, active: 0 }
+    }
+
+    pub fn active(&self) -> &T {
+        &self.items[self.active]
+    }
+
+    pub fn active_index(&self) -> usize {
+        self.active
+    }
+
+    /// Switch the active item; false (and no change) for an out-of-range index.
+    pub fn select(&mut self, index: usize) -> bool {
+        if index >= self.items.len() {
+            return false;
+        }
+        self.active = index;
+        true
+    }
 }
 
 pub enum WorkerResponse {
@@ -71,12 +103,14 @@ pub enum WorkerResponse {
         /// Raw request/response snapshot for the on-demand debug view.
         debug: DebugCapture,
     },
-    /// One-shot: vision + thinking-control capability from the startup probe
-    /// (sent once). Drives both the state machine's thinking flag and the tray
-    /// Status menu.
+    /// Vision + thinking-control capability of the model profile at
+    /// `model_index`, probed at startup and on every profile switch. Drives
+    /// both the state machine's thinking flag and the tray Status menu; the UI
+    /// drops it when the user has already switched away again.
     ProbeComplete {
         vision_supported: bool,
         thinking_method: crate::api::client::ThinkingControlMethod,
+        model_index: usize,
     },
 }
 
@@ -712,6 +746,32 @@ fn dispatch_process(
     }
 }
 
+/// Probe a profile's vision/thinking capability off the command loop and
+/// report it as `ProbeComplete`. The client caches the verdict, so re-probing
+/// an already-probed profile answers instantly.
+fn spawn_probe(
+    llm: LlmClient,
+    model_index: usize,
+    resp_tx: &mpsc::Sender<WorkerResponse>,
+    ctx: &eframe::egui::Context,
+) {
+    let resp_tx = resp_tx.clone();
+    let ctx = ctx.clone();
+    tokio::spawn(async move {
+        let vision_supported = llm.probe_vision().await;
+        let thinking_method = llm.probe_thinking().await;
+        let _ = resp_tx.send(WorkerResponse::ProbeComplete {
+            vision_supported,
+            thinking_method,
+            model_index,
+        });
+        // Wake the (idle) UI loop so poll_responses processes this
+        // immediately and the tray Status menu updates without
+        // waiting for the next unrelated event.
+        ctx.request_repaint();
+    });
+}
+
 /// Spawn a worker thread with a tokio runtime for async LLM calls.
 /// Returns the thread handle.
 ///
@@ -724,9 +784,10 @@ fn dispatch_process(
 pub fn spawn_worker(
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<WorkerCommand>,
     resp_tx: mpsc::Sender<WorkerResponse>,
-    llm: LlmClient,
+    clients: Vec<LlmClient>,
     ctx: eframe::egui::Context,
 ) -> thread::JoinHandle<()> {
+    assert!(!clients.is_empty(), "spawn_worker needs at least one model profile");
     thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -752,35 +813,31 @@ pub fn spawn_worker(
             // dispatching the first request or honoring Cancel. `build_and_send`
             // re-probes on demand if a request beats the probe, and the `OnceCell`
             // caches the verdict either way.
-            tokio::spawn({
-                let llm = llm.clone();
-                let resp_tx = resp_tx.clone();
-                let ctx = ctx.clone();
-                async move {
-                    let vision_supported = llm.probe_vision().await;
-                    let thinking_method = llm.probe_thinking().await;
-                    let _ = resp_tx.send(WorkerResponse::ProbeComplete {
-                        vision_supported,
-                        thinking_method,
-                    });
-                    // Wake the (idle) UI loop so poll_responses processes this
-                    // immediately and the tray Status menu updates without
-                    // waiting for the next unrelated event.
-                    ctx.request_repaint();
-                }
-            });
+            let mut pool = ModelPool::new(clients);
+            spawn_probe(pool.active().clone(), pool.active_index(), &resp_tx, &ctx);
 
             let mut cancel_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
 
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
                     WorkerCommand::Process(task) => {
-                        dispatch_process(task, &llm, &resp_tx, &mut cancel_tx, &config);
+                        dispatch_process(task, pool.active(), &resp_tx, &mut cancel_tx, &config);
                     }
                     WorkerCommand::Cancel => {
                         if let Some(tx) = cancel_tx.take() {
                             let _ = tx.send(());
                             info!("worker: cancelled by user");
+                        }
+                    }
+                    // An in-flight request keeps its own client clone, so the
+                    // switch only affects later requests; the UI cancels/resends
+                    // on its own when it wants the new model to answer.
+                    WorkerCommand::SelectModel(index) => {
+                        if pool.select(index) {
+                            info!("worker: active model profile -> #{index} ({})", pool.active().label());
+                            spawn_probe(pool.active().clone(), index, &resp_tx, &ctx);
+                        } else {
+                            warn!("worker: ignoring out-of-range model profile #{index}");
                         }
                     }
                 }
@@ -888,6 +945,17 @@ mod tests {
             }
             other => panic!("expected Complete, got {:?}", variant_name(&other)),
         }
+    }
+
+    #[test]
+    fn model_pool_select_and_bounds() {
+        let mut pool = ModelPool::new(vec!["a", "b"]);
+        assert_eq!(*pool.active(), "a");
+        assert_eq!(pool.active_index(), 0);
+        assert!(pool.select(1));
+        assert_eq!(*pool.active(), "b");
+        assert!(!pool.select(5), "out of range is rejected");
+        assert_eq!(pool.active_index(), 1, "and leaves the selection alone");
     }
 
     #[test]

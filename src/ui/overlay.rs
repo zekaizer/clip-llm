@@ -80,6 +80,8 @@ pub enum OverlayAction {
     Retry,
     /// Copy the raw request/response debug snapshot to the clipboard.
     CopyDebug,
+    /// Switch to the next model profile and re-run the current content.
+    CycleModel,
 }
 
 pub struct OverlayOutput {
@@ -118,6 +120,8 @@ pub fn render(
     // when no completion data is available (e.g. a cached/instant result —
     // see `format_completion_status` in `mod.rs`).
     completion_status: Option<String>,
+    // More than one model profile exists: the status label switches models.
+    model_switchable: bool,
     // Floor for the Result/Error content height, latched by the adapter from
     // the last Processing frame's rendered content (see
     // `OverlayApp::result_latch`) so the final answer never renders shorter
@@ -265,6 +269,7 @@ pub fn render(
                             source,
                             source_files,
                             completion_status.as_deref(),
+                            model_switchable,
                             content_top,
                             pinned_inner_height,
                             &mut action,
@@ -601,6 +606,7 @@ fn render_result(
     // `render()`'s `completion_status` parameter, which this is threaded
     // from).
     completion_status: Option<&str>,
+    model_switchable: bool,
     // Top of the whole inner content ui (captured in `render()` right after
     // `ui.set_width`, *before* the tab bar/separator) — the reference point
     // for measuring how much of `pinned_inner_height` has already been used
@@ -688,9 +694,20 @@ fn render_result(
     fixed_height_row(ui, BOTTOM_ROW_HEIGHT, |ui| {
         render_source_badge(ui, source, source_files);
         if let Some(status) = completion_status {
-            ui.label(
-                egui::RichText::new(status).color(egui::Color32::from_gray(120)).size(12.0),
-            );
+            let text = egui::RichText::new(status).color(egui::Color32::from_gray(120)).size(12.0);
+            if model_switchable {
+                // The label names the model that answered, so it doubles as
+                // the "ask another model" control when profiles exist.
+                let resp = ui
+                    .add(egui::Label::new(text).sense(egui::Sense::click()))
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("Switch to the next model profile and re-run");
+                if resp.clicked() {
+                    *action = OverlayAction::CycleModel;
+                }
+            } else {
+                ui.label(text);
+            }
         }
         // right_to_left: the first button rendered lands at the far right, so
         // this reads in reverse visual order — primary action at the edge,
@@ -1051,6 +1068,7 @@ mod tests {
                 None,
                 false,
                 None,
+                false,
                 min_result_height,
                 ctx,
             ));

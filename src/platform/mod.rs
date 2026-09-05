@@ -121,9 +121,22 @@ pub use modifier_watcher::{spawn_modifier_watcher, ModifierState};
 // Windows-specific window nudge in the menu handler is `cfg`-gated.
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 static TRAY_QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// Model profile index picked in the tray "Model" submenu, consumed by
+/// `poll_tray_events` on the main thread. `NO_MODEL_SELECTED` = nothing pending.
+static TRAY_MODEL_SELECTED: AtomicUsize = AtomicUsize::new(NO_MODEL_SELECTED);
+const NO_MODEL_SELECTED: usize = usize::MAX;
+
+/// One entry of the tray "Model" submenu. Selectable entries come first, in
+/// worker pool order (their position is the pool index); entries with
+/// `unavailable = Some(reason)` are shown disabled after them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrayModel {
+    pub label: String,
+    pub unavailable: Option<String>,
+}
 #[cfg(target_os = "macos")]
 static TRAY_ABOUT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -148,6 +161,7 @@ static TRAY_LAUNCH_AT_LOGIN_REVERT: AtomicBool = AtomicBool::new(false);
 /// touched from the main thread — which is where `init_tray` and the
 /// `update_tray_*` callers (inside `OverlayApp::update`) both run.
 struct TrayStatusRows {
+    model: tray_icon::menu::MenuItem,
     vision: tray_icon::menu::MenuItem,
     thinking: tray_icon::menu::MenuItem,
     requests: tray_icon::menu::MenuItem,
@@ -161,6 +175,29 @@ thread_local! {
     /// on a failed toggle. Main thread only (see [`TrayStatusRows`]).
     static TRAY_LAUNCH_AT_LOGIN_ITEM: RefCell<Option<tray_icon::menu::CheckMenuItem>> =
         const { RefCell::new(None) };
+    /// Radio-style check items of the "Model" submenu (selectable profiles
+    /// only, pool order) and their labels. Main thread only.
+    static TRAY_MODEL_ITEMS: RefCell<Vec<(String, tray_icon::menu::CheckMenuItem)>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// Reflect the active model profile: check exactly its item in the "Model"
+/// submenu and name it in the Status row. Main thread only; no-op without a
+/// tray or when `index` is out of range.
+pub fn update_tray_model(index: usize) {
+    TRAY_MODEL_ITEMS.with(|items| {
+        let items = items.borrow();
+        for (i, (_, item)) in items.iter().enumerate() {
+            item.set_checked(i == index);
+        }
+        if let Some((label, _)) = items.get(index) {
+            TRAY_STATUS.with(|s| {
+                if let Some(rows) = s.borrow().as_ref() {
+                    rows.model.set_text(format!("Model: {label}"));
+                }
+            });
+        }
+    });
 }
 
 /// Update the probe rows of the Status submenu once the startup probe lands.
@@ -216,9 +253,53 @@ fn load_tray_icon() -> tray_icon::Icon {
 /// Initialize the system tray icon with a disabled version label and a Quit item.
 /// On macOS this is the only way to quit the app (Accessory policy = no Dock icon).
 /// The `TrayIcon` is intentionally leaked (process-lifetime resource).
-pub fn init_tray(ctx: &eframe::egui::Context) {
+pub fn init_tray(ctx: &eframe::egui::Context, models: &[TrayModel]) {
     use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
     use tray_icon::TrayIconBuilder;
+
+    // "Model" submenu: one check item per selectable profile (radio-style, the
+    // first is active at startup), disabled rows for profiles that failed to
+    // build. Only shown when there is a choice to make.
+    let model_items: Vec<CheckMenuItem> = models
+        .iter()
+        .filter(|m| m.unavailable.is_none())
+        .enumerate()
+        .map(|(i, m)| CheckMenuItem::new(&m.label, true, i == 0, None))
+        .collect();
+    let model_ids: Vec<tray_icon::menu::MenuId> =
+        model_items.iter().map(|item| item.id().clone()).collect();
+    let unavailable_items: Vec<MenuItem> = models
+        .iter()
+        .filter_map(|m| {
+            m.unavailable
+                .as_ref()
+                .map(|why| MenuItem::new(format!("{} \u{2014} unavailable: {why}", m.label), false, None))
+        })
+        .collect();
+    let model_menu = if models.len() > 1 {
+        let mut refs: Vec<&dyn tray_icon::menu::IsMenuItem> = Vec::new();
+        for item in &model_items {
+            refs.push(item);
+        }
+        let sep = PredefinedMenuItem::separator();
+        if !unavailable_items.is_empty() {
+            refs.push(&sep);
+            for item in &unavailable_items {
+                refs.push(item);
+            }
+        }
+        Some(Submenu::with_items("Model", true, &refs).expect("failed to create model submenu"))
+    } else {
+        None
+    };
+    TRAY_MODEL_ITEMS.with(|items| {
+        *items.borrow_mut() = models
+            .iter()
+            .filter(|m| m.unavailable.is_none())
+            .map(|m| m.label.clone())
+            .zip(model_items.iter().cloned())
+            .collect();
+    });
 
     let about_item = MenuItem::new("About clip-llm", true, None);
     let about_id = about_item.id().clone();
@@ -237,7 +318,12 @@ pub fn init_tray(ctx: &eframe::egui::Context) {
     // from the main thread via update_tray_probe / update_tray_requests.
     let cfg = crate::config::get();
     let endpoint = cfg.api_endpoint().unwrap_or("(default)");
-    let model = cfg.api_model().unwrap_or("(default)");
+    let model = models
+        .iter()
+        .find(|m| m.unavailable.is_none())
+        .map(|m| m.label.as_str())
+        .or(cfg.api_model())
+        .unwrap_or("(default)");
     let streaming = if cfg.api_streaming().unwrap_or(true) { "on" } else { "off" };
     let config_status = match crate::config::load_outcome() {
         crate::config::LoadOutcome::Loaded(p) => format!("Config: loaded ({})", p.display()),
@@ -278,6 +364,7 @@ pub fn init_tray(ctx: &eframe::egui::Context) {
     // Keep handles to the dynamic rows for later main-thread updates.
     TRAY_STATUS.with(|s| {
         *s.borrow_mut() = Some(TrayStatusRows {
+            model: model_row.clone(),
             vision: vision_row.clone(),
             thinking: thinking_row.clone(),
             requests: requests_row.clone(),
@@ -289,16 +376,17 @@ pub fn init_tray(ctx: &eframe::egui::Context) {
         *c.borrow_mut() = Some(launch_at_login_item.clone());
     });
 
-    let menu = Menu::with_items(&[
-        &about_item,
-        &config_item,
-        &status_menu,
-        &PredefinedMenuItem::separator(),
-        &launch_at_login_item,
-        &PredefinedMenuItem::separator(),
-        &quit_item,
-    ])
-    .expect("failed to create tray menu");
+    let menu = Menu::new();
+    menu.append(&about_item).expect("failed to build tray menu");
+    menu.append(&config_item).expect("failed to build tray menu");
+    if let Some(model_menu) = &model_menu {
+        menu.append(model_menu).expect("failed to build tray menu");
+    }
+    menu.append(&status_menu).expect("failed to build tray menu");
+    menu.append(&PredefinedMenuItem::separator()).expect("failed to build tray menu");
+    menu.append(&launch_at_login_item).expect("failed to build tray menu");
+    menu.append(&PredefinedMenuItem::separator()).expect("failed to build tray menu");
+    menu.append(&quit_item).expect("failed to build tray menu");
 
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
@@ -344,6 +432,14 @@ pub fn init_tray(ctx: &eframe::egui::Context) {
                 } else if event.id() == &config_id {
                     // Spawning an editor process needs no main-thread round-trip.
                     open_config_file();
+                } else if let Some(index) = model_ids.iter().position(|id| id == event.id()) {
+                    // The native check item toggled itself; the main thread
+                    // re-checks the whole radio group via update_tray_model
+                    // once the state machine has applied the switch.
+                    TRAY_MODEL_SELECTED.store(index, Ordering::SeqCst);
+                    #[cfg(target_os = "windows")]
+                    windows::show_no_activate();
+                    ctx.request_repaint();
                 } else if event.id() == &launch_at_login_id {
                     // The native checkbox has already auto-toggled its own visual
                     // by the time this event fires, so the target state is the
@@ -404,12 +500,17 @@ fn open_config_file() {
 /// Poll for tray menu actions inside `update()` (main thread): show the About
 /// dialog (macOS only — NSAlert requires the main thread; Windows shows its
 /// message box directly from the menu handler) and/or quit. Called every frame
-/// from `OverlayApp::update`.
-pub fn poll_tray_events(ctx: &eframe::egui::Context) {
+/// from `OverlayApp::update`. Returns the model profile index picked in the
+/// "Model" submenu since the last poll, if any.
+pub fn poll_tray_events(ctx: &eframe::egui::Context) -> Option<usize> {
     #[cfg(target_os = "macos")]
     if TRAY_ABOUT_REQUESTED.swap(false, Ordering::SeqCst) {
         macos::show_about();
     }
+    let selected = match TRAY_MODEL_SELECTED.swap(NO_MODEL_SELECTED, Ordering::SeqCst) {
+        NO_MODEL_SELECTED => None,
+        index => Some(index),
+    };
     if TRAY_LAUNCH_AT_LOGIN_REVERT.swap(false, Ordering::SeqCst) {
         // Re-query reality rather than assuming "not target" — a concurrent
         // successful toggle could have landed between the failed attempt and
@@ -426,6 +527,7 @@ pub fn poll_tray_events(ctx: &eframe::egui::Context) {
         tracing::info!("quit requested from tray menu");
         ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
     }
+    selected
 }
 
 /// Show a native, modal alert with the given title and message, blocking until

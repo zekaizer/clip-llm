@@ -296,6 +296,8 @@ const DEFAULT_TRANSCRIBE_PROMPT: &str =
 #[serde(default)]
 pub struct Config {
     api: ApiConfig,
+    /// `[[models]]` — additional model profiles selectable at runtime.
+    models: Vec<ModelProfile>,
     generation: GenerationConfig,
     telemetry: TelemetryConfig,
     hotkey: HotkeyConfig,
@@ -344,6 +346,43 @@ struct ApiConfig {
     streaming: Option<bool>,
     /// `[api.headers]` — custom HTTP headers (alternative to `CLIP_LLM_CUSTOM_HEADERS`).
     headers: BTreeMap<String, String>,
+}
+
+/// One `[[models]]` entry: a selectable connection profile with the same keys
+/// as `[api]` (minus `streaming`, which stays global) plus optional per-model
+/// generation caps. No `CLIP_LLM_*` override applies to these.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ModelProfile {
+    /// Display name in the tray/overlay; defaults to `model`.
+    name: Option<String>,
+    provider: Option<String>,
+    endpoint: Option<String>,
+    model: Option<String>,
+    api_key: Option<String>,
+    auth_file: Option<String>,
+    headers: BTreeMap<String, String>,
+    /// Overrides `[generation].max_tokens` for this profile.
+    max_tokens: Option<u32>,
+    /// Overrides `[generation].token_budget` for this profile.
+    token_budget: Option<u32>,
+}
+
+/// A resolved model profile: what the API client needs to connect to one
+/// backend. Built from `[api]` (with `from_api_section = true`, the only spec
+/// the `CLIP_LLM_*` environment variables apply to) or from a `[[models]]` entry.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ModelSpec {
+    pub name: String,
+    pub provider: Option<String>,
+    pub endpoint: Option<String>,
+    pub model: Option<String>,
+    pub api_key: Option<String>,
+    pub auth_file: Option<String>,
+    pub headers: BTreeMap<String, String>,
+    pub max_tokens: Option<u32>,
+    pub token_budget: Option<u32>,
+    pub from_api_section: bool,
 }
 
 /// `[generation]` — request parameters. These have no environment-variable
@@ -524,6 +563,59 @@ fn parse_mode_name(raw: &str) -> Option<ProcessMode> {
 }
 
 impl Config {
+    /// All selectable model profiles in display order: the `[api]` section
+    /// first (when it names a model, or when no `[[models]]` exist so the
+    /// `CLIP_LLM_*` variables can still fill it), then each `[[models]]` entry.
+    /// `Err` names a `[[models]]` entry without `model` or a duplicated name.
+    pub fn model_specs(&self) -> Result<Vec<ModelSpec>, String> {
+        let mut specs = Vec::with_capacity(self.models.len() + 1);
+        if self.models.is_empty() || self.api.model.is_some() {
+            specs.push(ModelSpec {
+                name: self.api.model.clone().unwrap_or_else(|| "default".to_string()),
+                provider: self.api.provider.clone(),
+                endpoint: self.api.endpoint.clone(),
+                model: self.api.model.clone(),
+                api_key: self.api.api_key.clone(),
+                auth_file: self.api.auth_file.clone(),
+                headers: self.api.headers.clone(),
+                max_tokens: None,
+                token_budget: None,
+                from_api_section: true,
+            });
+        }
+        for (i, m) in self.models.iter().enumerate() {
+            let model = m
+                .model
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| format!("[[models]] entry #{} has no `model`", i + 1))?;
+            let name = m
+                .name
+                .clone()
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or_else(|| model.clone());
+            specs.push(ModelSpec {
+                name,
+                provider: m.provider.clone(),
+                endpoint: m.endpoint.clone(),
+                model: Some(model),
+                api_key: m.api_key.clone(),
+                auth_file: m.auth_file.clone(),
+                headers: m.headers.clone(),
+                max_tokens: m.max_tokens,
+                token_budget: m.token_budget,
+                from_api_section: false,
+            });
+        }
+        let mut seen = std::collections::HashSet::new();
+        for spec in &specs {
+            if !seen.insert(spec.name.as_str()) {
+                return Err(format!("duplicate model profile name \"{}\"", spec.name));
+            }
+        }
+        Ok(specs)
+    }
+
     /// Configured API provider, if any (`[api].provider`).
     pub fn api_provider(&self) -> Option<&str> {
         self.api.provider.as_deref()
@@ -1304,6 +1396,92 @@ mod tests {
             substitute("{primary_lang}->{secondary_lang}", "{secondary_lang}", "English"),
             "{secondary_lang}->English",
         );
+    }
+
+    // --- [[models]] profiles ---
+
+    #[test]
+    fn model_specs_api_only() {
+        let c: Config = toml::from_str(
+            "[api]\nprovider = \"openai\"\nendpoint = \"http://h/v1\"\nmodel = \"m\"\napi_key = \"k\"\n",
+        )
+        .unwrap();
+        let specs = c.model_specs().unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].name, "m");
+        assert!(specs[0].from_api_section);
+        assert_eq!(specs[0].model.as_deref(), Some("m"));
+        assert_eq!(specs[0].endpoint.as_deref(), Some("http://h/v1"));
+        assert_eq!(specs[0].api_key.as_deref(), Some("k"));
+    }
+
+    #[test]
+    fn model_specs_api_then_profiles_in_order() {
+        let c: Config = toml::from_str(
+            r#"
+[api]
+model = "grok-4.3"
+provider = "grok-oauth"
+
+[[models]]
+name = "groq"
+provider = "openai"
+endpoint = "https://api.groq.com/openai/v1"
+model = "qwen/qwen3-32b"
+api_key = "gsk"
+max_tokens = 40960
+token_budget = 6000
+
+[[models]]
+model = "gemma-4-31b-it"
+endpoint = "https://g/v1beta/openai"
+api_key = "AQ"
+[models.headers]
+X-Test = "1"
+"#,
+        )
+        .unwrap();
+        let specs = c.model_specs().unwrap();
+        let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["grok-4.3", "groq", "gemma-4-31b-it"]);
+        assert!(specs[0].from_api_section);
+        assert_eq!(specs[0].provider.as_deref(), Some("grok-oauth"));
+        assert!(!specs[1].from_api_section);
+        assert_eq!(specs[1].max_tokens, Some(40960));
+        assert_eq!(specs[1].token_budget, Some(6000));
+        assert_eq!(specs[2].provider, None, "provider defaults later, at client build");
+        assert_eq!(specs[2].headers.get("X-Test").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn model_specs_skip_api_section_without_model_when_profiles_exist() {
+        let c: Config =
+            toml::from_str("[api]\nstreaming = false\n[[models]]\nname = \"a\"\nmodel = \"x\"\n")
+                .unwrap();
+        let specs = c.model_specs().unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].name, "a");
+        assert!(!specs[0].from_api_section);
+    }
+
+    #[test]
+    fn model_specs_keep_env_only_api_section() {
+        // Nothing configured: the [api] spec still exists so CLIP_LLM_* can fill it.
+        let specs = Config::default().model_specs().unwrap();
+        assert_eq!(specs.len(), 1);
+        assert!(specs[0].from_api_section);
+        assert_eq!(specs[0].name, "default");
+    }
+
+    #[test]
+    fn model_specs_reject_duplicate_names_and_missing_model() {
+        let dup: Config = toml::from_str(
+            "[[models]]\nname = \"a\"\nmodel = \"x\"\n[[models]]\nname = \"a\"\nmodel = \"y\"\n",
+        )
+        .unwrap();
+        assert!(dup.model_specs().unwrap_err().contains("\"a\""));
+        let no_model: Config = toml::from_str("[[models]]\nname = \"a\"\n").unwrap();
+        assert!(no_model.model_specs().unwrap_err().contains("model"));
     }
 
     #[test]

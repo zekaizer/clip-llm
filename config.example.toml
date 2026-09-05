@@ -42,6 +42,25 @@ streaming = true                          # set false to disable SSE (like CLIP_
 # X-Dep-Ticket = "abc"
 # User-Id = "u1"
 
+# Additional model profiles, selectable at runtime from the tray "Model" submenu
+# (or by clicking the model name under a result). Same keys as [api] — minus
+# `streaming`, which stays global — plus optional per-profile generation caps.
+# [api] above is the first profile (and the only one CLIP_LLM_* variables
+# apply to); the first profile is active at startup.
+# [[models]]
+# name         = "groq-qwen"                       # display label (defaults to `model`)
+# provider     = "openai"
+# endpoint     = "https://api.groq.com/openai/v1"
+# model        = "qwen/qwen3-32b"
+# api_key      = "gsk_..."
+# max_tokens   = 40960                             # overrides [generation].max_tokens for this profile
+# token_budget = 6000                              # overrides [generation].token_budget (Groq TPM cap)
+#
+# [[models]]
+# name     = "grok"
+# provider = "grok-oauth"
+# model    = "grok-4.3"
+
 # Request/generation parameters. No environment-variable equivalent; each falls
 # back to the built-in default shown below when omitted.
 [generation]

@@ -131,6 +131,8 @@ pub enum UiEvent {
     UserChangeThinkingMode(ThinkingMode),
     /// Worker reported thinking probe result.
     ThinkingProbeResult(bool),
+    /// User picked another model profile (tray submenu or overlay badge).
+    UserSelectModel(usize),
     /// User started dragging the overlay.
     UserStartDrag,
     /// Window gained focus.
@@ -163,6 +165,8 @@ pub enum UiEffect {
         request_id: u64,
     },
     SendCancel,
+    /// Switch the worker's active model profile before any further request.
+    SelectModel(usize),
     WriteClipboard(String),
     ShowWindow,
     /// Show the overlay WITHOUT taking keyboard focus (used during capture so the
@@ -231,6 +235,8 @@ pub struct StateMachine {
     /// Where the current content came from (selection capture vs clipboard
     /// read). Set on every trigger; shown as a badge in the overlay (#50).
     source: CaptureSource,
+    /// Index of the active model profile (worker-side pool order).
+    active_model: usize,
 }
 
 impl StateMachine {
@@ -255,6 +261,7 @@ impl StateMachine {
             result_incomplete: None,
             auto_copy: false,
             pinned: false,
+            active_model: 0,
             source: CaptureSource::Clipboard,
         }
     }
@@ -327,6 +334,11 @@ impl StateMachine {
             .map_or(&[][..], |c| c.files.as_slice())
     }
 
+    /// Active model profile index.
+    pub fn active_model(&self) -> usize {
+        self.active_model
+    }
+
     pub fn capture_source(&self) -> CaptureSource {
         self.source
     }
@@ -378,6 +390,7 @@ impl StateMachine {
             UiEvent::UserChangeRephraseStyle(style) => self.on_change_rephrase_style(style),
             UiEvent::UserChangeRephraseLength(length) => self.on_change_rephrase_length(length),
             UiEvent::UserChangeThinkingMode(mode) => self.on_change_thinking_mode(mode),
+            UiEvent::UserSelectModel(index) => self.on_select_model(index),
             UiEvent::ThinkingProbeResult(supported) => {
                 self.thinking_supported = supported;
                 vec![]
@@ -530,6 +543,19 @@ impl StateMachine {
         self.retry_notice = None;
         self.streaming_text.push_str(&text);
         vec![]
+    }
+
+    fn on_select_model(&mut self, index: usize) -> Vec<UiEffect> {
+        if index == self.active_model {
+            return vec![];
+        }
+        self.active_model = index;
+        // Answers are model-specific: drop them so switching back re-asks
+        // instead of serving the other model's reply from the cache.
+        self.cache.clear();
+        let mut effects = vec![UiEffect::SelectModel(index)];
+        effects.extend(self.reprocess_or_cache());
+        effects
     }
 
     fn on_retry_scheduled(&mut self, request_id: u64, label: String) -> Vec<UiEffect> {
@@ -1834,6 +1860,66 @@ mod tests {
     }
 
     // === Streaming text ===
+
+    // --- UserSelectModel: switching the model profile ---
+
+    #[test]
+    fn select_model_when_hidden_only_switches() {
+        let mut sm = new_sm();
+        assert_eq!(sm.active_model(), 0);
+        let effects = sm.handle(UiEvent::UserSelectModel(2));
+        assert_eq!(effects, vec![UiEffect::SelectModel(2)]);
+        assert_eq!(sm.active_model(), 2);
+        assert!(matches!(sm.state(), OverlayState::Hidden));
+        assert!(sm.handle(UiEvent::UserSelectModel(2)).is_empty(), "same model is a no-op");
+    }
+
+    #[test]
+    fn select_model_in_result_reprocesses_with_fresh_cache() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+        sm.handle(UiEvent::WorkerResult {
+            text: "old".into(),
+            think_content: None,
+            request_id: rid,
+            incomplete: None,
+        });
+
+        let effects = sm.handle(UiEvent::UserSelectModel(1));
+        let select = effects.iter().position(|e| matches!(e, UiEffect::SelectModel(1)));
+        let send = effects.iter().position(|e| matches!(e, UiEffect::SendProcess { .. }));
+        assert!(select.is_some() && send.is_some(), "{effects:?}");
+        assert!(select < send, "worker must switch before it receives the request");
+        assert!(matches!(sm.state(), OverlayState::Processing));
+        assert_ne!(last_request_id(&effects), rid);
+
+        // Switching back must not serve model 1's (or the old) cached answer.
+        let effects = sm.handle(UiEvent::UserSelectModel(0));
+        assert!(effects.iter().any(|e| matches!(e, UiEffect::SendProcess { .. })));
+        assert!(matches!(sm.state(), OverlayState::Processing));
+    }
+
+    #[test]
+    fn select_model_while_processing_cancels_and_resends() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        let rid = last_request_id(&effects);
+        let effects = sm.handle(UiEvent::UserSelectModel(1));
+        assert!(effects.contains(&UiEffect::SelectModel(1)));
+        assert!(effects.contains(&UiEffect::SendCancel));
+        assert!(effects.iter().any(|e| matches!(e, UiEffect::SendProcess { .. })));
+        assert_ne!(last_request_id(&effects), rid);
+    }
+
+    #[test]
+    fn select_model_survives_hide() {
+        let mut sm = new_sm();
+        sm.handle(UiEvent::UserSelectModel(1));
+        start_processing(&mut sm, "hello");
+        sm.handle(UiEvent::UserClose);
+        assert_eq!(sm.active_model(), 1, "the model choice is a session setting, not per-trigger");
+    }
 
     // --- RetryScheduled: automatic-retry status in Processing ---
 
