@@ -118,6 +118,10 @@ pub enum OverlayAction {
     /// The resize grip was dragged; the new panel (frame) size, already
     /// clamped to `MIN_USER_PANEL`.
     Resize(egui::Vec2),
+    /// The grip drag ended (the size is final — persist it).
+    ResizeDone,
+    /// The grip was double-clicked: back to auto-sizing.
+    ResetSize,
 }
 
 pub struct OverlayOutput {
@@ -321,8 +325,9 @@ pub fn render(
                     OverlayState::Hidden | OverlayState::Capturing => unreachable!(),
                 }
             });
-            if let Some(size) = render_resize_grip(ui, frame_resp.response.rect) {
-                action = OverlayAction::Resize(size);
+            let grip_action = render_resize_grip(ui, frame_resp.response.rect);
+            if !matches!(grip_action, OverlayAction::None) {
+                action = grip_action;
             }
         });
 
@@ -374,15 +379,17 @@ pub fn render(
 }
 
 /// Resize grip in the frame's bottom-right corner (inside the margin, where
-/// no content is drawn). Returns the new panel size while it is dragged.
-fn render_resize_grip(ui: &mut egui::Ui, frame_rect: egui::Rect) -> Option<egui::Vec2> {
+/// no content is drawn): drag = `Resize` (new panel size) then `ResizeDone`
+/// on release, double-click = `ResetSize`.
+fn render_resize_grip(ui: &mut egui::Ui, frame_rect: egui::Rect) -> OverlayAction {
     let grip_rect = egui::Rect::from_min_max(
         frame_rect.max - egui::vec2(RESIZE_GRIP_SIZE, RESIZE_GRIP_SIZE),
         frame_rect.max,
     );
     let resp = ui
-        .interact(grip_rect, ui.id().with("resize_grip"), egui::Sense::drag())
-        .on_hover_cursor(egui::CursorIcon::ResizeSouthEast);
+        .interact(grip_rect, ui.id().with("resize_grip"), egui::Sense::click_and_drag())
+        .on_hover_cursor(egui::CursorIcon::ResizeSouthEast)
+        .on_hover_text("Drag to resize \u{b7} double-click to auto-size");
     let color = if resp.hovered() || resp.dragged() {
         egui::Color32::from_gray(170)
     } else {
@@ -397,14 +404,17 @@ fn render_resize_grip(ui: &mut egui::Ui, frame_rect: egui::Rect) -> Option<egui:
         painter.circle_filled(corner - egui::vec2(0.0, offset), 1.2, color);
     }
     painter.circle_filled(corner - egui::vec2(4.0, 4.0), 1.2, color);
-    if !resp.dragged() {
-        return None;
+    if resp.double_clicked() {
+        return OverlayAction::ResetSize;
+    }
+    if resp.drag_stopped() {
+        return OverlayAction::ResizeDone;
     }
     let delta = resp.drag_delta();
-    if delta == egui::Vec2::ZERO {
-        return None;
+    if !resp.dragged() || delta == egui::Vec2::ZERO {
+        return OverlayAction::None;
     }
-    Some((frame_rect.size() + delta).max(MIN_USER_PANEL))
+    OverlayAction::Resize((frame_rect.size() + delta).max(MIN_USER_PANEL))
 }
 
 /// The translucent rounded panel every overlay view is drawn in.

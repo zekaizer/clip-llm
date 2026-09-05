@@ -235,10 +235,11 @@ pub struct OverlayApp {
     /// pins a completely different request — the next Processing→Result
     /// transition re-latches on its own.
     result_latch: Option<ResultLatch>,
-    /// Screen top-left of the window when the resize grip was first dragged;
-    /// re-asserted after every user resize (platforms anchor a programmatic
+    /// Screen top-left of the window when the current grip drag started;
+    /// re-asserted after every size step (platforms anchor a programmatic
     /// resize at the center or bottom-left, which would slide the grip out
-    /// from under the cursor). Lives while `StateMachine::user_size` does.
+    /// from under the cursor). Lives for the drag gesture only — afterwards
+    /// the user owns placement like after a window drag.
     resize_anchor: Option<egui::Pos2>,
     /// Whether the think block section is expanded in the Result state.
     think_expanded: bool,
@@ -1611,9 +1612,6 @@ impl OverlayApp {
         content_size: Option<egui::Vec2>,
     ) {
         self.last_content_size = content_size;
-        if self.sm.user_size().is_none() {
-            self.resize_anchor = None;
-        }
         let Some(size) = desired else { return };
         if self.last_desired_size != Some(size) {
             self.last_desired_size = Some(size);
@@ -1663,6 +1661,11 @@ impl OverlayApp {
                 }
                 UiEvent::UserResize { width: size.x, height: size.y }
             }
+            overlay::OverlayAction::ResizeDone => {
+                self.resize_anchor = None;
+                return;
+            }
+            overlay::OverlayAction::ResetSize => UiEvent::UserResetSize,
             overlay::OverlayAction::SwitchMode(mode) => UiEvent::UserSwitchMode(mode),
             overlay::OverlayAction::ToggleThink => {
                 self.think_expanded = !self.think_expanded;
@@ -2864,10 +2867,11 @@ mod tests {
         assert_eq!(app.resize_anchor, Some(egui::pos2(100.0, 200.0)));
     }
 
-    /// The anchor lives exactly as long as the user size: a new trigger resets
-    /// the size in the state machine and the next viewport pass drops the anchor.
+    /// The anchor lives for the drag gesture: releasing the grip drops it, so
+    /// the next trigger centers the (still fixed-size) window on the new
+    /// spawn point instead of reusing a stale corner.
     #[test]
-    fn next_trigger_drops_the_resize_anchor() {
+    fn releasing_the_grip_drops_the_resize_anchor() {
         let _lock = crate::clipboard::test_support::lock_clipboard();
         let (mut app, _resp_tx) = new_test_app();
         let ctx = egui::Context::default();
@@ -2881,12 +2885,11 @@ mod tests {
         app.update_viewport(&ctx, Some(egui::vec2(680.0, 460.0)), Some(egui::vec2(640.0, 420.0)));
         assert!(app.resize_anchor.is_some());
 
-        app.sm_handle(UiEvent::ContentReady {
-            content: crate::ClipboardContent::text_only("next".into()),
-            auto_copy: true,
-        });
-        assert_eq!(app.sm.user_size(), None);
-        app.update_viewport(&ctx, Some(egui::vec2(520.0, 200.0)), Some(egui::vec2(480.0, 160.0)));
+        app.handle_overlay_action(&ctx, overlay::OverlayAction::ResizeDone);
         assert!(app.resize_anchor.is_none());
+        assert_eq!(app.sm.user_size(), Some((640.0, 420.0)), "the size itself stays");
+
+        app.handle_overlay_action(&ctx, overlay::OverlayAction::ResetSize);
+        assert_eq!(app.sm.user_size(), None);
     }
 }
