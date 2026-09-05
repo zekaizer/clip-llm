@@ -1027,6 +1027,18 @@ fn starter_template() -> String {
     t.push_str("# X-Dep-Ticket = \"abc\"\n");
     t.push_str("# User-Id = \"u1\"\n\n");
 
+    // [[models]] — extra profiles, selectable from the tray "Model" submenu.
+    t.push_str("# Additional model profiles (same keys as [api], plus name/max_tokens/token_budget).\n");
+    t.push_str("# [api] is the first profile; switch in the tray \"Model\" submenu or by clicking\n");
+    t.push_str("# the model name under a result.\n");
+    t.push_str("# [[models]]\n");
+    t.push_str("# name     = \"groq-qwen\"\n");
+    t.push_str("# provider = \"openai\"\n");
+    t.push_str("# endpoint = \"https://api.groq.com/openai/v1\"\n");
+    t.push_str("# model    = \"qwen/qwen3-32b\"\n");
+    t.push_str("# api_key  = \"gsk_...\"\n");
+    t.push_str("# token_budget = 6000\n\n");
+
     // [generation] — no env-var equivalent.
     t.push_str("# [generation]\n");
     t.push_str(&r("temperature", "0.1", "sampling temperature (0.0–2.0)"));
