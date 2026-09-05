@@ -29,7 +29,7 @@ fn startup_falls_back_to_defaults_on_invalid_toml() {
     // The load outcome reflects the failure, carrying the offending path
     // alongside a generic (file-content-free) reason.
     assert_eq!(
-        *config::load_outcome(),
+        config::load_outcome(),
         config::LoadOutcome::Failed { path: path.clone(), reason: "invalid TOML" }
     );
 

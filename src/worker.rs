@@ -18,9 +18,9 @@ const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// Runtime configuration resolved from environment variables once at worker startup.
 #[derive(Copy, Clone)]
 struct WorkerConfig {
-    /// Use streaming SSE API. Disabled by setting `CLIP_LLM_NO_STREAM`, else taken
-    /// from the config `[api].streaming` (default true).
-    streaming: bool,
+    /// `CLIP_LLM_NO_STREAM` was set: streaming is forced off regardless of the
+    /// (reloadable) `[api].streaming` setting, which is read per request.
+    force_no_stream: bool,
     /// Use mock LLM responses for diagnostics. Enabled by setting `DIAG_MOCK`.
     #[cfg(feature = "diagnostics")]
     use_mock: bool,
@@ -40,6 +40,9 @@ pub enum WorkerCommand {
     Cancel,
     /// Make the model profile at this pool index the target of later requests.
     SelectModel(usize),
+    /// Replace every profile's client (config reload); the active index is kept
+    /// when still in range.
+    ReloadClients(Vec<LlmClient>),
 }
 
 /// The worker's model profiles with one active selection.
@@ -60,6 +63,15 @@ impl<T> ModelPool<T> {
 
     pub fn active_index(&self) -> usize {
         self.active
+    }
+
+    /// Swap in new items, keeping the active index when it is still in range
+    /// (else the first item). `items` must be non-empty.
+    pub fn replace(&mut self, items: Vec<T>) {
+        if self.active >= items.len() {
+            self.active = 0;
+        }
+        self.items = items;
     }
 
     /// Switch the active item; false (and no change) for an out-of-range index.
@@ -713,6 +725,9 @@ fn dispatch_process(
 
     let text_len = task.content.text.as_ref().map_or(0, |t| t.len());
     let img_count = task.content.images.len();
+    // Precedence: CLIP_LLM_NO_STREAM (forces off) > config > default on. Read
+    // per request so a config reload applies without a restart.
+    let streaming = !config.force_no_stream && crate::config::get().api_streaming().unwrap_or(true);
 
     // One span per request: every log emitted while the request runs inherits
     // these fields, so a request can be filtered/correlated end to end in the
@@ -721,7 +736,7 @@ fn dispatch_process(
         "request",
         request_id = task.request_id,
         mode = task.mode.label(),
-        streaming = config.streaming,
+        streaming,
         text_len,
         img_count,
     );
@@ -737,7 +752,7 @@ fn dispatch_process(
         return;
     }
 
-    if config.streaming {
+    if streaming {
         info!(parent: &span, "worker: starting stream {} ({text_len} chars, {img_count} images)", task.mode.label());
         tokio::spawn(run_streaming(llm, task, resp_tx, c_rx).instrument(span));
     } else {
@@ -797,11 +812,7 @@ pub fn spawn_worker(
         // Read env vars once at thread start — no async context needed.
         // Precedence: CLIP_LLM_NO_STREAM (when set, forces off) > config > default on.
         let config = WorkerConfig {
-            streaming: if std::env::var("CLIP_LLM_NO_STREAM").is_ok() {
-                false
-            } else {
-                crate::config::get().api_streaming().unwrap_or(true)
-            },
+            force_no_stream: std::env::var("CLIP_LLM_NO_STREAM").is_ok(),
             #[cfg(feature = "diagnostics")]
             use_mock: std::env::var("DIAG_MOCK").is_ok(),
         };
@@ -832,6 +843,15 @@ pub fn spawn_worker(
                     // An in-flight request keeps its own client clone, so the
                     // switch only affects later requests; the UI cancels/resends
                     // on its own when it wants the new model to answer.
+                    WorkerCommand::ReloadClients(clients) => {
+                        if clients.is_empty() {
+                            warn!("worker: ignoring empty client reload");
+                        } else {
+                            pool.replace(clients);
+                            info!("worker: reloaded {} model profile(s), active #{} ({})", pool.items.len(), pool.active_index(), pool.active().label());
+                            spawn_probe(pool.active().clone(), pool.active_index(), &resp_tx, &ctx);
+                        }
+                    }
                     WorkerCommand::SelectModel(index) => {
                         if pool.select(index) {
                             info!("worker: active model profile -> #{index} ({})", pool.active().label());
@@ -945,6 +965,18 @@ mod tests {
             }
             other => panic!("expected Complete, got {:?}", variant_name(&other)),
         }
+    }
+
+    #[test]
+    fn model_pool_replace_keeps_or_clamps_active() {
+        let mut pool = ModelPool::new(vec!["a", "b", "c"]);
+        assert!(pool.select(2));
+        pool.replace(vec!["x", "y", "z"]);
+        assert_eq!(pool.active_index(), 2);
+        assert_eq!(*pool.active(), "z");
+        pool.replace(vec!["only"]);
+        assert_eq!(pool.active_index(), 0, "out-of-range selection falls back to the first");
+        assert_eq!(*pool.active(), "only");
     }
 
     #[test]

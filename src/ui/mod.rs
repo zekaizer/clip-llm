@@ -68,6 +68,36 @@ fn format_completion_status(debug: &crate::DebugCapture) -> Option<String> {
     Some(out)
 }
 
+/// Result of a tray-triggered config reload, for the tray Config row and the
+/// overlay notice.
+#[derive(Debug, Clone, PartialEq)]
+enum ReloadOutcome {
+    Applied {
+        path: std::path::PathBuf,
+        /// Startup-only settings that changed and still need a restart.
+        restart_needed: Vec<&'static str>,
+        /// The set of model profiles changed; the old clients stay in use.
+        models_changed: bool,
+    },
+    Failed(&'static str),
+}
+
+/// One line describing a reload outcome.
+fn format_reload_status(outcome: &ReloadOutcome) -> String {
+    match outcome {
+        ReloadOutcome::Applied { models_changed: true, .. } => {
+            "Config: reloaded \u{2014} model profiles not rebuilt (restart to apply them)".to_string()
+        }
+        ReloadOutcome::Applied { restart_needed, .. } if !restart_needed.is_empty() => {
+            format!("Config: reloaded \u{2014} restart to apply {}", restart_needed.join(", "))
+        }
+        ReloadOutcome::Applied { path, .. } => format!("Config: reloaded ({})", path.display()),
+        ReloadOutcome::Failed(reason) => {
+            format!("Config: reload failed ({reason}) \u{2014} keeping the previous settings")
+        }
+    }
+}
+
 /// Status text for an automatic retry, shown in place of the Processing label.
 fn format_retry_label(
     attempt: u32,
@@ -140,9 +170,9 @@ pub struct OverlayApp {
     /// One-shot startup notice (e.g. a failed config load) surfaced via the
     /// error overlay on the first frame after the initial hide settles.
     startup_notice: Option<String>,
-    /// Number of selectable model profiles; >1 makes the Result status label a
-    /// "switch model" control.
-    model_count: usize,
+    /// Labels of the selectable model profiles in worker pool order; more than
+    /// one makes the Result status label a "switch model" control.
+    model_names: Vec<String>,
     /// Tap events from coordinator thread (hotkey detection runs off-UI).
     tap_rx: mpsc::Receiver<TapEvent>,
     /// Cached desired_size to avoid redundant send_viewport_cmd calls.
@@ -285,7 +315,7 @@ impl OverlayApp {
             initial_hide_done: false,
             pending_taskbar_exclude: false,
             startup_notice: None,
-            model_count: 1,
+            model_names: Vec::new(),
             tap_rx,
             last_desired_size: None,
             last_content_size: None,
@@ -339,7 +369,7 @@ impl OverlayApp {
             initial_hide_done: false,
             pending_taskbar_exclude: false,
             startup_notice: None,
-            model_count: 1,
+            model_names: Vec::new(),
             tap_rx,
             last_desired_size: None,
             last_content_size: None,
@@ -377,10 +407,60 @@ impl OverlayApp {
         self
     }
 
-    /// Number of model profiles the worker can switch between (≥ 1).
-    pub fn with_model_count(mut self, count: usize) -> Self {
-        self.model_count = count.max(1);
+    /// Labels of the model profiles the worker can switch between, pool order.
+    pub fn with_model_names(mut self, names: Vec<String>) -> Self {
+        self.model_names = names;
         self
+    }
+
+    fn model_count(&self) -> usize {
+        self.model_names.len().max(1)
+    }
+
+    /// Tray "Reload Config": re-read the file, swap it in, rebuild the model
+    /// clients when the profile set is unchanged, and report via the tray
+    /// Config row (plus the overlay notice on failure).
+    fn reload_config(&mut self, ctx: &egui::Context) {
+        let previous = crate::config::get();
+        let outcome = match crate::config::reload() {
+            Err(reason) => ReloadOutcome::Failed(reason),
+            Ok(path) => {
+                let current = crate::config::get();
+                let restart_needed = previous.restart_required_changes(&current);
+                let rebuilt = current
+                    .model_specs()
+                    .map_err(crate::ApiError::InvalidConfig)
+                    .and_then(|specs| crate::api::client::build_profiles(&specs));
+                let models_changed = match rebuilt {
+                    Ok(set) if set.labels() == self.model_names => {
+                        let _ = self.cmd_tx.send(WorkerCommand::ReloadClients(set.clients));
+                        false
+                    }
+                    Ok(set) => {
+                        warn!(
+                            "config reload: model profiles changed ({:?} -> {:?}); restart to apply",
+                            self.model_names,
+                            set.labels()
+                        );
+                        true
+                    }
+                    Err(e) => {
+                        warn!("config reload: model profiles not rebuilt: {e}");
+                        true
+                    }
+                };
+                ReloadOutcome::Applied { path, restart_needed, models_changed }
+            }
+        };
+        let line = format_reload_status(&outcome);
+        info!("{line}");
+        crate::platform::update_tray_config(&line);
+        if matches!(outcome, ReloadOutcome::Failed(_)) {
+            // Failure needs attention now; success is visible in the tray row.
+            self.capture_mouse_position();
+            let effects = self.sm_handle(UiEvent::ClipboardError(line));
+            self.execute_effects(effects, ctx);
+        }
     }
 
     /// Apply a model-profile choice from the tray or the overlay.
@@ -1260,7 +1340,7 @@ impl OverlayApp {
             overlay::OverlayAction::TogglePin => UiEvent::UserTogglePin,
             overlay::OverlayAction::Retry => UiEvent::UserRetry,
             overlay::OverlayAction::CycleModel => {
-                let next = (self.sm.active_model() + 1) % self.model_count;
+                let next = (self.sm.active_model() + 1) % self.model_count();
                 self.select_model(ctx, next);
                 return;
             }
@@ -1457,7 +1537,7 @@ impl eframe::App for OverlayApp {
             elapsed,
             self.last_debug.is_some(),
             self.last_debug.as_ref().and_then(format_completion_status),
-            self.model_count > 1,
+            self.model_count() > 1,
             self.result_latch.map(|l| l.min_content_height),
             ctx,
         );
@@ -1485,8 +1565,10 @@ impl eframe::App for OverlayApp {
             self.diag.flush_pending_if_stale();
         }
 
-        if let Some(index) = crate::platform::poll_tray_events(ctx) {
-            self.select_model(ctx, index);
+        match crate::platform::poll_tray_events(ctx) {
+            Some(crate::platform::TrayAction::SelectModel(index)) => self.select_model(ctx, index),
+            Some(crate::platform::TrayAction::ReloadConfig) => self.reload_config(ctx),
+            None => {}
         }
 
         // Focus-loss auto-hide (skip during diagnostics).
@@ -2129,6 +2211,34 @@ mod tests {
         assert_eq!(app.req_ok, 1);
         assert_eq!(app.req_err, 0);
         assert!(app.last_debug.is_some(), "current completion's debug snapshot must surface");
+    }
+
+    // --- format_reload_status: tray Config row after "Reload Config" ---
+
+    #[test]
+    fn reload_status_lines() {
+        let path = std::path::PathBuf::from("/x/config.toml");
+        let ok = ReloadOutcome::Applied { path: path.clone(), restart_needed: vec![], models_changed: false };
+        assert_eq!(format_reload_status(&ok), "Config: reloaded (/x/config.toml)");
+        let restart = ReloadOutcome::Applied {
+            path: path.clone(),
+            restart_needed: vec!["[ui].tabs", "[hotkey]"],
+            models_changed: false,
+        };
+        assert_eq!(
+            format_reload_status(&restart),
+            "Config: reloaded \u{2014} restart to apply [ui].tabs, [hotkey]"
+        );
+        let models = ReloadOutcome::Applied { path, restart_needed: vec![], models_changed: true };
+        assert_eq!(
+            format_reload_status(&models),
+            "Config: reloaded \u{2014} model profiles not rebuilt (restart to apply them)"
+        );
+        let failed = ReloadOutcome::Failed("invalid TOML");
+        assert_eq!(
+            format_reload_status(&failed),
+            "Config: reload failed (invalid TOML) \u{2014} keeping the previous settings"
+        );
     }
 
     // --- friendly_clipboard_error: file-list clipboard messages ---

@@ -31,7 +31,7 @@ fn startup_loads_override_from_env_path() {
     config::init();
 
     // The load outcome reflects the successful load, including the source path.
-    assert_eq!(*config::load_outcome(), config::LoadOutcome::Loaded(path.clone()));
+    assert_eq!(config::load_outcome(), config::LoadOutcome::Loaded(path.clone()));
     // The candidate path follows the CLIP_LLM_CONFIG override.
     assert_eq!(config::candidate_path().as_deref(), Some(path.as_path()));
 
