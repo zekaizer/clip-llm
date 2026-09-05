@@ -1398,6 +1398,7 @@ impl LlmClient {
         // base64 image payloads so the snapshot (and the DEBUG log below) stay
         // readable. Auth lives in headers, not the body, so no secret is stored.
         capture.endpoint = Some(inner.endpoint.clone());
+        capture.model = Some(inner.model.clone());
         if let Some(mut value) = body_value {
             sanitize_debug_json(&mut value);
             capture.request = serde_json::to_string_pretty(&value).ok();

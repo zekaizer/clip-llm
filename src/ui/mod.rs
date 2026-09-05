@@ -56,10 +56,33 @@ fn tray_last_label(message: &str) -> String {
 fn format_completion_status(debug: &crate::DebugCapture) -> Option<String> {
     let elapsed_ms = debug.elapsed_ms?;
     let secs = elapsed_ms as f32 / 1000.0;
-    Some(match debug.total_tokens {
-        Some(tokens) => format!("\u{2713} {secs:.1}s \u{b7} {tokens} tokens"),
-        None => format!("\u{2713} {secs:.1}s"),
-    })
+    let mut out = String::new();
+    if let Some(model) = debug.model.as_deref().map(short_model_label).filter(|m| !m.is_empty()) {
+        out.push_str(&model);
+        out.push_str(" \u{b7} ");
+    }
+    out.push_str(&format!("\u{2713} {secs:.1}s"));
+    if let Some(tokens) = debug.total_tokens {
+        out.push_str(&format!(" \u{b7} {tokens} tokens"));
+    }
+    Some(out)
+}
+
+/// Longest model label the Result bottom row shows before eliding — the row
+/// also holds the source badge, the timing summary and three action buttons
+/// within `OVERLAY_WIDTH`.
+const MODEL_LABEL_MAX_CHARS: usize = 24;
+
+/// Shorten a model id for the Result bottom row: drop the org namespace
+/// (`MiniMaxAI/MiniMax-M2.5` → `MiniMax-M2.5`) and cap the length.
+fn short_model_label(model: &str) -> String {
+    let name = model.rsplit('/').next().unwrap_or(model).trim();
+    if name.chars().count() <= MODEL_LABEL_MAX_CHARS {
+        return name.to_string();
+    }
+    let mut out: String = name.chars().take(MODEL_LABEL_MAX_CHARS - 1).collect();
+    out.push('\u{2026}');
+    out
 }
 
 /// Window geometry latched at a Processing→Result/Error transition. See
@@ -2044,6 +2067,47 @@ mod tests {
             format_completion_status(&debug).as_deref(),
             Some("\u{2713} 2.4s \u{b7} 850 tokens"),
         );
+    }
+
+    #[test]
+    fn completion_status_leads_with_model() {
+        let debug = crate::DebugCapture {
+            elapsed_ms: Some(2400),
+            total_tokens: Some(850),
+            model: Some("grok-4.3".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            format_completion_status(&debug).as_deref(),
+            Some("grok-4.3 \u{b7} \u{2713} 2.4s \u{b7} 850 tokens"),
+        );
+    }
+
+    #[test]
+    fn completion_status_shortens_namespaced_model() {
+        let debug = crate::DebugCapture {
+            elapsed_ms: Some(1000),
+            model: Some("MiniMaxAI/MiniMax-M2.5".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            format_completion_status(&debug).as_deref(),
+            Some("MiniMax-M2.5 \u{b7} \u{2713} 1.0s"),
+        );
+    }
+
+    #[test]
+    fn short_model_label_strips_namespace_and_caps_length() {
+        assert_eq!(short_model_label("grok-4.3"), "grok-4.3");
+        assert_eq!(short_model_label("MiniMaxAI/MiniMax-M2.5"), "MiniMax-M2.5");
+        assert_eq!(short_model_label("qwen/qwen3-32b"), "qwen3-32b");
+        // 41 chars after the namespace -> capped to 24 incl. the ellipsis.
+        let long = short_model_label("meta-llama/llama-4-scout-17b-16e-instruct");
+        assert_eq!(long.chars().count(), 24);
+        assert!(long.starts_with("llama-4-scout-17b-16e-i"));
+        assert!(long.ends_with('\u{2026}'));
+        // Empty / whitespace collapses to nothing.
+        assert_eq!(short_model_label("  "), "");
     }
 
     #[test]

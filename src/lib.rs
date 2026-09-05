@@ -26,6 +26,8 @@ use thiserror::Error;
 pub struct DebugCapture {
     /// Target URL the request was sent to.
     pub endpoint: Option<String>,
+    /// Model name the request was sent with (the `model` field of the body).
+    pub model: Option<String>,
     /// Pretty-printed request body JSON. Inline image data URIs are elided to
     /// keep the snapshot readable.
     pub request: Option<String>,
@@ -57,6 +59,7 @@ impl DebugCapture {
     /// Format the capture as a single human-readable block for the clipboard.
     pub fn to_clipboard_text(&self) -> String {
         let endpoint = self.endpoint.as_deref().unwrap_or("(unknown endpoint)");
+        let model = self.model.as_deref().unwrap_or("(unknown)");
         let status = self
             .status
             .map_or_else(|| "(no response)".to_string(), |s| s.to_string());
@@ -71,6 +74,7 @@ impl DebugCapture {
              time:        {timestamp}\n\
              elapsed:     {elapsed}\n\
              endpoint:    POST {endpoint}\n\
+             model:       {model}\n\
              HTTP status: {status}\n"
         );
         if let (Some(p), Some(c), Some(t)) =
@@ -146,6 +150,15 @@ mod debug_capture_tests {
         assert!(!text.contains("--- ERROR ---"));
         // No token-usage line when usage was not captured.
         assert!(!text.contains("tokens:"));
+    }
+
+    #[test]
+    fn to_clipboard_text_shows_model_when_present() {
+        let cap = DebugCapture { model: Some("grok-4.3".into()), ..Default::default() };
+        let text = cap.to_clipboard_text();
+        assert!(text.contains("model:       grok-4.3"));
+        let none = DebugCapture::default().to_clipboard_text();
+        assert!(none.contains("model:       (unknown)"));
     }
 
     #[test]
