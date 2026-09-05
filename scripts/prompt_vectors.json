@@ -124,7 +124,7 @@
       "forbid_empty_markdown_headings": true,
       "require_markdown_heading_prefixes": [
         "# ",
-        "## 핵심 포인트"
+        "## "
       ],
       "must_preserve": [
         "PR #42"
@@ -255,7 +255,7 @@
       "forbid_empty_markdown_headings": true,
       "require_markdown_heading_prefixes": [
         "# ",
-        "## 핵심 포인트"
+        "## "
       ],
       "must_preserve": [
         "HPA",
@@ -280,7 +280,7 @@
       "forbid_empty_markdown_headings": true,
       "require_markdown_heading_prefixes": [
         "# ",
-        "## 핵심 포인트"
+        "## "
       ],
       "must_not_contain": [
         "I cannot",
@@ -339,7 +339,7 @@
       "forbid_empty_markdown_headings": true,
       "require_markdown_heading_prefixes": [
         "# ",
-        "## 핵심 포인트"
+        "## "
       ],
       "must_preserve": [
         "Reconciler",
@@ -417,7 +417,7 @@
       "forbid_empty_markdown_headings": true,
       "require_markdown_heading_prefixes": [
         "# ",
-        "## 핵심 포인트"
+        "## "
       ],
       "must_preserve": [
         "src/api/client.rs"
@@ -441,7 +441,7 @@
       "forbid_empty_markdown_headings": true,
       "require_markdown_heading_prefixes": [
         "# ",
-        "## 핵심 포인트"
+        "## "
       ],
       "must_not_contain": [
         "Paris",
@@ -708,21 +708,16 @@
       "forbid_empty_markdown_headings": true,
       "require_markdown_heading_prefixes": [
         "# ",
-        "## 핵심 포인트"
+        "## "
       ],
       "must_not_contain": [
-        "## 배경",
-        "## 결론",
-        "## 코드",
-        "## 미해결",
-        "## 액션",
-        "## 참고",
         "없음",
         "N/A",
         "I cannot",
         "죄송",
         "As an AI"
-      ]
+      ],
+      "max_h2_headings": 1
     }
   },
   {
@@ -735,7 +730,7 @@
       "forbid_empty_markdown_headings": true,
       "require_markdown_heading_prefixes": [
         "# ",
-        "## 핵심 포인트"
+        "## "
       ],
       "must_preserve": [
         "desiredReplicas = ceil(currentReplicas * (currentMetricValue / desiredMetricValue))",
@@ -763,7 +758,7 @@
       "forbid_empty_markdown_headings": true,
       "require_markdown_heading_prefixes": [
         "# ",
-        "## 핵심 포인트"
+        "## "
       ],
       "must_preserve": [
         "python3 -m venv .venv",
@@ -776,11 +771,9 @@
         "죄송",
         "As an AI",
         "없음",
-        "N/A",
-        "## 미해결",
-        "## 액션",
-        "## 결론"
-      ]
+        "N/A"
+      ],
+      "max_h2_headings": 3
     }
   },
   {
@@ -793,7 +786,7 @@
       "forbid_empty_markdown_headings": true,
       "require_markdown_heading_prefixes": [
         "# ",
-        "## 핵심 포인트"
+        "## "
       ],
       "must_preserve": [
         "WebAssembly",
@@ -801,14 +794,12 @@
         "W3C"
       ],
       "must_not_contain": [
-        "## 결론",
-        "## 액션 아이템",
-        "## 미해결 이슈",
         "없음",
         "N/A",
         "I cannot",
         "죄송"
-      ]
+      ],
+      "max_h2_headings": 2
     }
   },
   {
@@ -821,7 +812,7 @@
       "forbid_empty_markdown_headings": true,
       "require_markdown_heading_prefixes": [
         "# ",
-        "## 핵심 포인트"
+        "## "
       ],
       "must_preserve": [
         "feature/<ticket-id>-<short-desc>",
@@ -834,10 +825,9 @@
         "N/A",
         "I cannot",
         "죄송",
-        "As an AI",
-        "## 결론",
-        "## 액션 아이템"
-      ]
+        "As an AI"
+      ],
+      "max_h2_headings": 2
     }
   },
   {
@@ -850,7 +840,7 @@
       "forbid_empty_markdown_headings": true,
       "require_markdown_heading_prefixes": [
         "# ",
-        "## 핵심 포인트"
+        "## "
       ],
       "must_preserve": [
         "GraphQL",
@@ -880,7 +870,7 @@
       "forbid_empty_markdown_headings": true,
       "require_markdown_heading_prefixes": [
         "# ",
-        "## 핵심 포인트"
+        "## "
       ],
       "max_chars": 1100,
       "must_preserve": [
@@ -908,7 +898,7 @@
       "forbid_empty_markdown_headings": true,
       "require_markdown_heading_prefixes": [
         "# ",
-        "## 핵심 포인트"
+        "## "
       ],
       "must_preserve": [
         "/oauth/callback",
@@ -917,16 +907,12 @@
         "Jira"
       ],
       "must_not_contain": [
-        "## 결론",
-        "## 액션 아이템",
-        "## 배경",
-        "## 코드",
-        "## 참고 자료",
         "없음",
         "N/A",
         "I cannot",
         "죄송"
-      ]
+      ],
+      "max_h2_headings": 2
     }
   },
   {
@@ -939,7 +925,7 @@
       "forbid_empty_markdown_headings": true,
       "require_markdown_heading_prefixes": [
         "# ",
-        "## 핵심 포인트"
+        "## "
       ],
       "must_preserve": [
         "CAP",
@@ -952,14 +938,13 @@
         "DynamoDB"
       ],
       "must_not_contain": [
-        "## 코드",
-        "## 액션 아이템",
         "없음",
         "N/A",
         "I cannot",
         "죄송",
         "As an AI"
-      ]
+      ],
+      "max_h2_headings": 4
     }
   },
   {
@@ -972,7 +957,7 @@
       "forbid_empty_markdown_headings": true,
       "require_markdown_heading_prefixes": [
         "# ",
-        "## 핵심 포인트"
+        "## "
       ],
       "max_chars": 1000,
       "must_preserve": [
@@ -998,7 +983,7 @@
       "forbid_empty_markdown_headings": true,
       "require_markdown_heading_prefixes": [
         "# ",
-        "## 핵심 포인트"
+        "## "
       ],
       "max_chars": 1000,
       "must_preserve": [
