@@ -113,8 +113,9 @@ pub(super) fn fixed_height_row(ui: &mut egui::Ui, height: f32, add_contents: imp
 /// natural height up to `max_height`. Text continuing past the top or bottom
 /// edge is marked with a fade into the frame (#29) — egui's floating
 /// scrollbar only shows on hover, so a full panel would otherwise read as
-/// complete. Views draw body text through `panel::Body::fill_text`, which
-/// supplies the height.
+/// complete. ↑/↓ scroll by a line, PageUp/PageDown/Space by a page, Home/End
+/// to either end (UI-GUIDELINES §4). Views draw body text through
+/// `panel::Body::fill_text`, which supplies the height.
 pub(super) fn scroll_text(
     ui: &mut egui::Ui,
     id_salt: impl std::hash::Hash,
@@ -135,6 +136,13 @@ pub(super) fn scroll_text(
         .stick_to_bottom(stick_to_bottom)
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
         .show(ui, |ui| {
+            // No focused widget means the keys are ours: the panel has no
+            // text fields, and egui only scrolls areas that own the focus.
+            if ui.memory(|m| m.focused().is_none())
+                && let Some(step) = ui.input_mut(|i| keyboard_scroll_step(i, max_height))
+            {
+                ui.scroll_with_delta(egui::vec2(0.0, step));
+            }
             ui.add(
                 egui::Label::new(
                     egui::RichText::new(text).color(text_color).size(font::BODY),
@@ -149,6 +157,25 @@ pub(super) fn scroll_text(
     if bottom {
         paint_fade(ui, out.inner_rect, false);
     }
+}
+
+/// Vertical scroll delta (egui sign: positive moves the content down, i.e.
+/// scrolls up) for the navigation key pressed this frame, consuming it.
+/// `page` is the visible height.
+fn keyboard_scroll_step(input: &mut egui::InputState, page: f32) -> Option<f32> {
+    const LINE: f32 = 40.0;
+    const FAR: f32 = 1.0e6;
+    let none = egui::Modifiers::NONE;
+    let steps: [(egui::Key, egui::Modifiers, f32); 7] = [
+        (egui::Key::ArrowDown, none, -LINE),
+        (egui::Key::ArrowUp, none, LINE),
+        (egui::Key::PageDown, none, -page),
+        (egui::Key::PageUp, none, page),
+        (egui::Key::Space, none, -page),
+        (egui::Key::End, none, -FAR),
+        (egui::Key::Home, none, FAR),
+    ];
+    steps.iter().find(|(key, mods, _)| input.consume_key(*mods, *key)).map(|(_, _, step)| *step)
 }
 
 /// Which scroll edges hide more content: (`top`, `bottom`). A one-pixel
@@ -325,7 +352,33 @@ pub(super) fn pill_row<T: Copy + PartialEq>(
 
 #[cfg(test)]
 mod tests {
-    use super::fade_edges;
+    use super::{fade_edges, keyboard_scroll_step};
+    use eframe::egui;
+
+    fn input_with(key: egui::Key) -> egui::InputState {
+        let raw = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        egui::InputState::default().begin_pass(raw, false, 1.0, egui::InputOptions::default())
+    }
+
+    #[test]
+    fn navigation_keys_scroll_by_line_page_or_to_an_end() {
+        let mut input = input_with(egui::Key::ArrowDown);
+        assert_eq!(keyboard_scroll_step(&mut input, 200.0), Some(-40.0));
+        assert_eq!(keyboard_scroll_step(&mut input, 200.0), None, "consumed");
+        assert_eq!(keyboard_scroll_step(&mut input_with(egui::Key::PageUp), 200.0), Some(200.0));
+        assert_eq!(keyboard_scroll_step(&mut input_with(egui::Key::Space), 200.0), Some(-200.0));
+        assert!(keyboard_scroll_step(&mut input_with(egui::Key::End), 200.0).unwrap() < -1000.0);
+        assert_eq!(keyboard_scroll_step(&mut input_with(egui::Key::Tab), 200.0), None);
+    }
 
     #[test]
     fn fade_marks_only_the_edges_that_hide_content() {
