@@ -103,6 +103,8 @@ pub mod size {
     pub const THINK_MAX_HEIGHT: f32 = 120.0;
     /// Smallest text column ever laid out (guards a degenerate budget).
     pub const MIN_TEXT_HEIGHT: f32 = 24.0;
+    /// Height of the gradient that marks text continuing past a scroll edge.
+    pub const FADE_HEIGHT: f32 = 28.0;
     /// Icon buttons.
     pub const RADIUS_SM: f32 = 4.0;
     /// Pills and text buttons.

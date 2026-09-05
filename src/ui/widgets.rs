@@ -110,8 +110,11 @@ pub(super) fn fixed_height_row(ui: &mut egui::Ui, height: f32, add_contents: imp
 }
 
 /// Vertically scrollable, word-wrapped body text, shrinking to the content's
-/// natural height up to `max_height`. Views draw body text through
-/// `panel::Body::fill_text`, which supplies the height.
+/// natural height up to `max_height`. Text continuing past the top or bottom
+/// edge is marked with a fade into the frame (#29) — egui's floating
+/// scrollbar only shows on hover, so a full panel would otherwise read as
+/// complete. Views draw body text through `panel::Body::fill_text`, which
+/// supplies the height.
 pub(super) fn scroll_text(
     ui: &mut egui::Ui,
     id_salt: impl std::hash::Hash,
@@ -120,7 +123,7 @@ pub(super) fn scroll_text(
     max_height: f32,
     stick_to_bottom: bool,
 ) {
-    egui::ScrollArea::vertical()
+    let out = egui::ScrollArea::vertical()
         .id_salt(id_salt)
         .max_height(max_height)
         // egui's ScrollArea defaults to a 64px `min_scrolled_size` floor once
@@ -139,7 +142,47 @@ pub(super) fn scroll_text(
                 .wrap_mode(egui::TextWrapMode::Wrap),
             );
         });
+    let (top, bottom) = fade_edges(out.content_size.y, out.inner_rect.height(), out.state.offset.y);
+    if top {
+        paint_fade(ui, out.inner_rect, true);
+    }
+    if bottom {
+        paint_fade(ui, out.inner_rect, false);
+    }
 }
+
+/// Which scroll edges hide more content: (`top`, `bottom`). A one-pixel
+/// tolerance absorbs layout rounding so a column that just fits stays clean.
+pub(super) fn fade_edges(content_height: f32, viewport_height: f32, offset_y: f32) -> (bool, bool) {
+    let hidden_below = content_height - viewport_height - offset_y;
+    (offset_y > 1.0, hidden_below > 1.0)
+}
+
+/// A `size::FADE_HEIGHT` gradient from transparent into the frame color
+/// along the `top` or bottom edge of `viewport`, painted over the text.
+fn paint_fade(ui: &egui::Ui, viewport: egui::Rect, top: bool) {
+    let h = size::FADE_HEIGHT.min(viewport.height());
+    let band = if top {
+        egui::Rect::from_min_size(viewport.min, egui::vec2(viewport.width(), h))
+    } else {
+        egui::Rect::from_min_size(
+            egui::pos2(viewport.min.x, viewport.max.y - h),
+            egui::vec2(viewport.width(), h),
+        )
+    };
+    let (edge, inner) = if top { (band.min.y, band.max.y) } else { (band.max.y, band.min.y) };
+    let mut mesh = egui::Mesh::default();
+    let opaque = color::SURFACE;
+    let clear = egui::Color32::TRANSPARENT;
+    mesh.colored_vertex(egui::pos2(band.min.x, edge), opaque);
+    mesh.colored_vertex(egui::pos2(band.max.x, edge), opaque);
+    mesh.colored_vertex(egui::pos2(band.max.x, inner), clear);
+    mesh.colored_vertex(egui::pos2(band.min.x, inner), clear);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    ui.painter().add(egui::Shape::mesh(mesh));
+}
+
 
 /// The clickable "▶/▼ Thinking" toggle (icon + label; size deliberately the
 /// same as the tab labels — #6). Rendered in a `size::ROW` status row; the
@@ -278,4 +321,23 @@ pub(super) fn pill_row<T: Copy + PartialEq>(
         }
     });
     picked
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fade_edges;
+
+    #[test]
+    fn fade_marks_only_the_edges_that_hide_content() {
+        // Fits: nothing to mark.
+        assert_eq!(fade_edges(100.0, 200.0, 0.0), (false, false));
+        // Layout rounding within a pixel is not an overflow.
+        assert_eq!(fade_edges(200.5, 200.0, 0.0), (false, false));
+        // Overflows, scrolled to the top: more below only.
+        assert_eq!(fade_edges(500.0, 200.0, 0.0), (false, true));
+        // Mid-way: both.
+        assert_eq!(fade_edges(500.0, 200.0, 100.0), (true, true));
+        // Scrolled to the bottom: more above only.
+        assert_eq!(fade_edges(500.0, 200.0, 300.0), (true, false));
+    }
 }
