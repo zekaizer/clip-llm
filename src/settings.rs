@@ -365,21 +365,23 @@ pub fn apply_patch(doc: &mut toml_edit::Document, patch: &SettingsPatch) {
                 };
                 set_scalar(section(doc, &key), "thinking", name);
             }
-            // Built-in default: drop the override, and the section too when
-            // nothing else lives in it, so no empty `[mode]` header is left.
-            None => {
-                let now_empty = doc
-                    .get_mut(&key)
-                    .and_then(toml_edit::Item::as_table_mut)
-                    .map(|t| {
-                        t.remove("thinking");
-                        t.is_empty()
-                    });
-                if now_empty == Some(true) {
-                    doc.remove(&key);
-                }
-            }
+            // Built-in default: drop the override.
+            None => remove_keys(doc, &key, &["thinking"]),
         }
+    }
+}
+
+/// Remove `keys` from the top-level `[section]` table, and the table itself
+/// once nothing else lives in it, so no empty `[section]` header is left.
+fn remove_keys(doc: &mut toml_edit::Document, section: &str, keys: &[&str]) {
+    let now_empty = doc.get_mut(section).and_then(toml_edit::Item::as_table_mut).map(|t| {
+        for key in keys {
+            t.remove(key);
+        }
+        t.is_empty()
+    });
+    if now_empty == Some(true) {
+        doc.remove(section);
     }
 }
 
