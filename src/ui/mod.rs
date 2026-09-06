@@ -180,7 +180,8 @@ pub struct OverlayApp {
     /// `ClipboardManager` so `copy_and_read` can wait for an actual modifier
     /// release instead of a flat settle delay. See `start_capture`.
     modifier_state: ModifierState,
-    /// Mouse cursor position captured at hotkey trigger time.
+    /// The point the window is centered on: the cursor at hotkey trigger
+    /// time, or the display center for Settings.
     spawn_position: Option<egui::Pos2>,
     /// Whether the startup hide has begun (the initial visibility command was sent).
     initial_hide_done: bool,
@@ -547,11 +548,15 @@ impl OverlayApp {
         self.settings = Some(form);
         self.profile_test = None;
         self.profile_test_result = None;
-        self.capture_mouse_position();
+        // A dialog, not a trigger-bound view: it opens in the middle of the
+        // cursor's display, not on the cursor (where the tray click landed
+        // is noise).
+        self.spawn_position =
+            settings_spawn_point(self.platform.mouse_position(), |x, y| self.platform.display_bounds_at_point(x, y));
         self.last_sent_pos = None;
         self.last_desired_size = None;
-        // Centered on the cursor's monitor from an estimated size; the real
-        // size lands on the first frame and only grows the window in place.
+        // Centered on that point from an estimated size; the real size lands
+        // on the first frame and only grows the window in place.
         let estimated = egui::vec2(theme::size::SETTINGS_WIDTH + theme::size::SHADOW_PAD * 2.0, 520.0);
         let pos = self.calculate_centered_position(estimated).map(|p| (p.x, p.y));
         if self.platform.show_window(pos) {
@@ -2208,6 +2213,18 @@ fn centered_position_screen(
     center_clamped_to_bounds(cursor, win_size_points * scale, bounds)
 }
 
+/// Where the Settings panel is centered: the middle of the display work area
+/// under the cursor (`bounds_at` looks it up), falling back to the cursor
+/// itself when the display is unknown. Screen coordinates throughout.
+fn settings_spawn_point(
+    mouse: Option<(f64, f64)>,
+    bounds_at: impl Fn(f64, f64) -> Option<(f64, f64, f64, f64)>,
+) -> Option<egui::Pos2> {
+    let (x, y) = mouse?;
+    let center = bounds_at(x, y).map_or((x, y), |(ox, oy, w, h)| (ox + w / 2.0, oy + h / 2.0));
+    Some(egui::pos2(center.0 as f32, center.1 as f32))
+}
+
 /// Anchored variant of `centered_position_screen` — same unit contract, but
 /// keeps a fixed top-left instead of centering (see `anchored_clamped_to_bounds`).
 fn anchored_position_screen(
@@ -3031,6 +3048,18 @@ mod tests {
         // Inside the mock display's work area, so no clamping applies.
         app.resize_anchor = Some(egui::pos2(60.0, 80.0));
         assert_eq!(app.calculate_target_position(win), Some(egui::pos2(60.0, 80.0)));
+    }
+
+    /// Settings is a dialog: it opens in the middle of the display the
+    /// cursor is on, wherever on that display the tray click happened. Only
+    /// an unknown display falls back to the cursor.
+    #[test]
+    fn settings_opens_at_the_center_of_the_cursor_display() {
+        let display = |x: f64, y: f64| (0.0..1920.0).contains(&x).then_some((0.0, 25.0, 1920.0, 1055.0)).filter(|_| y >= 0.0);
+        assert_eq!(settings_spawn_point(Some((900.0, 900.0)), display), Some(egui::pos2(960.0, 552.5)));
+        assert_eq!(settings_spawn_point(Some((40.0, 10.0)), display), Some(egui::pos2(960.0, 552.5)));
+        assert_eq!(settings_spawn_point(Some((2500.0, 300.0)), display), Some(egui::pos2(2500.0, 300.0)), "unknown display: the cursor");
+        assert_eq!(settings_spawn_point(None, display), None);
     }
 
     /// A zoom change re-sends the (unchanged) point size, so eframe applies
