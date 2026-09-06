@@ -106,6 +106,8 @@ pub fn render(
     source: CaptureSource,
     // File names when the content came from a file-list clipboard (badge only).
     source_files: &[String],
+    // Images attached to the content (badge tooltip only).
+    source_images: &[crate::images::ImageAttachment],
     copy_confirmed: bool,
     elapsed: Option<std::time::Duration>,
     debug_available: bool,
@@ -180,6 +182,7 @@ pub fn render(
                     debug_available,
                     source,
                     source_files,
+                    source_images,
                     completion_status: completion_status.as_deref(),
                     model_switchable,
                 },
@@ -416,6 +419,7 @@ struct ResultFooter<'a> {
     debug_available: bool,
     source: CaptureSource,
     source_files: &'a [String],
+    source_images: &'a [crate::images::ImageAttachment],
     completion_status: Option<&'a str>,
     model_switchable: bool,
 }
@@ -490,7 +494,7 @@ fn view_result(
         body.fill_text(("result", mode), text, color::text(), false);
     });
     slots.footer(|ui| {
-        render_source_badge(ui, footer.source, footer.source_files);
+        render_source_badge(ui, footer.source, footer.source_files, footer.source_images);
         actions_right(ui, |ui| {
             // Primary: auto_copy (double-tap) = paste/replace (↩); otherwise
             // copy (📋), with ✓ confirming a just-done copy (#16a).
@@ -1126,12 +1130,49 @@ fn render_profile_page<'t>(
 
 
 
+/// One line per attached image for the source badge tooltip: source size,
+/// the sent size when reduced, the encoding, and where it came from.
+/// `None` without images.
+pub(crate) fn describe_images(images: &[crate::images::ImageAttachment]) -> Option<String> {
+    use crate::images::{ImageMime, ImageOrigin};
+    if images.is_empty() {
+        return None;
+    }
+    let mut out = format!("Images: {}", images.len());
+    for (i, img) in images.iter().enumerate() {
+        let size = if img.is_resized() {
+            format!(
+                "{}\u{d7}{} \u{2192} {}\u{d7}{}",
+                img.source_width, img.source_height, img.width, img.height
+            )
+        } else {
+            format!("{}\u{d7}{}", img.width, img.height)
+        };
+        let mime = match img.mime {
+            ImageMime::Png => "PNG",
+            ImageMime::Jpeg => "JPEG",
+        };
+        let origin = match img.origin {
+            ImageOrigin::Clipboard => "clipboard",
+            ImageOrigin::File => "file",
+            ImageOrigin::Markup => "markup",
+        };
+        out.push_str(&format!("\n{}. {size}, {mime}, from {origin}", i + 1));
+    }
+    Some(out)
+}
+
 /// Compact source badge in Result's bottom row — where the content came from:
 /// selection (double-tap) vs clipboard (single-tap). Makes a slow double-tap
 /// that resolved to a single-tap — sending stale clipboard content — visibly
 /// different (#50). Icon-only to keep the row compact; the tooltip spells it out.
-fn render_source_badge(ui: &mut egui::Ui, source: CaptureSource, files: &[String]) {
-    let (icon, tip) = if files.is_empty() {
+fn render_source_badge(
+    ui: &mut egui::Ui,
+    source: CaptureSource,
+    files: &[String],
+    images: &[crate::images::ImageAttachment],
+) {
+    let (icon, mut tip) = if files.is_empty() {
         match source {
             CaptureSource::Selection => ("\u{2702}", "Source: selection (double-tap)".to_string()),
             CaptureSource::Clipboard => ("\u{1f4cb}", "Source: clipboard (single-tap)".to_string()),
@@ -1139,6 +1180,10 @@ fn render_source_badge(ui: &mut egui::Ui, source: CaptureSource, files: &[String
     } else {
         ("\u{1f4c4}", format!("Source: {} file(s) \u{2014} {}", files.len(), files.join(", ")))
     };
+    if let Some(summary) = describe_images(images) {
+        tip.push('\n');
+        tip.push_str(&summary);
+    }
     ui.label(
         egui::RichText::new(icon)
             .size(font::CAPTION)
@@ -1330,6 +1375,27 @@ fn render_tab_bar(
 
 #[cfg(test)]
 mod tests {
+    use crate::images::{ImageAttachment, ImageMime, ImageOrigin};
+
+    #[test]
+    fn describe_images_lists_size_encoding_and_origin() {
+        assert_eq!(super::describe_images(&[]), None);
+        let shrunk = ImageAttachment {
+            width: 1568,
+            height: 882,
+            source_width: 3840,
+            source_height: 2160,
+            mime: ImageMime::Jpeg,
+            origin: ImageOrigin::Markup,
+            ..ImageAttachment::stub(vec![])
+        };
+        let same = ImageAttachment { width: 600, height: 400, source_width: 600, source_height: 400, ..ImageAttachment::stub(vec![]) };
+        assert_eq!(
+            super::describe_images(&[shrunk, same]).as_deref(),
+            Some("Images: 2\n1. 3840\u{d7}2160 \u{2192} 1568\u{d7}882, JPEG, from markup\n2. 600\u{d7}400, PNG, from clipboard")
+        );
+    }
+
     use super::*;
 
     /// The settings panel renders headlessly with a real form, sizes itself to
@@ -1390,6 +1456,7 @@ mod tests {
                 false,
                 true,
                 CaptureSource::Selection,
+                &[],
                 &[],
                 false,
                 Some(std::time::Duration::from_secs(3)),
@@ -1504,6 +1571,7 @@ mod tests {
                 true,
                 CaptureSource::Selection,
                 &[],
+                &[],
                 false,
                 None,
                 false,
@@ -1549,6 +1617,7 @@ mod tests {
                 false,
                 true,
                 CaptureSource::Selection,
+                &[],
                 &[],
                 false,
                 None,

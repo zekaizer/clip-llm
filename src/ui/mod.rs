@@ -2061,6 +2061,7 @@ impl eframe::App for OverlayApp {
                 self.sm.auto_copy(),
                 self.sm.capture_source(),
                 self.sm.content_files(),
+                self.sm.content_images(),
                 self.copy_confirmed_at.is_some(),
                 elapsed,
                 self.last_debug.is_some(),

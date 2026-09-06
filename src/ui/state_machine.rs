@@ -373,6 +373,13 @@ impl StateMachine {
             .map_or(&[][..], |c| c.files.as_slice())
     }
 
+    /// Images attached to the current content, else empty.
+    pub fn content_images(&self) -> &[crate::images::ImageAttachment] {
+        self.original_content
+            .as_ref()
+            .map_or(&[][..], |c| c.images.as_slice())
+    }
+
     /// Active model profile index.
     pub fn active_model(&self) -> usize {
         self.active_model
