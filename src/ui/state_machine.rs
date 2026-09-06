@@ -166,6 +166,8 @@ pub enum UiEffect {
         mode: ProcessMode,
         rephrase_params: RephraseParams,
         thinking_mode: ThinkingMode,
+        /// Revision rounds applied on top of the base reply (empty = base request).
+        revision: Vec<crate::RevisionTurn>,
         request_id: u64,
     },
     SendCancel,
@@ -540,6 +542,7 @@ impl StateMachine {
                 rephrase_params: self.rephrase_params,
                 thinking_mode: self.effective_thinking_mode(),
                 request_id: self.current_request_id,
+                revision: Vec::new(),
             },
         ];
         if !old_state.same_variant(&self.state) {
@@ -895,6 +898,7 @@ impl StateMachine {
                             rephrase_params: self.rephrase_params,
                             thinking_mode: self.effective_thinking_mode(),
                             request_id: self.current_request_id,
+                            revision: Vec::new(),
                         },
                     ]
                 } else {
@@ -921,6 +925,7 @@ impl StateMachine {
                             rephrase_params: self.rephrase_params,
                             thinking_mode: self.effective_thinking_mode(),
                             request_id: self.current_request_id,
+                            revision: Vec::new(),
                         },
                         UiEffect::ResetAreas,
                     ]

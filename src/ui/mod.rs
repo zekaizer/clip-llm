@@ -833,6 +833,7 @@ impl OverlayApp {
                     mode,
                     rephrase_params,
                     thinking_mode,
+                    revision,
                     request_id,
                 } => {
                     // An immediate request supersedes any debounce-parked one
@@ -844,6 +845,7 @@ impl OverlayApp {
                         mode,
                         rephrase_params,
                         thinking_mode,
+                        revision,
                         request_id,
                     });
                 }
@@ -1837,10 +1839,11 @@ impl OverlayApp {
                     mode,
                     rephrase_params,
                     thinking_mode,
+                    revision,
                     request_id,
                 } => {
                     self.pending_process = Some((
-                        ProcessTask { content, mode, rephrase_params, thinking_mode, request_id },
+                        ProcessTask { content, mode, rephrase_params, thinking_mode, revision, request_id },
                         std::time::Instant::now() + PARAM_DEBOUNCE,
                     ));
                     // Guarantee a frame after the deadline (the Processing

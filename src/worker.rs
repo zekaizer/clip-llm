@@ -7,7 +7,7 @@ use tracing::{debug, error, info, trace, warn, Instrument};
 
 use crate::api::client::{LlmClient, RetryNotice, SseEvent, SseParser, Usage};
 use crate::api::response::{extract_first_think_content, strip_think_blocks, ThinkBlockFilter};
-use crate::{ApiError, ClipboardContent, DebugCapture, ProcessMode, RephraseParams, ThinkingMode};
+use crate::{ApiError, ClipboardContent, DebugCapture, ProcessMode, RephraseParams, RevisionTurn, ThinkingMode};
 
 /// Maximum time to wait for the next streaming chunk before treating the stream
 /// as stalled. The streaming HTTP client has only a connect timeout (no overall
@@ -32,6 +32,8 @@ pub struct ProcessTask {
     pub mode: ProcessMode,
     pub rephrase_params: RephraseParams,
     pub thinking_mode: ThinkingMode,
+    /// Revision rounds applied on top of the base reply (empty = base request).
+    pub revision: Vec<RevisionTurn>,
     pub request_id: u64,
 }
 
@@ -416,14 +418,14 @@ async fn run_non_streaming(
     resp_tx: mpsc::Sender<WorkerResponse>,
     mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
-    let ProcessTask { content, mode, rephrase_params, thinking_mode, request_id } = task;
+    let ProcessTask { content, mode, rephrase_params, thinking_mode, revision, request_id } = task;
     let mut capture = DebugCapture {
         timestamp: Some(crate::format_utc(SystemTime::now())),
         ..Default::default()
     };
     let started = Instant::now();
     let result = tokio::select! {
-        r = llm.complete(&content, mode, rephrase_params, thinking_mode, &mut capture) => r,
+        r = llm.complete(&content, mode, rephrase_params, thinking_mode, &revision, &mut capture) => r,
         _ = &mut cancel_rx => {
             debug!("worker: request cancelled during connect");
             return;
@@ -452,14 +454,14 @@ async fn run_streaming(
     resp_tx: mpsc::Sender<WorkerResponse>,
     mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
-    let ProcessTask { content, mode, rephrase_params, thinking_mode, request_id } = task;
+    let ProcessTask { content, mode, rephrase_params, thinking_mode, revision, request_id } = task;
     let mut capture = DebugCapture {
         timestamp: Some(crate::format_utc(SystemTime::now())),
         ..Default::default()
     };
     let started = Instant::now();
     let resp = tokio::select! {
-        r = llm.complete_stream(&content, mode, rephrase_params, thinking_mode, &mut capture) => r,
+        r = llm.complete_stream(&content, mode, rephrase_params, thinking_mode, &revision, &mut capture) => r,
         _ = &mut cancel_rx => {
             debug!("worker: request cancelled during connect");
             return;
