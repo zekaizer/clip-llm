@@ -8,6 +8,7 @@ pub mod decode;
 pub mod encode;
 pub mod filter;
 pub mod html;
+pub mod markup;
 
 /// Where an image came from. Markup images go through the meaningfulness
 /// filter; a clipboard image or a file is deliberate and never filtered.
