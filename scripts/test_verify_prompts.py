@@ -166,6 +166,42 @@ class ModelsFromConfig(unittest.TestCase):
         self.assertEqual(vp.models_from_config({"api": {"model": "m"}}), [])
 
 
+class RevisionRounds(unittest.TestCase):
+    def test_window_mirrors_lib_rs(self):
+        src = (vp.ROOT / "src" / "lib.rs").read_text(encoding="utf-8")
+        m = re.search(r"pub const REVISION_WINDOW: usize = (\d+);", src)
+        self.assertEqual(int(m.group(1)), vp.REVISION_WINDOW)
+
+    def test_request_frame_comes_from_config_rs_and_overrides_win(self):
+        defaults = vp.load_defaults()
+        turn = vp.revision_request("더 짧게", {}, defaults)
+        self.assertTrue(turn.startswith("[Revision request from the operator"), turn)
+        self.assertTrue(turn.endswith("더 짧게"), turn)
+        cfg = {"prompt": {"revision": "REV: {request} END"}}
+        self.assertEqual(vp.revision_request("x", cfg, defaults), "REV: x END")
+        cfg = {"prompt": {"revision": "REV"}}
+        self.assertEqual(vp.revision_request("x", cfg, defaults), "REV\nx")
+
+    def test_turns_replay_the_last_rounds_in_both_flavors(self):
+        defaults = vp.load_defaults()
+        rounds = [(f"reply{i}", f"instr{i}") for i in range(1, 6)]
+        turns = vp.revision_turns(rounds, {}, defaults)
+        self.assertEqual(len(turns), vp.REVISION_WINDOW)
+        self.assertEqual(turns[0][0], "reply3")
+        self.assertTrue(turns[-1][1].endswith("instr5"))
+        chat = {"provider": "openai", "endpoint": "http://x/v1", "api_key": "k", "model": "m"}
+        _, _, body = vp.build_request(chat, "sys", "orig", "no_think", 100, turns)
+        roles = [m["role"] for m in body["messages"]]
+        self.assertEqual(roles, ["system", "user"] + ["assistant", "user"] * vp.REVISION_WINDOW)
+        self.assertEqual(body["messages"][2]["content"], "reply3")
+        self.assertEqual(body["messages"][3]["content"], turns[0][1])
+        grok = {"provider": "grok-oauth", "model": "grok-4.3", "access_token": "t"}
+        _, _, body = vp.build_request(grok, "sys", "orig", "think", 100, turns)
+        self.assertEqual([i["role"] for i in body["input"]], ["user"] + ["assistant", "user"] * vp.REVISION_WINDOW)
+        self.assertEqual(body["input"][1]["content"][0]["type"], "output_text")
+        self.assertEqual(body["input"][2]["content"][0]["type"], "input_text")
+
+
 class Grading(unittest.TestCase):
     def test_max_h2_headings_cap(self):
         case = {"id": "S-001", "mode": "summarize", "input": "x",

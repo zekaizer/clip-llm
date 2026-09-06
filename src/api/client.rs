@@ -8,7 +8,10 @@ use tokio::sync::OnceCell;
 use tracing::{debug, info, trace, warn};
 
 use crate::api::auth::{grok::GrokCliAuth, TokenProvider};
-use crate::{ApiError, ClipboardContent, DebugCapture, ProcessMode, RephraseParams, ThinkingMode};
+use crate::{
+    ApiError, ClipboardContent, DebugCapture, ProcessMode, RephraseParams, RevisionTurn, ThinkingMode,
+    REVISION_WINDOW,
+};
 
 // Defaults — overridable via environment variables.
 const CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
@@ -255,6 +258,56 @@ struct ResponsesInputItem<'a> {
 enum ResponsesContentPart<'a> {
     #[serde(rename = "input_text")]
     Text { text: &'a str },
+    /// A prior assistant reply replayed as conversation history.
+    #[serde(rename = "output_text")]
+    OutputText { text: &'a str },
+}
+
+/// The rounds a request carries: the last [`REVISION_WINDOW`].
+fn revision_window(rounds: &[RevisionTurn]) -> &[RevisionTurn] {
+    &rounds[rounds.len().saturating_sub(REVISION_WINDOW)..]
+}
+
+/// The user turn for each round: the instruction inside the configured
+/// revision wrapper.
+fn wrap_revisions(rounds: &[RevisionTurn]) -> Vec<String> {
+    let config = crate::config::get();
+    rounds.iter().map(|r| config.revision_request(&r.instruction)).collect()
+}
+
+/// Chat-flavor history after the content message: (assistant reply, wrapped
+/// instruction) per round. `wrapped` is parallel to `rounds`.
+fn revision_chat_turns<'a>(rounds: &'a [RevisionTurn], wrapped: &'a [String]) -> Vec<Message<'a>> {
+    rounds
+        .iter()
+        .zip(wrapped)
+        .flat_map(|(round, user)| {
+            [
+                Message { role: "assistant", content: MessageContent::Text(&round.reply_before) },
+                Message { role: "user", content: MessageContent::Text(user) },
+            ]
+        })
+        .collect()
+}
+
+/// Responses-flavor history: same turns as [`revision_chat_turns`].
+fn revision_responses_turns<'a>(
+    rounds: &'a [RevisionTurn],
+    wrapped: &'a [String],
+) -> Vec<ResponsesInputItem<'a>> {
+    rounds
+        .iter()
+        .zip(wrapped)
+        .flat_map(|(round, user)| {
+            [
+                ResponsesInputItem {
+                    role: "assistant",
+                    content: vec![ResponsesContentPart::OutputText { text: &round.reply_before }],
+                },
+                ResponsesInputItem { role: "user", content: vec![ResponsesContentPart::Text { text: user }] },
+            ]
+        })
+        .collect()
 }
 
 // -- Response types --
@@ -937,7 +990,7 @@ impl LlmClient {
         let mut capture = DebugCapture::default();
         let content = ClipboardContent::text_only("Reply with the single word OK.".into());
         let reply = self
-            .complete(&content, ProcessMode::Rephrase, RephraseParams::default(), ThinkingMode::NoThink, &mut capture)
+            .complete(&content, ProcessMode::Rephrase, RephraseParams::default(), ThinkingMode::NoThink, &[], &mut capture)
             .await?;
         let visible = crate::api::response::strip_think_blocks(&reply);
         let snippet: String = visible.trim().chars().take(40).collect();
@@ -1480,12 +1533,14 @@ impl LlmClient {
         skip_all,
         fields(endpoint = %self.0.endpoint, model = %self.0.model, stream)
     )]
+    #[allow(clippy::too_many_arguments)]
     async fn build_and_send(
         &self,
         content: &ClipboardContent,
         mode: ProcessMode,
         rephrase_params: RephraseParams,
         thinking_mode: ThinkingMode,
+        revision: &[RevisionTurn],
         stream: bool,
         capture: &mut DebugCapture,
     ) -> Result<reqwest::Response, ApiError> {
@@ -1510,6 +1565,8 @@ impl LlmClient {
         } else {
             base_prompt
         };
+        let rounds = revision_window(revision);
+        let wrapped = wrap_revisions(rounds);
 
         // With a token_budget, shrink max_tokens to keep (prompt + completion)
         // under it. Image inputs aren't text-estimable, so they keep the ceiling.
@@ -1517,6 +1574,8 @@ impl LlmClient {
         let prompt_est = budget.map_or(0, |_| {
             estimate_prompt_tokens(&sys_prompt)
                 + estimate_prompt_tokens(content.text.as_deref().unwrap_or(""))
+                + rounds.iter().map(|r| estimate_prompt_tokens(&r.reply_before)).sum::<u32>()
+                + wrapped.iter().map(|w| estimate_prompt_tokens(w)).sum::<u32>()
         });
         let max_tokens = effective_max_tokens(inner.max_tokens, budget, prompt_est);
         if budget.is_some() {
@@ -1529,18 +1588,20 @@ impl LlmClient {
         let client = if stream { &inner.streaming_client } else { &inner.client };
         let (req, body_value) = match inner.flavor {
             ApiFlavor::OpenAiChat => {
+                let mut messages = vec![
+                    Message {
+                        role: "system",
+                        content: MessageContent::Text(&sys_prompt),
+                    },
+                    Message {
+                        role: "user",
+                        content: Self::build_user_content(content, use_images),
+                    },
+                ];
+                messages.extend(revision_chat_turns(rounds, &wrapped));
                 let body = ChatRequest {
                     model: &inner.model,
-                    messages: vec![
-                        Message {
-                            role: "system",
-                            content: MessageContent::Text(&sys_prompt),
-                        },
-                        Message {
-                            role: "user",
-                            content: Self::build_user_content(content, use_images),
-                        },
-                    ],
+                    messages,
                     temperature: inner.temperature,
                     max_tokens,
                     stream: if stream { Some(true) } else { None },
@@ -1553,15 +1614,17 @@ impl LlmClient {
                 )
             }
             ApiFlavor::GrokResponses => {
+                let mut input = vec![ResponsesInputItem {
+                    role: "user",
+                    content: vec![ResponsesContentPart::Text {
+                        text: content.text.as_deref().unwrap_or(""),
+                    }],
+                }];
+                input.extend(revision_responses_turns(rounds, &wrapped));
                 let body = ResponsesRequest {
                     model: &inner.model,
                     instructions: &sys_prompt,
-                    input: vec![ResponsesInputItem {
-                        role: "user",
-                        content: vec![ResponsesContentPart::Text {
-                            text: content.text.as_deref().unwrap_or(""),
-                        }],
-                    }],
+                    input,
                     temperature: inner.temperature,
                     max_output_tokens: max_tokens,
                     store: false,
@@ -1673,6 +1736,7 @@ impl LlmClient {
         mode: ProcessMode,
         rephrase_params: RephraseParams,
         thinking_mode: ThinkingMode,
+        revision: &[RevisionTurn],
         capture: &mut DebugCapture,
     ) -> Result<String, ApiError> {
         let inner = &self.0;
@@ -1682,7 +1746,7 @@ impl LlmClient {
         debug!("model={}, temperature={}, max_tokens={}", inner.model, inner.temperature, inner.max_tokens);
 
         let resp = self
-            .build_and_send(content, mode, rephrase_params, thinking_mode, false, capture)
+            .build_and_send(content, mode, rephrase_params, thinking_mode, revision, false, capture)
             .await
             .map_err(|e| self.map_grok_rejection(e))?;
         let text = resp.text().await?;
@@ -1791,12 +1855,13 @@ impl LlmClient {
         mode: ProcessMode,
         rephrase_params: RephraseParams,
         thinking_mode: ThinkingMode,
+        revision: &[RevisionTurn],
         capture: &mut DebugCapture,
     ) -> Result<reqwest::Response, ApiError> {
         let inner = &self.0;
         // Debug, not info — see `complete` for the endpoint-in-telemetry rationale.
         debug!("sending streaming request to {}", inner.endpoint);
-        self.build_and_send(content, mode, rephrase_params, thinking_mode, true, capture)
+        self.build_and_send(content, mode, rephrase_params, thinking_mode, revision, true, capture)
             .await
             .map_err(|e| self.map_grok_rejection(e))
     }
@@ -2427,6 +2492,51 @@ mod tests {
         // After a clean newline-terminated feed, nothing is left to flush.
         let _ = p.feed(b"data: [DONE]\n");
         assert!(p.flush().is_empty());
+    }
+
+    // --- Revision rounds ---
+
+    fn rounds(n: usize) -> Vec<RevisionTurn> {
+        (1..=n)
+            .map(|i| RevisionTurn { reply_before: format!("reply{i}"), instruction: format!("instr{i}") })
+            .collect()
+    }
+
+    #[test]
+    fn revision_window_keeps_the_last_rounds() {
+        let all = rounds(5);
+        let w = revision_window(&all);
+        assert_eq!(w.len(), REVISION_WINDOW);
+        assert_eq!(w[0].instruction, "instr3");
+        assert_eq!(w[REVISION_WINDOW - 1].instruction, "instr5");
+        assert_eq!(revision_window(&all[..2]).len(), 2);
+    }
+
+    #[test]
+    fn revision_turns_alternate_assistant_and_wrapped_user() {
+        let all = rounds(2);
+        let wrapped = wrap_revisions(&all);
+        assert!(wrapped[0].starts_with("[Revision request"), "{}", wrapped[0]);
+        assert!(wrapped[0].ends_with("instr1"), "{}", wrapped[0]);
+        let json = serde_json::to_value(revision_chat_turns(&all, &wrapped)).unwrap();
+        assert_eq!(json[0]["role"], "assistant");
+        assert_eq!(json[0]["content"], "reply1");
+        assert_eq!(json[1]["role"], "user");
+        assert_eq!(json[1]["content"], wrapped[0]);
+        assert_eq!(json[2]["role"], "assistant");
+        assert_eq!(json[2]["content"], "reply2");
+        assert_eq!(json[3]["role"], "user");
+        assert_eq!(json[3]["content"], wrapped[1]);
+        // Responses flavor: a replayed reply is an output_text part, the
+        // instruction an input_text part.
+        let json = serde_json::to_value(revision_responses_turns(&all, &wrapped)).unwrap();
+        assert_eq!(json[0]["role"], "assistant");
+        assert_eq!(json[0]["content"][0]["type"], "output_text");
+        assert_eq!(json[0]["content"][0]["text"], "reply1");
+        assert_eq!(json[1]["role"], "user");
+        assert_eq!(json[1]["content"][0]["type"], "input_text");
+        assert_eq!(json[1]["content"][0]["text"], wrapped[0]);
+        assert_eq!(json.as_array().unwrap().len(), 4);
     }
 
     // --- Responses-API (grok-oauth flavor) tests ---

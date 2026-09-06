@@ -296,6 +296,9 @@ pub struct OverlayApp {
     /// When the user last copied via the 📋 button / Cmd+C — drives the ✓
     /// confirmation on the copy button for [`COPY_CONFIRM`] (#16a).
     copy_confirmed_at: Option<std::time::Instant>,
+    /// Text in the revise input; cleared outside Result, refilled with the
+    /// instruction of a failed revision.
+    revise_draft: String,
     /// Text of our last clipboard write and the change counter right after
     /// it. Lets `WriteClipboard` skip rewriting identical content that is
     /// still on the clipboard — the ↩ paste otherwise double-writes the
@@ -388,6 +391,7 @@ impl OverlayApp {
             pending_content: None,
             pending_process: None,
             copy_confirmed_at: None,
+            revise_draft: String::new(),
             last_clipboard_write: None,
             last_debug: None,
             req_ok: 0,
@@ -455,6 +459,7 @@ impl OverlayApp {
             pending_content: None,
             pending_process: None,
             copy_confirmed_at: None,
+            revise_draft: String::new(),
             last_clipboard_write: None,
             last_debug: None,
             req_ok: 0,
@@ -833,6 +838,7 @@ impl OverlayApp {
                     mode,
                     rephrase_params,
                     thinking_mode,
+                    revision,
                     request_id,
                 } => {
                     // An immediate request supersedes any debounce-parked one
@@ -844,6 +850,7 @@ impl OverlayApp {
                         mode,
                         rephrase_params,
                         thinking_mode,
+                        revision,
                         request_id,
                     });
                 }
@@ -1789,6 +1796,8 @@ impl OverlayApp {
             overlay::OverlayAction::PasteReplace => UiEvent::UserPaste,
             overlay::OverlayAction::TogglePin => UiEvent::UserTogglePin,
             overlay::OverlayAction::Retry => UiEvent::UserRetry,
+            overlay::OverlayAction::Revise(ref instruction) => UiEvent::UserRevise(instruction.clone()),
+            overlay::OverlayAction::UndoRevision => UiEvent::UserUndoRevision,
             overlay::OverlayAction::CycleModel => {
                 let next = (self.sm.active_model() + 1) % self.model_count();
                 self.select_model(ctx, next);
@@ -1837,10 +1846,11 @@ impl OverlayApp {
                     mode,
                     rephrase_params,
                     thinking_mode,
+                    revision,
                     request_id,
                 } => {
                     self.pending_process = Some((
-                        ProcessTask { content, mode, rephrase_params, thinking_mode, request_id },
+                        ProcessTask { content, mode, rephrase_params, thinking_mode, revision, request_id },
                         std::time::Instant::now() + PARAM_DEBOUNCE,
                     ));
                     // Guarantee a frame after the deadline (the Processing
@@ -1982,6 +1992,15 @@ impl eframe::App for OverlayApp {
             self.render_settings_panel(ctx)
         } else {
             let elapsed = self.processing_elapsed();
+            if !matches!(self.sm.state(), OverlayState::Result(_)) {
+                self.revise_draft.clear();
+            }
+            if let Some(instruction) = self.sm.take_failed_instruction() {
+                self.revise_draft = instruction;
+            }
+            let model_switchable = self.model_count() > 1;
+            let mut draft = std::mem::take(&mut self.revise_draft);
+            let instructions = self.sm.revision_instructions();
             let mut output = overlay::render(
                 self.sm.state(),
                 self.sm.mode(),
@@ -2009,10 +2028,17 @@ impl eframe::App for OverlayApp {
                 elapsed,
                 self.last_debug.is_some(),
                 self.last_debug.as_ref().and_then(format_completion_status),
-                self.model_count() > 1,
+                model_switchable,
+                overlay::RevisionView {
+                    instructions: &instructions,
+                    revising: self.sm.revising(),
+                    error: self.sm.revision_error(),
+                    draft: &mut draft,
+                },
                 self.panel_size,
                 ctx,
             );
+            self.revise_draft = draft;
             let action = std::mem::replace(&mut output.action, overlay::OverlayAction::None);
             self.handle_overlay_action(ctx, action);
             output

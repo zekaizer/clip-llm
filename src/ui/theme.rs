@@ -160,6 +160,11 @@ pub mod size {
     pub const ROW: f32 = 24.0;
     /// Docked action buttons; also the footer height.
     pub const ACTION_BTN: f32 = 26.0;
+    /// Narrowest revise input worth drawing; below it the footer keeps only
+    /// its buttons.
+    pub const REVISE_INPUT_MIN: f32 = 80.0;
+    /// Chars of the last revision instruction shown in the status row.
+    pub const REVISION_LABEL_CHARS: usize = 24;
     /// Side of the resize grip's hit area.
     pub const GRIP: f32 = 16.0;
     /// Cap for the expanded Think block inside the body.

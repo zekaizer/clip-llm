@@ -313,6 +313,19 @@ pub struct RephraseParams {
     pub length: RephraseLength,
 }
 
+// -- Revision rounds --
+
+/// One revision round: the reply the user asked to change and the instruction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevisionTurn {
+    pub reply_before: String,
+    pub instruction: String,
+}
+
+/// Rounds a request carries as conversation turns. Older rounds are dropped -
+/// their effect is already in the later replies' text.
+pub const REVISION_WINDOW: usize = 3;
+
 // -- Process mode --
 
 /// Available processing modes for the LLM pipeline.

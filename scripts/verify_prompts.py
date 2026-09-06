@@ -16,7 +16,11 @@ It sends what the app sends:
     prompt_tag | none — default reasoning_effort, the app's first probe);
   * ``token_budget`` clamps ``max_tokens`` the way ``LlmClient`` does;
   * ``grok-oauth`` profiles go through the xAI Responses API with the Grok CLI's
-    stored access token (read-only; sign in with ``grok`` if it has expired).
+    stored access token (read-only; sign in with ``grok`` if it has expired);
+  * a case with ``"revision": [instruction, ...]`` replays the app's revision
+    rounds: the base reply, then one request per instruction carrying the last
+    ``REVISION_WINDOW`` (reply, wrapped instruction) pairs as history. Only the
+    final reply is graded.
 
 Secrets never live in this file. Endpoints / keys come from:
   --config        a clip-llm ``config.toml`` (e.g. the app bundle's copy)
@@ -60,6 +64,8 @@ TIMEOUT_S = 300
 BUDGET_MARGIN = 256
 MIN_OUTPUT_TOKENS = 512
 
+# Mirrors REVISION_WINDOW in src/lib.rs (the unit tests check it).
+REVISION_WINDOW = 3
 # Mirrors ProcessMode::default_thinking in src/lib.rs.
 BUILT_IN_THINKING = {
     "translate": "no_think",
@@ -105,6 +111,7 @@ def load_defaults(path: Path = CONFIG_RS) -> dict:
     lengths = ("terse", "brief", "same", "detailed", "full")
     return {
         "preamble": rust_str_const(src, "DEFAULT_PROMPT_PREAMBLE"),
+        "revision": rust_str_const(src, "DEFAULT_REVISION_PROMPT"),
         "translate": rust_str_const(src, "DEFAULT_TRANSLATE_PROMPT"),
         "summarize": rust_str_const(src, "DEFAULT_SUMMARIZE_PROMPT"),
         "rephrase_base": rust_str_const(src, "DEFAULT_REPHRASE_BASE"),
@@ -168,6 +175,24 @@ def build_system(case: dict, cfg: dict, defaults: dict) -> str:
         preamble = defaults["preamble"]
     preamble = substitute_tokens(preamble, lang_vars)
     return f"{preamble}\n\n{body}" if preamble else body
+
+
+def revision_request(instruction: str, cfg: dict, defaults: dict) -> str:
+    """The user turn carrying ``instruction`` (mirrors ``Config::revision_request``):
+    ``[prompt].revision`` or the built-in frame, ``{request}`` substituted, or the
+    instruction appended on its own line when the template has no placeholder."""
+    template = cfg.get("prompt", {}).get("revision")
+    if template is None:
+        template = defaults["revision"]
+    if "{request}" in template:
+        return template.replace("{request}", instruction)
+    return f"{template}\n{instruction}"
+
+
+def revision_turns(rounds: list[tuple[str, str]], cfg: dict, defaults: dict) -> list[tuple[str, str]]:
+    """(assistant reply, user turn) pairs the request replays for ``rounds`` =
+    [(reply_before, instruction), ...]: the last ``REVISION_WINDOW`` of them."""
+    return [(reply, revision_request(instr, cfg, defaults)) for reply, instr in rounds[-REVISION_WINDOW:]]
 
 
 def mode_thinking(mode: str, cfg: dict) -> str:
@@ -252,13 +277,20 @@ def grok_access_token(auth_file: str | None = None) -> tuple[str, str | None]:
 # --- requests -----------------------------------------------------------------
 
 
-def build_request(model: dict, system: str, user: str, thinking: str, max_tokens: int) -> tuple[str, dict, dict]:
-    """(url, headers, body) for one call, shaped like the app's request."""
+def build_request(
+    model: dict, system: str, user: str, thinking: str, max_tokens: int, turns: list[tuple[str, str]] = (),
+) -> tuple[str, dict, dict]:
+    """(url, headers, body) for one call, shaped like the app's request. ``turns``
+    are (assistant, user) pairs appended after the content message."""
     if model.get("provider") == "grok-oauth":
+        inp = [{"role": "user", "content": [{"type": "input_text", "text": user}]}]
+        for reply, request in turns:
+            inp.append({"role": "assistant", "content": [{"type": "output_text", "text": reply}]})
+            inp.append({"role": "user", "content": [{"type": "input_text", "text": request}]})
         body = {
             "model": model["model"],
             "instructions": system,
-            "input": [{"role": "user", "content": [{"type": "input_text", "text": user}]}],
+            "input": inp,
             "max_output_tokens": max_tokens,
             "store": False,
             "stream": False,
@@ -270,9 +302,13 @@ def build_request(model: dict, system: str, user: str, thinking: str, max_tokens
     knob = (model.get("thinking_control") or "reasoning_effort").lower()
     if knob == "auto":
         knob = "reasoning_effort"
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    for reply, request in turns:
+        messages.append({"role": "assistant", "content": reply})
+        messages.append({"role": "user", "content": request})
     body: dict = {
         "model": model["model"],
-        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        "messages": messages,
         "temperature": 0.1,
         "max_tokens": max_tokens,
         "stream": False,
@@ -317,10 +353,12 @@ def parse_response(provider: str, data: dict) -> tuple[str, str, int]:
     return strip_think(raw), choice.get("finish_reason") or "stop", int(reasoning)
 
 
-def call(model: dict, system: str, user: str, thinking: str, max_tokens: int) -> tuple[str, str, int]:
+def call(
+    model: dict, system: str, user: str, thinking: str, max_tokens: int, turns: list[tuple[str, str]] = (),
+) -> tuple[str, str, int]:
     """Perform one request with retries on 429/5xx; errors come back as the
     finish string (``HTTP <code>: ...`` / ``ERR ...``)."""
-    url, headers, body = build_request(model, system, user, thinking, max_tokens)
+    url, headers, body = build_request(model, system, user, thinking, max_tokens, turns)
     for attempt in range(4):
         req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers)
         try:
@@ -497,6 +535,8 @@ def main() -> int:
         system = build_system(case, cfg, defaults)
         thinking = mode_thinking(case["mode"], cfg)
         variant = f"/{case.get('style', '')}/{case.get('length', '')}" if case["mode"] == "rephrase" else ""
+        if case.get("revision"):
+            variant += f" +{len(case['revision'])} revision round(s)"
         print(f"=== {case['id']} [{case['mode']}{variant}] {case.get('rationale', '')[:70]}")
         for m in models:
             ceiling = int(m.get("max_tokens") or args.max_tokens)
@@ -506,6 +546,15 @@ def main() -> int:
                 estimate_prompt_tokens(system) + estimate_prompt_tokens(case["input"]),
             )
             out, finish, reasoning = call(m, system, case["input"], thinking, max_tokens)
+            # Revision rounds: each instruction revises the previous reply; the
+            # last reply is what gets graded.
+            rounds: list[tuple[str, str]] = []
+            for instruction in case.get("revision") or []:
+                if finish.startswith(("HTTP", "ERR")) or not out.strip():
+                    break
+                rounds.append((out, instruction))
+                turns = revision_turns(rounds, cfg, defaults)
+                out, finish, reasoning = call(m, system, case["input"], thinking, max_tokens, turns)
             results = grade(case, out, finish)
             ok = all(r[1] for r in results)
             totals[m["name"]][1] += 1

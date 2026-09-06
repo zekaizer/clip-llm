@@ -66,6 +66,22 @@ impl OverlayState {
     }
 }
 
+/// A revision round as recorded here: the API turn plus the think block of
+/// the reply being revised, restored on undo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RevisionRound {
+    turn: crate::RevisionTurn,
+    think_before: Option<String>,
+}
+
+/// A finished result for one cache key with the rounds that produced it.
+#[derive(Debug, Clone)]
+struct CacheEntry {
+    text: String,
+    think: Option<String>,
+    rounds: Vec<RevisionRound>,
+}
+
 /// Where the content being processed came from. Shown as a badge in the
 /// overlay so a mis-detected gesture (a slow double-tap resolving to a
 /// single-tap and sending stale clipboard content) is visibly different (#50).
@@ -156,6 +172,10 @@ pub enum UiEvent {
     /// User clicked the retry button: discard the cached result for the current
     /// request and re-send it for a fresh generation.
     UserRetry,
+    /// The user submitted a revision instruction for the shown result.
+    UserRevise(String),
+    /// Drop the last revision round and show the reply it revised.
+    UserUndoRevision,
 }
 
 /// Side effects that the adapter must execute after a state transition.
@@ -166,6 +186,8 @@ pub enum UiEffect {
         mode: ProcessMode,
         rephrase_params: RephraseParams,
         thinking_mode: ThinkingMode,
+        /// Revision rounds applied on top of the base reply (empty = base request).
+        revision: Vec<crate::RevisionTurn>,
         request_id: u64,
     },
     SendCancel,
@@ -215,9 +237,18 @@ pub struct StateMachine {
     /// Current focus level, mirrored from FocusGained/FocusLost edges. Lets
     /// on_worker_result decide whether focus was held through completion.
     is_focused: bool,
-    /// Result cache: maps cache_key → (text, think_content).
-    /// Valid only for the current original content.
-    cache: HashMap<String, (String, Option<String>)>,
+    /// Result cache by cache_key. Valid only for the current original content.
+    cache: HashMap<String, CacheEntry>,
+    /// Revision rounds applied to the result of the current cache key
+    /// (adopted from the cache entry on every key change).
+    rounds: Vec<RevisionRound>,
+    /// The revision round whose request is in flight; only ever set in Processing.
+    pending_revision: Option<RevisionRound>,
+    /// Message of a revision that failed, shown over the restored reply until
+    /// the next request.
+    revision_error: Option<String>,
+    /// Instruction of the failed revision, handed back once to the adapter.
+    failed_instruction: Option<String>,
     /// Accumulated visible streaming text (displayed during Processing).
     streaming_text: String,
     /// True once a think block has started during the current streaming request.
@@ -258,6 +289,10 @@ impl StateMachine {
             has_been_focused: false,
             is_focused: false,
             cache: HashMap::new(),
+            rounds: Vec::new(),
+            pending_revision: None,
+            revision_error: None,
+            failed_instruction: None,
             streaming_text: String::new(),
             think_started: false,
             retry_notice: None,
@@ -353,6 +388,27 @@ impl StateMachine {
         self.source
     }
 
+    /// Instructions of the revision rounds applied to the shown result, oldest first.
+    pub fn revision_instructions(&self) -> Vec<&str> {
+        self.rounds.iter().map(|r| r.turn.instruction.as_str()).collect()
+    }
+
+    /// A revision request is in flight.
+    pub fn revising(&self) -> bool {
+        self.pending_revision.is_some()
+    }
+
+    /// Message of the revision that just failed, shown over the restored reply.
+    pub fn revision_error(&self) -> Option<&str> {
+        self.revision_error.as_deref()
+    }
+
+    /// The instruction of the revision that just failed, handed back once so the
+    /// adapter can put it back into the input.
+    pub fn take_failed_instruction(&mut self) -> Option<String> {
+        self.failed_instruction.take()
+    }
+
     pub fn current_request_id(&self) -> u64 {
         self.current_request_id
     }
@@ -435,6 +491,8 @@ impl StateMachine {
                 vec![]
             }
             UiEvent::UserRetry => self.on_user_retry(),
+            UiEvent::UserRevise(instruction) => self.on_user_revise(instruction),
+            UiEvent::UserUndoRevision => self.on_user_undo_revision(),
         };
 
         self.check_invariants();
@@ -453,6 +511,7 @@ impl StateMachine {
         // until the background capture completes, so we cannot key off it here.
         self.original_content = None;
         self.cache.clear();
+        self.clear_revisions();
         self.mode_thinking.clear();
         self.rephrase_params = RephraseParams::default();
         self.streaming_text.clear();
@@ -510,6 +569,9 @@ impl StateMachine {
             self.mode_thinking.clear();
             self.rephrase_params = RephraseParams::default();
         }
+        // The current mode is re-processed from the base request either way;
+        // other keys keep their rounds in the cache.
+        self.clear_revisions();
         self.streaming_text.clear();
         self.think_started = false;
         self.retry_notice = None;
@@ -540,6 +602,7 @@ impl StateMachine {
                 rephrase_params: self.rephrase_params,
                 thinking_mode: self.effective_thinking_mode(),
                 request_id: self.current_request_id,
+                revision: Vec::new(),
             },
         ];
         if !old_state.same_variant(&self.state) {
@@ -569,6 +632,7 @@ impl StateMachine {
         // Answers are model-specific: drop them so switching back re-asks
         // instead of serving the other model's reply from the cache.
         self.cache.clear();
+        self.adopt_rounds();
         let mut effects = vec![UiEffect::SelectModel(index)];
         effects.extend(self.reprocess_or_cache());
         effects
@@ -615,7 +679,14 @@ impl StateMachine {
         self.retry_notice = None;
         self.think_content = think_content.clone();
         self.result_incomplete = incomplete;
-        self.cache.insert(self.cache_key(), (text.clone(), think_content));
+        self.revision_error = None;
+        if let Some(round) = self.pending_revision.take() {
+            self.rounds.push(round);
+        }
+        self.cache.insert(
+            self.cache_key(),
+            CacheEntry { text: text.clone(), think: think_content, rounds: self.rounds.clone() },
+        );
         self.state = OverlayState::Result(text.clone());
         // Auto-hide counts only focus held at or after entering this visible
         // state (#61, #62): focus held through the transition arms the next
@@ -640,6 +711,16 @@ impl StateMachine {
         }
         self.think_started = false;
         self.retry_notice = None;
+        // A failed revision keeps the reply it was revising on screen, with
+        // the failure as a notice and the instruction handed back for a retry.
+        if let Some(round) = self.pending_revision.take() {
+            self.streaming_text.clear();
+            self.failed_instruction = Some(round.turn.instruction.clone());
+            self.revision_error = Some(message);
+            self.restore_reply(round);
+            self.has_been_focused = self.is_focused;
+            return vec![UiEffect::ResetAreas];
+        }
         self.state = OverlayState::Error(message);
         // Same auto-hide rule as on_worker_result (#62): if focus was held
         // through the failure the user has seen the error, so the next
@@ -655,6 +736,7 @@ impl StateMachine {
         self.state = OverlayState::Hidden;
         self.original_content = None;
         self.cache.clear();
+        self.clear_revisions();
         self.streaming_text.clear();
         self.think_started = false;
         self.retry_notice = None;
@@ -691,6 +773,15 @@ impl StateMachine {
     }
 
     fn on_cancel(&mut self) -> Vec<UiEffect> {
+        // Cancelling a revision returns to the reply it was revising; only a
+        // base request has nothing to fall back to.
+        if let Some(round) = self.pending_revision.take() {
+            self.streaming_text.clear();
+            self.think_started = false;
+            self.retry_notice = None;
+            self.restore_reply(round);
+            return vec![UiEffect::SendCancel, UiEffect::ResetAreas];
+        }
         match self.state {
             // In-flight LLM request: cancel it and hide.
             OverlayState::Processing => {
@@ -720,6 +811,7 @@ impl StateMachine {
         }
         self.mode = new_mode;
         // The cache key (computed inside) now reflects the new mode.
+        self.adopt_rounds();
         self.reprocess_or_cache()
     }
 
@@ -794,6 +886,89 @@ impl StateMachine {
         self.reprocess_or_cache()
     }
 
+    /// Submit a revision: the shown reply becomes the round's `reply_before`
+    /// and the request carries the whole chain (windowed by the client).
+    fn on_user_revise(&mut self, instruction: String) -> Vec<UiEffect> {
+        let instruction = instruction.trim().to_owned();
+        let OverlayState::Result(text) = &self.state else { return vec![] };
+        if instruction.is_empty() {
+            return vec![];
+        }
+        let Some(content) = self.original_content.clone() else { return vec![] };
+        self.pending_revision = Some(RevisionRound {
+            turn: crate::RevisionTurn { reply_before: text.clone(), instruction },
+            think_before: self.think_content.take(),
+        });
+        self.streaming_text.clear();
+        self.think_started = false;
+        self.retry_notice = None;
+        self.result_incomplete = None;
+        self.revision_error = None;
+        self.failed_instruction = None;
+        self.next_request_id += 1;
+        self.current_request_id = self.next_request_id;
+        self.state = OverlayState::Processing;
+        vec![
+            UiEffect::SendProcess {
+                content,
+                mode: self.mode,
+                rephrase_params: self.rephrase_params,
+                thinking_mode: self.effective_thinking_mode(),
+                revision: self.revision_chain(),
+                request_id: self.current_request_id,
+            },
+            UiEffect::ResetAreas,
+        ]
+    }
+
+    /// Drop the last round: its `reply_before` is shown again and becomes the
+    /// cached result for this key.
+    fn on_user_undo_revision(&mut self) -> Vec<UiEffect> {
+        if !matches!(self.state, OverlayState::Result(_)) {
+            return vec![];
+        }
+        let Some(round) = self.rounds.pop() else { return vec![] };
+        self.revision_error = None;
+        self.failed_instruction = None;
+        self.restore_reply(round);
+        let OverlayState::Result(text) = &self.state else { unreachable!("restore_reply sets Result") };
+        self.cache.insert(
+            self.cache_key(),
+            CacheEntry { text: text.clone(), think: self.think_content.clone(), rounds: self.rounds.clone() },
+        );
+        let mut effects = Vec::new();
+        if self.auto_copy {
+            effects.push(UiEffect::WriteClipboard(text.clone()));
+        }
+        effects.push(UiEffect::ResetAreas);
+        effects
+    }
+
+    /// Show the reply a round revised (its think block included).
+    fn restore_reply(&mut self, round: RevisionRound) {
+        self.think_content = round.think_before;
+        self.result_incomplete = None;
+        self.state = OverlayState::Result(round.turn.reply_before);
+    }
+
+    /// The rounds the current key's cached result was produced with (none for
+    /// a key without a result). Called on every cache-key change.
+    fn adopt_rounds(&mut self) {
+        self.rounds = self.cache.get(&self.cache_key()).map(|e| e.rounds.clone()).unwrap_or_default();
+    }
+
+    /// Applied rounds plus the one in flight, as the request carries them.
+    fn revision_chain(&self) -> Vec<crate::RevisionTurn> {
+        self.rounds.iter().chain(self.pending_revision.iter()).map(|r| r.turn.clone()).collect()
+    }
+
+    fn clear_revisions(&mut self) {
+        self.rounds.clear();
+        self.pending_revision = None;
+        self.revision_error = None;
+        self.failed_instruction = None;
+    }
+
     fn on_clipboard_error(&mut self, msg: String) -> Vec<UiEffect> {
         // Must NOT emit WriteClipboard to avoid infinite recursion.
         self.state = OverlayState::Error(msg);
@@ -848,6 +1023,7 @@ impl StateMachine {
             return vec![];
         }
         self.mode_thinking.insert(self.mode, thinking);
+        self.adopt_rounds();
         self.reprocess_or_cache()
     }
 
@@ -856,6 +1032,7 @@ impl StateMachine {
         if self.mode != ProcessMode::Rephrase {
             return vec![];
         }
+        self.adopt_rounds();
         self.reprocess_or_cache()
     }
 
@@ -873,11 +1050,13 @@ impl StateMachine {
         let key = self.cache_key();
         match &self.state {
             OverlayState::Processing => {
-                if let Some((cached_text, cached_think)) = self.cache.get(&key).cloned() {
+                // Whatever was in flight is cancelled below, a revision included.
+                self.pending_revision = None;
+                if let Some(CacheEntry { text, think, .. }) = self.cache.get(&key).cloned() {
                     self.streaming_text.clear();
                     self.think_started = false;
                     self.retry_notice = None;
-                    let mut effects = self.apply_cached_result(cached_text, cached_think);
+                    let mut effects = self.apply_cached_result(text, think);
                     effects.insert(0, UiEffect::SendCancel);
                     effects
                 } else if let Some(content) = self.original_content.clone() {
@@ -895,6 +1074,7 @@ impl StateMachine {
                             rephrase_params: self.rephrase_params,
                             thinking_mode: self.effective_thinking_mode(),
                             request_id: self.current_request_id,
+                            revision: self.revision_chain(),
                         },
                     ]
                 } else {
@@ -902,8 +1082,8 @@ impl StateMachine {
                 }
             }
             OverlayState::Result(_) | OverlayState::Error(_) => {
-                if let Some((cached_text, cached_think)) = self.cache.get(&key).cloned() {
-                    self.apply_cached_result(cached_text, cached_think)
+                if let Some(CacheEntry { text, think, .. }) = self.cache.get(&key).cloned() {
+                    self.apply_cached_result(text, think)
                 } else if let Some(content) = self.original_content.clone() {
                     // Clear any partial stream left over from a request that
                     // errored mid-stream, so the new Processing view starts clean.
@@ -921,6 +1101,7 @@ impl StateMachine {
                             rephrase_params: self.rephrase_params,
                             thinking_mode: self.effective_thinking_mode(),
                             request_id: self.current_request_id,
+                            revision: self.revision_chain(),
                         },
                         UiEffect::ResetAreas,
                     ]
@@ -937,6 +1118,10 @@ impl StateMachine {
         debug_assert!(
             !matches!(self.state, OverlayState::Processing) || self.original_content.is_some(),
             "invariant violated: Processing state requires original_content"
+        );
+        debug_assert!(
+            self.pending_revision.is_none() || matches!(self.state, OverlayState::Processing),
+            "invariant violated: a pending revision requires Processing"
         );
         debug_assert!(
             !matches!(self.state, OverlayState::Hidden) || self.original_content.is_none(),
@@ -2776,5 +2961,176 @@ mod tests {
 
         start_processing(&mut sm, "again");
         assert!(!sm.user_repositioned(), "a new trigger re-centers");
+    }
+
+    // -- Revision rounds --
+
+    fn revise(sm: &mut StateMachine, instruction: &str) -> Vec<UiEffect> {
+        sm.handle(UiEvent::UserRevise(instruction.to_string()))
+    }
+
+    fn sent_revision(effects: &[UiEffect]) -> Option<Vec<crate::RevisionTurn>> {
+        effects.iter().find_map(|e| match e {
+            UiEffect::SendProcess { revision, .. } => Some(revision.clone()),
+            _ => None,
+        })
+    }
+
+    fn complete(sm: &mut StateMachine, effects: &[UiEffect], text: &str) -> Vec<UiEffect> {
+        let id = last_request_id(effects);
+        sm.handle(UiEvent::WorkerResult { text: text.into(), think_content: None, request_id: id, incomplete: None })
+    }
+
+    /// A base result, then one revision in flight.
+    fn with_pending_revision(sm: &mut StateMachine) -> Vec<UiEffect> {
+        let effects = start_processing(sm, "orig");
+        complete(sm, &effects, "base");
+        revise(sm, "shorter")
+    }
+
+    #[test]
+    fn revise_sends_the_round_chain_and_enters_processing() {
+        let mut sm = new_sm();
+        let effects = with_pending_revision(&mut sm);
+        assert!(matches!(sm.state(), OverlayState::Processing));
+        assert!(sm.revising());
+        let chain = sent_revision(&effects).expect("revision request");
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].reply_before, "base");
+        assert_eq!(chain[0].instruction, "shorter");
+        // Not the base request: the chain is empty there.
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "orig");
+        assert_eq!(sent_revision(&effects).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn revise_ignored_without_a_result_or_an_instruction() {
+        let mut sm = new_sm();
+        assert!(revise(&mut sm, "x").is_empty(), "hidden");
+        start_processing(&mut sm, "orig");
+        assert!(revise(&mut sm, "x").is_empty(), "processing");
+        let effects = start_processing(&mut sm, "orig");
+        complete(&mut sm, &effects, "base");
+        assert!(revise(&mut sm, "   ").is_empty(), "blank instruction");
+        assert!(matches!(sm.state(), OverlayState::Result(_)));
+    }
+
+    #[test]
+    fn revised_result_is_cached_with_its_rounds_and_survives_a_mode_switch() {
+        let mut sm = new_sm();
+        let effects = with_pending_revision(&mut sm);
+        let effects = complete(&mut sm, &effects, "base v2");
+        assert_eq!(sm.state(), &OverlayState::Result("base v2".into()));
+        assert!(!sm.revising());
+        assert_eq!(sm.revision_instructions(), vec!["shorter"]);
+        // Double-tap session: the revised text replaces the clipboard copy.
+        assert!(effects.contains(&UiEffect::WriteClipboard("base v2".into())));
+        // Another mode starts from scratch (no rounds), then coming back
+        // restores the revised text and its rounds without a request.
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Summarize));
+        assert_eq!(sent_revision(&effects).unwrap().len(), 0);
+        assert!(sm.revision_instructions().is_empty());
+        complete(&mut sm, &effects, "summary");
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Translate));
+        assert!(sent_revision(&effects).is_none(), "served from cache");
+        assert_eq!(sm.state(), &OverlayState::Result("base v2".into()));
+        assert_eq!(sm.revision_instructions(), vec!["shorter"]);
+    }
+
+    #[test]
+    fn second_revision_chains_on_the_revised_reply() {
+        let mut sm = new_sm();
+        let effects = with_pending_revision(&mut sm);
+        complete(&mut sm, &effects, "base v2");
+        let effects = revise(&mut sm, "formal");
+        let chain = sent_revision(&effects).unwrap();
+        assert_eq!(chain.len(), 2);
+        assert_eq!((chain[0].reply_before.as_str(), chain[0].instruction.as_str()), ("base", "shorter"));
+        assert_eq!((chain[1].reply_before.as_str(), chain[1].instruction.as_str()), ("base v2", "formal"));
+        complete(&mut sm, &effects, "base v3");
+        assert_eq!(sm.revision_instructions(), vec!["shorter", "formal"]);
+    }
+
+    #[test]
+    fn failed_revision_returns_to_the_previous_reply_with_a_notice() {
+        let mut sm = new_sm();
+        let effects = with_pending_revision(&mut sm);
+        let id = last_request_id(&effects);
+        let effects = sm.handle(UiEvent::WorkerError { message: "boom".into(), request_id: id });
+        assert_eq!(sm.state(), &OverlayState::Result("base".into()));
+        assert!(!sm.revising());
+        assert!(sm.revision_instructions().is_empty());
+        assert_eq!(sm.revision_error(), Some("boom"));
+        assert_eq!(sm.take_failed_instruction(), Some("shorter".into()));
+        assert_eq!(sm.take_failed_instruction(), None, "handed back once");
+        assert!(!effects.contains(&UiEffect::HideWindow));
+        // The next request clears the notice.
+        revise(&mut sm, "again");
+        assert_eq!(sm.revision_error(), None);
+    }
+
+    #[test]
+    fn cancel_during_a_revision_restores_the_previous_reply() {
+        let mut sm = new_sm();
+        with_pending_revision(&mut sm);
+        let effects = sm.handle(UiEvent::UserCancel);
+        assert!(effects.contains(&UiEffect::SendCancel));
+        assert!(!effects.contains(&UiEffect::HideWindow), "the reply stays on screen");
+        assert_eq!(sm.state(), &OverlayState::Result("base".into()));
+        assert!(!sm.revising());
+        // Close (Escape from the base request) still hides as before.
+        let mut sm = new_sm();
+        with_pending_revision(&mut sm);
+        let effects = sm.handle(UiEvent::UserClose);
+        assert!(effects.contains(&UiEffect::HideWindow));
+        assert!(matches!(sm.state(), OverlayState::Hidden));
+    }
+
+    #[test]
+    fn undo_pops_the_last_round_and_restores_its_reply() {
+        let mut sm = new_sm();
+        assert!(sm.handle(UiEvent::UserUndoRevision).is_empty(), "nothing to undo");
+        let effects = with_pending_revision(&mut sm);
+        complete(&mut sm, &effects, "base v2");
+        let effects = sm.handle(UiEvent::UserUndoRevision);
+        assert_eq!(sm.state(), &OverlayState::Result("base".into()));
+        assert!(sm.revision_instructions().is_empty());
+        assert!(effects.contains(&UiEffect::WriteClipboard("base".into())), "double-tap: clipboard follows");
+        assert!(sm.handle(UiEvent::UserUndoRevision).is_empty());
+        // The undone state is what a mode round-trip restores.
+        let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Summarize));
+        complete(&mut sm, &effects, "summary");
+        sm.handle(UiEvent::UserSwitchMode(ProcessMode::Translate));
+        assert_eq!(sm.state(), &OverlayState::Result("base".into()));
+    }
+
+    #[test]
+    fn retry_re_runs_the_last_round() {
+        let mut sm = new_sm();
+        let effects = with_pending_revision(&mut sm);
+        complete(&mut sm, &effects, "base v2");
+        let effects = sm.handle(UiEvent::UserRetry);
+        let chain = sent_revision(&effects).expect("re-sent");
+        assert_eq!(chain.len(), 1);
+        assert_eq!((chain[0].reply_before.as_str(), chain[0].instruction.as_str()), ("base", "shorter"));
+        complete(&mut sm, &effects, "base v2b");
+        assert_eq!(sm.revision_instructions(), vec!["shorter"]);
+    }
+
+    #[test]
+    fn new_content_and_a_model_switch_reset_the_rounds() {
+        let mut sm = new_sm();
+        let effects = with_pending_revision(&mut sm);
+        complete(&mut sm, &effects, "base v2");
+        let effects = start_processing(&mut sm, "other");
+        assert_eq!(sent_revision(&effects).unwrap().len(), 0);
+        assert!(sm.revision_instructions().is_empty());
+        complete(&mut sm, &effects, "base");
+        let effects = revise(&mut sm, "shorter");
+        complete(&mut sm, &effects, "base v2");
+        let effects = sm.handle(UiEvent::UserSelectModel(1));
+        assert_eq!(sent_revision(&effects).unwrap().len(), 0);
+        assert!(sm.revision_instructions().is_empty());
     }
 }
