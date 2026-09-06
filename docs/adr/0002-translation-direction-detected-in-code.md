@@ -44,7 +44,7 @@ dependency-free heuristic:
   English terms outnumber the Korean words.
 - On a tie, the script ratio decides, one Hangul syllable weighed as 2.5
   Latin letters; no prose at all is "not Korean".
-- A lookup is one or two plain tokens with no sentence punctuation.
+- A lookup is a single plain word with no sentence punctuation.
 
 The Translate prompt states the decided direction instead of the rule; the
 rule text remains only as the fallback when there is no text (image

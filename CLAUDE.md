@@ -58,6 +58,7 @@ The project follows a 7-phase incremental plan defined in [docs/REQUIREMENTS.md]
 - `src/hotkey.rs` — `HotkeyDetector` state machine, `TapAction`, `TapEvent`
 - `src/clipboard.rs` — `ClipboardManager` (read/write, copy simulation + poll)
 - `src/files.rs` — file-list clipboard ingestion (`ingest_files`: UTF-8 text + PNG → `ClipboardContent`)
+- `src/lang.rs` — input-language cues for Translate: `prose_is_korean` (direction, ADR-0002) and `is_lookup` (dictionary entry); fixture `scripts/lang_direction_vectors.json` shared with the harness
 - `src/settings.rs` — settings panel model (`SettingsForm` → `SettingsPatch` → `toml_edit` in-place write; ADR-0001)
 - `src/worker.rs` — async LLM request worker thread
 - `src/api/client.rs` — `LlmClient` (`ApiFlavor`: OpenAI chat vs xAI Responses), `SseParser`, vision probe
