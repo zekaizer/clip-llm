@@ -121,9 +121,20 @@ pub fn encode_for_upload(
     };
     let png = rgba_to_png(&bytes, w, h)?;
     info!("encoded image ({}x{}, {} bytes PNG)", w, h, png.len());
+    let (encoded, mime) = if png.len() > JPEG_FALLBACK_BYTES {
+        match rgba_to_jpeg(&bytes, w, h) {
+            Some(jpeg) if jpeg.len() < png.len() => {
+                info!("PNG over {JPEG_FALLBACK_BYTES} bytes; sending JPEG ({} bytes)", jpeg.len());
+                (jpeg, ImageMime::Jpeg)
+            }
+            _ => (png, ImageMime::Png),
+        }
+    } else {
+        (png, ImageMime::Png)
+    };
     Ok(ImageAttachment {
-        bytes: Arc::new(png),
-        mime: ImageMime::Png,
+        bytes: Arc::new(encoded),
+        mime,
         width: w,
         height: h,
         source_width,
@@ -203,6 +214,32 @@ fn box_resample(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> V
     }
 
     dst
+}
+
+/// PNG size above which a JPEG rendition is tried; the smaller encoding is
+/// sent. Photographic content compresses 5-10x better as JPEG, while
+/// screenshots and diagrams stay smaller (and sharper) as PNG.
+pub const JPEG_FALLBACK_BYTES: usize = 1_500_000;
+/// JPEG quality for the fallback rendition.
+const JPEG_QUALITY: u8 = 85;
+
+/// JPEG-encode RGBA pixels, alpha flattened onto white (JPEG has no alpha).
+/// `None` when the encoder fails; the caller keeps the PNG.
+fn rgba_to_jpeg(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+    let rgb: Vec<u8> = rgba
+        .chunks_exact(4)
+        .flat_map(|px| {
+            let a = u32::from(px[3]);
+            let onto_white = |c: u8| ((u32::from(c) * a + 255 * (255 - a)) / 255) as u8;
+            [onto_white(px[0]), onto_white(px[1]), onto_white(px[2])]
+        })
+        .collect();
+    let mut out = Vec::new();
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, JPEG_QUALITY);
+    encoder
+        .encode(&rgb, width, height, image::ExtendedColorType::Rgb8)
+        .ok()?;
+    Some(out)
 }
 
 /// Encode raw RGBA pixel data to PNG.
@@ -296,6 +333,50 @@ mod tests {
         let img = with_box(4000, 3000, [255, 255, 255, 255], (1500, 1100, 1000, 800), [0, 0, 0, 255]);
         let att = encode_for_upload(img, 4000, 3000, ImageOrigin::Clipboard).unwrap();
         assert_eq!(png_dims(&att.bytes), (1000 + 2 * TRIM_PADDING, 800 + 2 * TRIM_PADDING));
+    }
+
+    /// Photo-like RGBA: smooth gradients under mild sensor-style noise, which
+    /// defeats PNG's filters but suits JPEG.
+    fn photo_rgba(w: u32, h: u32) -> Vec<u8> {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut out = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let n = (state & 0x1F) as u32;
+                let r = (x * 200 / w + n).min(255) as u8;
+                let g = (y * 200 / h + n).min(255) as u8;
+                let b = ((x + y) * 100 / (w + h) + n).min(255) as u8;
+                out.extend_from_slice(&[r, g, b, 255]);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn photographic_content_falls_back_to_jpeg() {
+        let att = encode_for_upload(photo_rgba(1568, 1176), 1568, 1176, ImageOrigin::Markup).unwrap();
+        assert_eq!(att.mime, ImageMime::Jpeg, "{} bytes", att.bytes.len());
+        assert!(att.bytes.starts_with(&[0xFF, 0xD8]), "JPEG SOI marker");
+        assert!(att.bytes.len() < JPEG_FALLBACK_BYTES, "{} bytes", att.bytes.len());
+        assert_eq!((att.width, att.height), (1568, 1176));
+    }
+
+    #[test]
+    fn graphics_stay_png() {
+        let img = with_box(1200, 900, [255, 255, 255, 255], (100, 100, 800, 600), [0, 0, 0, 255]);
+        let att = encode_for_upload(img, 1200, 900, ImageOrigin::Markup).unwrap();
+        assert_eq!(att.mime, ImageMime::Png);
+    }
+
+    #[test]
+    fn jpeg_flattens_alpha_onto_white() {
+        // Fully transparent pixels must come out white, not black.
+        let jpeg = rgba_to_jpeg(&solid_rgba(16, 16, [0, 0, 0, 0]), 16, 16).unwrap();
+        let (rgba, ..) = crate::images::decode::decode_rgba(&jpeg).unwrap().unwrap();
+        assert!(rgba[0] > 240 && rgba[1] > 240 && rgba[2] > 240, "{:?}", &rgba[..4]);
     }
 
     #[test]
