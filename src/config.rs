@@ -552,6 +552,9 @@ struct UiConfig {
     /// Screen top-left the overlay was last left at. Written by the app when
     /// `position = "remembered"`.
     panel_position: Option<[f32; 2]>,
+    /// Screen top-left the Settings panel was last left at. Written by the
+    /// app when the panel closes; absent = the middle of the display.
+    settings_position: Option<[f32; 2]>,
     /// UI zoom factor, 0.5–3.0 (default 1.0). Cmd/Ctrl +/−/0 change it at
     /// runtime and the app writes the result back.
     zoom: Option<f32>,
@@ -900,6 +903,12 @@ impl Config {
     /// `[ui].panel_position` (screen top-left), if finite.
     pub fn ui_panel_position(&self) -> Option<(f32, f32)> {
         let [x, y] = self.ui.panel_position?;
+        (x.is_finite() && y.is_finite()).then_some((x, y))
+    }
+
+    /// `[ui].settings_position` (screen top-left), if finite.
+    pub fn ui_settings_position(&self) -> Option<(f32, f32)> {
+        let [x, y] = self.ui.settings_position?;
         (x.is_finite() && y.is_finite()).then_some((x, y))
     }
 
@@ -1469,7 +1478,7 @@ fn starter_template() -> String {
     ));
     t.push_str(&s("default_model", "", "model profile active at startup (a [[models]] name or the [api] model); unset = first"));
     t.push_str(&r("panel_size", "[512, 380]", "overlay size in points; the resize grip writes this, double-click it to reset"));
-    t.push_str(&s("position", "cursor", "\"cursor\" = centered on the trigger point; \"remembered\" = where you last left it (panel_position is written for you)"));
+    t.push_str(&s("position", "cursor", "\"cursor\" = centered on the trigger point; \"remembered\" = where you last left it (panel_position is written for you; Settings always reopens where it was left, via settings_position)"));
     t.push_str(&r("zoom", "1.0", "UI scale 0.5-3.0; Cmd/Ctrl +/- change it at runtime and it is written back"));
     t.push_str(&s("theme", "dark", "\"dark\" | \"light\" | \"system\" (follow the OS appearance)"));
     t.push('\n');
@@ -2265,16 +2274,18 @@ X-Test = "1"
     #[test]
     fn ui_placement_zoom_and_position_parse_with_safe_defaults() {
         let c: Config = toml::from_str(
-            "[ui]\nposition = \"Remembered\"\npanel_position = [120, 80]\nzoom = 1.25\n",
+            "[ui]\nposition = \"Remembered\"\npanel_position = [120, 80]\nsettings_position = [10, 20]\nzoom = 1.25\n",
         )
         .unwrap();
         assert_eq!(c.ui_placement(), PanelPlacement::Remembered);
         assert_eq!(c.ui_panel_position(), Some((120.0, 80.0)));
+        assert_eq!(c.ui_settings_position(), Some((10.0, 20.0)));
         assert_eq!(c.ui_zoom(), 1.25);
 
         let d = Config::default();
         assert_eq!(d.ui_placement(), PanelPlacement::Cursor);
         assert_eq!(d.ui_panel_position(), None);
+        assert_eq!(d.ui_settings_position(), None);
         assert_eq!(d.ui_zoom(), 1.0);
 
         let odd: Config = toml::from_str("[ui]\nposition = \"corner\"\nzoom = 9.0\n").unwrap();

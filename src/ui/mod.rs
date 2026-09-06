@@ -180,7 +180,8 @@ pub struct OverlayApp {
     /// `ClipboardManager` so `copy_and_read` can wait for an actual modifier
     /// release instead of a flat settle delay. See `start_capture`.
     modifier_state: ModifierState,
-    /// Mouse cursor position captured at hotkey trigger time.
+    /// The point the window is centered on: the cursor at hotkey trigger
+    /// time, or the display center for Settings.
     spawn_position: Option<egui::Pos2>,
     /// Whether the startup hide has begun (the initial visibility command was sent).
     initial_hide_done: bool,
@@ -221,6 +222,8 @@ pub struct OverlayApp {
     placement: PanelPlacement,
     /// Screen top-left to reopen at (`Remembered` only); refreshed on hide.
     remembered_pos: Option<egui::Pos2>,
+    /// Screen top-left the Settings panel was last left at (`[ui].settings_position`).
+    settings_pos: Option<egui::Pos2>,
     /// `[ui].zoom` as last written; compared on hide to persist keyboard zoom.
     saved_zoom: f32,
     /// Zoom factor seen by the last viewport pass — a change re-sends the
@@ -370,6 +373,7 @@ impl OverlayApp {
             panel_size: panel_size_from_config(),
             placement: crate::config::get().ui_placement(),
             remembered_pos: crate::config::get().ui_panel_position().map(|(x, y)| egui::pos2(x, y)),
+            settings_pos: crate::config::get().ui_settings_position().map(|(x, y)| egui::pos2(x, y)),
             saved_zoom: crate::config::get().ui_zoom(),
             last_zoom: 1.0,
             zoom_applied: false,
@@ -438,6 +442,7 @@ impl OverlayApp {
             panel_size: panel_size_from_config(),
             placement: crate::config::get().ui_placement(),
             remembered_pos: crate::config::get().ui_panel_position().map(|(x, y)| egui::pos2(x, y)),
+            settings_pos: crate::config::get().ui_settings_position().map(|(x, y)| egui::pos2(x, y)),
             saved_zoom: crate::config::get().ui_zoom(),
             last_zoom: 1.0,
             zoom_applied: false,
@@ -547,19 +552,43 @@ impl OverlayApp {
         self.settings = Some(form);
         self.profile_test = None;
         self.profile_test_result = None;
-        self.capture_mouse_position();
+        // A dialog, not a trigger-bound view: back where it was left, or the
+        // first time in the middle of the cursor's display — never on the
+        // cursor (where the tray click landed is noise).
+        let placement = settings_placement(self.settings_pos, self.platform.mouse_position(), |x, y| {
+            self.platform.display_bounds_at_point(x, y)
+        });
+        self.spawn_position = placement.map(|p| match p {
+            SettingsPlacement::Anchor(p) | SettingsPlacement::Center(p) => p,
+        });
         self.last_sent_pos = None;
         self.last_desired_size = None;
-        // Centered on the cursor's monitor from an estimated size; the real
-        // size lands on the first frame and only grows the window in place.
+        // Placed from an estimated size, clamped into the display's work
+        // area; the real size lands on the first frame and only grows the
+        // window in place.
         let estimated = egui::vec2(theme::size::SETTINGS_WIDTH + theme::size::SHADOW_PAD * 2.0, 520.0);
-        let pos = self.calculate_centered_position(estimated).map(|p| (p.x, p.y));
-        if self.platform.show_window(pos) {
+        let (bounds, scale) = self.spawn_bounds_and_scale();
+        let pos = placement.map(|p| match p {
+            SettingsPlacement::Anchor(anchor) => anchored_position_screen(anchor, estimated, scale, bounds),
+            SettingsPlacement::Center(center) => centered_position_screen(center, estimated, scale, bounds),
+        });
+        if self.platform.show_window(pos.map(|p| (p.x, p.y))) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         }
         #[cfg(feature = "diagnostics")]
         self.diag_transition("Settings");
         ctx.request_repaint();
+    }
+
+    /// Record where the Settings window is for the next open. True when the
+    /// position changed (by at least a point).
+    fn note_settings_position(&mut self, ctx: &egui::Context) -> bool {
+        let Some(pos) = self.current_top_left_screen(ctx) else { return false };
+        if self.settings_pos.is_some_and(|p| (p - pos).length() < 1.0) {
+            return false;
+        }
+        self.settings_pos = Some(pos);
+        true
     }
 
     fn close_settings(&mut self, ctx: &egui::Context) {
@@ -568,6 +597,12 @@ impl OverlayApp {
         self.profile_test_result = None;
         if self.settings.take().is_none() {
             return;
+        }
+        // Read before the hide: the viewport rect is gone afterwards.
+        if self.note_settings_position(ctx)
+            && let Some(pos) = self.settings_pos
+        {
+            persist_ui_value("settings_position", Some(crate::settings::point_pair(pos.x, pos.y)));
         }
         ctx.memory_mut(|m| m.reset_areas());
         self.hide_window(ctx);
@@ -2208,6 +2243,35 @@ fn centered_position_screen(
     center_clamped_to_bounds(cursor, win_size_points * scale, bounds)
 }
 
+/// Where the Settings panel opens, in screen coordinates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SettingsPlacement {
+    /// Its last top-left, still on a display (clamped into that display's
+    /// work area when shown).
+    Anchor(egui::Pos2),
+    /// Centered on the middle of the display under the cursor — or on the
+    /// cursor itself when its display is unknown.
+    Center(egui::Pos2),
+}
+
+/// The last top-left wins while it is on a display (`bounds_at` says which);
+/// a stale one (monitor gone) or none at all opens in the middle of the
+/// cursor's display.
+fn settings_placement(
+    remembered: Option<egui::Pos2>,
+    mouse: Option<(f64, f64)>,
+    bounds_at: impl Fn(f64, f64) -> Option<(f64, f64, f64, f64)>,
+) -> Option<SettingsPlacement> {
+    if let Some(last) = remembered
+        && bounds_at(f64::from(last.x), f64::from(last.y)).is_some()
+    {
+        return Some(SettingsPlacement::Anchor(last));
+    }
+    let (x, y) = mouse?;
+    let center = bounds_at(x, y).map_or((x, y), |(ox, oy, w, h)| (ox + w / 2.0, oy + h / 2.0));
+    Some(SettingsPlacement::Center(egui::pos2(center.0 as f32, center.1 as f32)))
+}
+
 /// Anchored variant of `centered_position_screen` — same unit contract, but
 /// keeps a fixed top-left instead of centering (see `anchored_clamped_to_bounds`).
 fn anchored_position_screen(
@@ -3031,6 +3095,44 @@ mod tests {
         // Inside the mock display's work area, so no clamping applies.
         app.resize_anchor = Some(egui::pos2(60.0, 80.0));
         assert_eq!(app.calculate_target_position(win), Some(egui::pos2(60.0, 80.0)));
+    }
+
+    /// Settings reopens where it was last left while that point is still on
+    /// a display; otherwise (first open, monitor gone) it opens in the middle
+    /// of the display the cursor is on, wherever the tray click landed.
+    #[test]
+    fn settings_reopens_where_it_was_left_else_at_the_display_center() {
+        use SettingsPlacement::{Anchor, Center};
+        let display = |x: f64, y: f64| ((0.0..1920.0).contains(&x) && (0.0..1080.0).contains(&y)).then_some((0.0, 25.0, 1920.0, 1055.0));
+        let center = Some(Center(egui::pos2(960.0, 552.5)));
+        let left = Some(egui::pos2(300.0, 400.0));
+        assert_eq!(settings_placement(left, Some((900.0, 900.0)), display), Some(Anchor(egui::pos2(300.0, 400.0))));
+        assert_eq!(settings_placement(left, None, display), Some(Anchor(egui::pos2(300.0, 400.0))), "no cursor needed for a known position");
+        assert_eq!(settings_placement(Some(egui::pos2(5000.0, 400.0)), Some((900.0, 900.0)), display), center, "stale position: the display center");
+        assert_eq!(settings_placement(None, Some((900.0, 900.0)), display), center);
+        assert_eq!(settings_placement(None, Some((40.0, 10.0)), display), center, "the click position is noise");
+        assert_eq!(settings_placement(None, Some((2500.0, 300.0)), display), Some(Center(egui::pos2(2500.0, 300.0))), "unknown display: the cursor");
+        assert_eq!(settings_placement(None, None, display), None);
+    }
+
+    /// Closing Settings notes the window's top-left for the next open; an
+    /// unchanged position is not a change (nothing to persist).
+    #[test]
+    fn closing_settings_notes_the_window_position() {
+        let _lock = crate::clipboard::test_support::lock_clipboard();
+        let (mut app, _resp_tx) = new_test_app();
+        let ctx = egui::Context::default();
+        app.settings_pos = None;
+        let mut raw = egui::RawInput::default();
+        raw.viewports.entry(egui::ViewportId::ROOT).or_default().outer_rect =
+            Some(egui::Rect::from_min_size(egui::pos2(300.0, 400.0), egui::vec2(600.0, 520.0)));
+        let mut changed = false;
+        let _ = ctx.run(raw.clone(), |ctx| changed = app.note_settings_position(ctx));
+        assert!(changed, "first note is a change");
+        assert_eq!(app.settings_pos, Some(egui::pos2(300.0, 400.0)));
+        let mut again = false;
+        let _ = ctx.run(raw, |ctx| again = app.note_settings_position(ctx));
+        assert!(!again, "the same position again is not a change");
     }
 
     /// A zoom change re-sends the (unchanged) point size, so eframe applies
