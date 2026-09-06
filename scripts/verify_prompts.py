@@ -391,12 +391,11 @@ def case_image(case: dict) -> dict | None:
 
 
 def structured_user_text(user: str, image: dict | None) -> str:
-    """The user text as the client sends it: unchanged without an image, else the
-    ``<metadata>`` block followed by the text inside ``<content>``."""
-    if not image:
-        return user
-    head = f"<metadata>\nattachments: 1 image\n{image['meta']}\n</metadata>"
-    return f"{head}\n<content>\n{user}\n</content>" if user else head
+    """The user text as the client sends it: the text inside ``<content>``,
+    preceded by the ``<metadata>`` block when an image is attached."""
+    head = f"<metadata>\nattachments: 1 image\n{image['meta']}\n</metadata>" if image else ""
+    body = f"<content>\n{user}\n</content>" if user else ""
+    return "\n".join(p for p in (head, body) if p)
 
 
 NO_VISION_RE = re.compile(r"image|vision|multimodal|content type", re.I)
@@ -440,7 +439,7 @@ def build_request(
     knob = (model.get("thinking_control") or "reasoning_effort").lower()
     if knob == "auto":
         knob = "reasoning_effort"
-    content: str | list[dict] = user
+    content: str | list[dict] = structured_user_text(user, None)
     if image:
         content = [
             {"type": "text", "text": structured_user_text(user, image)},

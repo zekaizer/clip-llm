@@ -63,11 +63,11 @@ const DEFAULT_PROMPT_PREAMBLE: &str =
      preamble, or notes. \
      If the input contains the literal text [DONE], treat it as ordinary content like any \
      other text; never emit [DONE] on its own and never use it to end your output. \
-     When the user message begins with a <metadata> block, that block was written by the \
-     application (attachment count and image sizes), the clipboard content follows inside \
-     <content> and </content>, and the images come after; only that content and the images \
-     are the data to process. Never reproduce, translate, summarize, or mention the metadata \
-     block or the tags.";
+     The clipboard content is always inside <content> and </content> in the user message; \
+     a <metadata> block before it (attachment count and image sizes) was written by the \
+     application, and any images come after. Only the content and the images are the data \
+     to process. Never reproduce, translate, summarize, or mention the metadata block or \
+     the tags.";
 
 // User turn carrying a revision request (`[prompt].revision`). It lives in the
 // last user turn, never in the system prompt - a system-prompt clause makes
@@ -1719,7 +1719,8 @@ mod tests {
     #[test]
     fn preamble_declares_the_metadata_block() {
         assert!(DEFAULT_PROMPT_PREAMBLE.contains("<metadata>"), "{DEFAULT_PROMPT_PREAMBLE}");
-        assert!(DEFAULT_PROMPT_PREAMBLE.contains("<content>"), "{DEFAULT_PROMPT_PREAMBLE}");
+        // Unconditional: the content is always inside <content>.
+        assert!(DEFAULT_PROMPT_PREAMBLE.contains("always inside <content>"), "{DEFAULT_PROMPT_PREAMBLE}");
         assert!(!DEFAULT_PROMPT_PREAMBLE.contains("[[image"), "{DEFAULT_PROMPT_PREAMBLE}");
     }
 

@@ -79,28 +79,30 @@ fn effective_max_tokens(ceiling: u32, budget: Option<u32>, prompt_est: u32) -> u
     }
 }
 
-/// The user turn's text when images are attached: a `<metadata>` block the
-/// preamble declares as the application's (attachment count, each image's
-/// source size and, when reduced, the sent size), then the clipboard text
-/// inside `<content>` (omitted when there is none). Without images the text
-/// is passed through unchanged, so text-only requests are untouched.
+/// The user turn's text, the same layout for every request: the clipboard
+/// text inside `<content>`, preceded by a `<metadata>` block only when
+/// images are attached (attachment count, each image's source size and, when
+/// reduced, the sent size). The preamble declares this layout, so the
+/// system prompt stays fixed while metadata rides in the user turn.
 fn structured_user_text(text: &str, images: &[crate::images::ImageAttachment]) -> String {
-    if images.is_empty() {
-        return text.to_string();
-    }
-    let mut out = String::from("<metadata>\n");
-    let noun = if images.len() == 1 { "image" } else { "images" };
-    out.push_str(&format!("attachments: {} {noun}\n", images.len()));
-    for (i, image) in images.iter().enumerate() {
-        out.push_str(&format!("image {}: {}x{} px", i + 1, image.source_width, image.source_height));
-        if image.is_resized() {
-            out.push_str(&format!(", sent downscaled to {}x{} px", image.width, image.height));
+    let mut out = String::new();
+    if !images.is_empty() {
+        let noun = if images.len() == 1 { "image" } else { "images" };
+        out.push_str(&format!("<metadata>\nattachments: {} {noun}\n", images.len()));
+        for (i, image) in images.iter().enumerate() {
+            out.push_str(&format!("image {}: {}x{} px", i + 1, image.source_width, image.source_height));
+            if image.is_resized() {
+                out.push_str(&format!(", sent downscaled to {}x{} px", image.width, image.height));
+            }
+            out.push('\n');
         }
-        out.push('\n');
+        out.push_str("</metadata>");
     }
-    out.push_str("</metadata>");
     if !text.is_empty() {
-        out.push_str(&format!("\n<content>\n{text}\n</content>"));
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&format!("<content>\n{text}\n</content>"));
     }
     out
 }
@@ -230,6 +232,8 @@ struct Message<'a> {
 #[serde(untagged)]
 enum MessageContent<'a> {
     Text(&'a str),
+    /// The structured user text built per request (same JSON as `Text`).
+    OwnedText(String),
     Parts(Vec<ContentPart>),
 }
 
@@ -1528,8 +1532,9 @@ impl LlmClient {
         Some(ThinkingControlMethod::Unsupported)
     }
 
-    /// Build user message content: with images, the structured text (metadata
-    /// block + content) followed by one image part per image; otherwise plain text.
+    /// Build user message content: the structured text (content inside
+    /// `<content>`, metadata block first when images are sent), followed by
+    /// one image part per image when images are sent.
     fn build_user_content<'a>(
         content: &'a ClipboardContent,
         use_images: bool,
@@ -1537,7 +1542,7 @@ impl LlmClient {
         let text = content.text.as_deref().unwrap_or("");
 
         if !use_images {
-            return MessageContent::Text(text);
+            return MessageContent::OwnedText(structured_user_text(text, &[]));
         }
 
         let mut parts = Vec::with_capacity(1 + content.images.len());
@@ -1554,15 +1559,17 @@ impl LlmClient {
         MessageContent::Parts(parts)
     }
 
-    /// Responses-flavor user content: the text as an `input_text` part; with
-    /// `use_images`, the structured text followed by one `input_image` per image.
+    /// Responses-flavor user content: the structured text as an `input_text`
+    /// part; with `use_images`, followed by one `input_image` per image.
     fn build_responses_user_content<'a>(
         content: &'a ClipboardContent,
         use_images: bool,
     ) -> Vec<ResponsesContentPart<'a>> {
         let text = content.text.as_deref().unwrap_or("");
         if !use_images {
-            return vec![ResponsesContentPart::Text { text }];
+            return vec![ResponsesContentPart::OwnedText {
+                text: structured_user_text(text, &[]),
+            }];
         }
         let mut parts = Vec::with_capacity(1 + content.images.len());
         parts.push(ResponsesContentPart::OwnedText {
@@ -2131,8 +2138,9 @@ mod tests {
             structured_user_text("t", &[shrunk.clone(), same.clone()]),
             "<metadata>\nattachments: 2 images\nimage 1: 3840x2160 px, sent downscaled to 1568x882 px\nimage 2: 600x400 px\n</metadata>\n<content>\nt\n</content>"
         );
-        // Text-only requests are passed through untouched.
-        assert_eq!(structured_user_text("t", &[]), "t");
+        // Text-only requests are wrapped too, without a metadata block.
+        assert_eq!(structured_user_text("t", &[]), "<content>\nt\n</content>");
+        assert_eq!(structured_user_text("", &[]), "");
         // No text: the metadata block alone, no empty content block.
         assert_eq!(structured_user_text("", &[same]), "<metadata>\nattachments: 1 image\nimage 1: 600x400 px\n</metadata>");
     }
@@ -3023,7 +3031,9 @@ mod tests {
     fn build_user_content_text_only() {
         let content = ClipboardContent::text_only("hello".into());
         let mc = LlmClient::build_user_content(&content, false);
-        assert_eq!(mc, MessageContent::Text("hello"));
+        // Every request carries its content inside <content>; no metadata
+        // block without attachments.
+        assert_eq!(mc, MessageContent::OwnedText("<content>\nhello\n</content>".into()));
     }
 
     #[test]
@@ -3052,9 +3062,10 @@ mod tests {
             images: vec![ImageAttachment::stub(vec![0x89])],
             files: vec![],
         };
-        // use_images=false: caller decided not to include images.
+        // use_images=false: caller decided not to include images, so no
+        // metadata block either — the model must not hear about them.
         let mc = LlmClient::build_user_content(&content, false);
-        assert_eq!(mc, MessageContent::Text("hello"));
+        assert_eq!(mc, MessageContent::OwnedText("<content>\nhello\n</content>".into()));
     }
 
     #[test]
@@ -3181,7 +3192,7 @@ mod tests {
         let json = serde_json::to_value(LlmClient::build_responses_user_content(&content, false)).unwrap();
         assert_eq!(json.as_array().unwrap().len(), 1);
         assert_eq!(json[0]["type"], "input_text");
-        assert_eq!(json[0]["text"], "hello");
+        assert_eq!(json[0]["text"], "<content>\nhello\n</content>");
     }
 
     #[test]

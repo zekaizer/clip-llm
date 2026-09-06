@@ -153,7 +153,7 @@ class RequestShape(unittest.TestCase):
         self.assertEqual(vp.structured_user_text("", image), "<metadata>\nattachments: 1 image\nimage 1: 600x400 px\n</metadata>")
         # Without an image the user content stays a plain string / single part.
         _, _, body = vp.build_request(self.openai(), "SYS", "USER", "think", 1)
-        self.assertEqual(body["messages"][1]["content"], "USER")
+        self.assertEqual(body["messages"][1]["content"], "<content>\nUSER\n</content>")
 
     def test_no_vision_rejection_is_recognised_only_for_image_cases(self):
         self.assertTrue(vp.is_no_vision_rejection("HTTP 400: {\"error\":\"model does not support image_url content\"}"))
@@ -174,7 +174,7 @@ class RequestShape(unittest.TestCase):
         self.assertEqual(url, "https://api.x.ai/v1/responses")
         self.assertEqual(headers["Authorization"], "Bearer tok")
         self.assertEqual(body["instructions"], "SYS")
-        self.assertEqual(body["input"][0]["content"][0]["text"], "USER")
+        self.assertEqual(body["input"][0]["content"][0]["text"], "<content>\nUSER\n</content>")
         self.assertIs(body["store"], False)
         self.assertEqual(body["max_output_tokens"], 50)
         self.assertNotIn("reasoning", body)
