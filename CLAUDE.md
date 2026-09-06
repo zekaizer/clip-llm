@@ -57,7 +57,8 @@ The project follows a 7-phase incremental plan defined in [docs/REQUIREMENTS.md]
 - `src/coordinator.rs` — hotkey event → tap detection → `TapEvent` dispatch (dedicated thread)
 - `src/hotkey.rs` — `HotkeyDetector` state machine, `TapAction`, `TapEvent`
 - `src/clipboard.rs` — `ClipboardManager` (read/write, copy simulation + poll)
-- `src/files.rs` — file-list clipboard ingestion (`ingest_files`: UTF-8 text + PNG → `ClipboardContent`)
+- `src/files.rs` — file-list clipboard ingestion (`ingest_files`: UTF-8 text + image files → `ClipboardContent`)
+- `src/images/` — everything an image goes through before a request: `ImageAttachment` (bytes + MIME + source/sent size + origin), `cap_for_request` (4 images / 8 MiB); `decode.rs` (PNG/JPEG/GIF/WebP/BMP → RGBA, pixel budget from the header), `encode.rs` (margin trim → 1568px → PNG, JPEG fallback over 1.5 MB), `filter.rs` (meaningfulness: markup prefilter + pixel checks + `select_top`), `html.rs` (`<img>` refs from `public.html` / CF_HTML), `fetch.rs` (`data:` / `file:` / `http(s)` bytes, bounded), `markup.rs` (the pipeline over an injected fetcher). Only markup images are filtered; clipboard/file images are deliberate
 - `src/lang.rs` — input-language cues for Translate: `prose_is_korean` (direction, ADR-0002) and `is_lookup` (dictionary entry); fixture `scripts/lang_direction_vectors.json` shared with the harness
 - `src/settings.rs` — settings panel model (`SettingsForm` → `SettingsPatch` → `toml_edit` in-place write; ADR-0001)
 - `src/worker.rs` — async LLM request worker thread
@@ -137,6 +138,7 @@ on `WorkerCommand::SelectModel`, re-probing capabilities per profile):
 - Endpoint: OpenAI-compatible `/v1/chat/completions`
 - Response parsing: extract `choices[0].message.content`
 - Think-block stripping: regex `(?s)<think>.*?</think>`, trim whitespace after
+- User turn layout (both flavors, every request): the clipboard text inside `<content>…</content>`; when images are sent, a `<metadata>` block first (attachment count; per image the source size and, when reduced, the sent size) and one image part per image after the text. The shared preamble (`DEFAULT_PROMPT_PREAMBLE`) declares that layout so Transcribe/Summarize never reproduce the block or the tags — keep `structured_user_text` and the preamble sentence in sync. Measured 2026-09-06: a per-image marker text part next to each image was copied into Transcribe output by gemma-4-e2b; the metadata block was not. `scripts/prompt_vectors.json` I-001..I-003 check for leaks with `scripts/fixtures/chart.png`
 - Thinking control (No Think) is probed per profile by **effect**, not acceptance: `reasoning_effort:"none"` → `chat_template_kwargs.enable_thinking=false` → `/no_think`, keeping the first whose reply shows no reasoning (`reasoning_tokens`, `reasoning_content`, inline `<think>`). LM Studio accepts unknown fields with 200 and keeps thinking, which is why acceptance was never enough. `thinking_control` in a profile forces the method.
 - SSE (Phase 2+): parse `data: {...}` lines, accumulate `choices[0].delta.content`, finalize on `[DONE]`
 - Revision rounds (both flavors): `system` and the content turn are byte-identical to the base request (prefix cache), then per round an `assistant` turn (the reply being revised) and a `user` turn (the instruction inside `[prompt].revision`, a fixed operator frame). Only the last `REVISION_WINDOW` rounds are replayed. The frame is in the user turn on purpose: a system-prompt clause made models treat request-shaped content as instructions (gemma T-006, grok G-004) — do not move it.
@@ -147,4 +149,4 @@ on `WorkerCommand::SelectModel`, re-probing capabilities per profile):
 - Auth: piggybacks the official Grok CLI's OAuth session (`~/.grok/auth.json`); tokens auto-refresh via `https://auth.x.ai/oauth2/token` and rotated tokens are written back to the store (xAI rotates the refresh token on every use, so write-back is required to keep the CLI session alive)
 - Request shape: system prompt goes in top-level `instructions` (system items inside `input` are rejected); `store: false`; never request `reasoning.encrypted_content`
 - SSE: typed events, no `[DONE]` — `response.output_text.delta` (content), `response.reasoning_*_text.delta` (reasoning), terminal `response.completed`/`response.incomplete` (mapped in `SseParser` onto the same `SseEvent` vocabulary, token cap → `"length"`)
-- Text-only for now: vision/thinking probes are skipped for this flavor
+- Images: `input_image` parts carrying a `data:` URI as a plain string (not the `{url}` object of chat/completions), after the `input_text` part; vision is probed like the chat flavor, with `max_output_tokens` at the schema minimum of 16 so the probe cannot 400 on the cap itself

@@ -53,6 +53,17 @@ class SystemPromptComposition(unittest.TestCase):
         self.assertIn("are Korean and English", body)
         self.assertNotIn("{primary_lang}", system)
 
+    def test_explain_and_transcribe_come_from_config_rs_with_overrides(self):
+        defaults = vp.load_defaults()
+        explain = vp.build_system({"mode": "explain", "input": "x"}, {}, defaults)
+        self.assertIn("explanation", explain.lower())
+        self.assertTrue(explain.startswith(defaults["preamble"].replace("{primary_lang}", "Korean")))
+        transcribe = vp.build_system({"mode": "transcribe", "input": "x"}, {}, defaults)
+        self.assertIn("Transcribe", transcribe)
+        self.assertNotIn("{primary_lang}", explain + transcribe)
+        over = vp.build_system({"mode": "transcribe", "input": "x"}, {"transcribe": {"prompt": "T {primary_lang}"}}, defaults)
+        self.assertTrue(over.endswith("\n\nT Korean"), over[-40:])
+
     def test_rephrase_same_length_is_single_spaced(self):
         system = vp.build_system({"mode": "rephrase", "style": "correct", "length": "same"}, {}, self.defaults)
         self.assertNotIn("  ", system.split("\n\n", 1)[1])
@@ -125,13 +136,45 @@ class RequestShape(unittest.TestCase):
         _, _, body = vp.build_request(self.openai(thinking_control="none"), "SYS", "U", "no_think", 1)
         self.assertNotIn("reasoning_effort", body)
 
+    def test_image_vectors_attach_marker_and_image_in_both_flavors(self):
+        image = {"data_uri": "data:image/png;base64,AAAA", "meta": "image 1: 600x400 px"}
+        structured = "<metadata>\nattachments: 1 image\nimage 1: 600x400 px\n</metadata>\n<content>\nUSER\n</content>"
+        _, _, body = vp.build_request(self.openai(), "SYS", "USER", "think", 1, image=image)
+        content = body["messages"][1]["content"]
+        self.assertEqual([p["type"] for p in content], ["text", "image_url"])
+        self.assertEqual(content[0]["text"], structured)
+        self.assertEqual(content[1]["image_url"]["url"], image["data_uri"])
+        grok = {"name": "g", "provider": "grok-oauth", "model": "grok-4.3", "access_token": "tok"}
+        _, _, body = vp.build_request(grok, "SYS", "USER", "think", 1, image=image)
+        parts = body["input"][0]["content"]
+        self.assertEqual([p["type"] for p in parts], ["input_text", "input_image"])
+        self.assertEqual(parts[0]["text"], structured)
+        self.assertEqual(parts[1]["image_url"], image["data_uri"])
+        self.assertEqual(vp.structured_user_text("", image), "<metadata>\nattachments: 1 image\nimage 1: 600x400 px\n</metadata>")
+        # Without an image the user content stays a plain string / single part.
+        _, _, body = vp.build_request(self.openai(), "SYS", "USER", "think", 1)
+        self.assertEqual(body["messages"][1]["content"], "<content>\nUSER\n</content>")
+
+    def test_no_vision_rejection_is_recognised_only_for_image_cases(self):
+        self.assertTrue(vp.is_no_vision_rejection("HTTP 400: {\"error\":\"model does not support image_url content\"}"))
+        self.assertTrue(vp.is_no_vision_rejection("HTTP 400: content type not supported by this model"))
+        self.assertFalse(vp.is_no_vision_rejection("HTTP 400: max_tokens too large"))
+        self.assertFalse(vp.is_no_vision_rejection("HTTP 429: rate limited (image)"))
+        self.assertFalse(vp.is_no_vision_rejection("stop"))
+
+    def test_case_image_loads_the_fixture_with_the_app_marker(self):
+        self.assertIsNone(vp.case_image({"id": "x"}))
+        image = vp.case_image({"id": "x", "image": "chart.png"})
+        self.assertEqual(image["meta"], "image 1: 600x400 px")
+        self.assertTrue(image["data_uri"].startswith("data:image/png;base64,iVBOR"))
+
     def test_grok_oauth_uses_the_responses_api(self):
         m = {"name": "g", "provider": "grok-oauth", "model": "grok-4.3", "access_token": "tok"}
         url, headers, body = vp.build_request(m, "SYS", "USER", "no_think", 50)
         self.assertEqual(url, "https://api.x.ai/v1/responses")
         self.assertEqual(headers["Authorization"], "Bearer tok")
         self.assertEqual(body["instructions"], "SYS")
-        self.assertEqual(body["input"][0]["content"][0]["text"], "USER")
+        self.assertEqual(body["input"][0]["content"][0]["text"], "<content>\nUSER\n</content>")
         self.assertIs(body["store"], False)
         self.assertEqual(body["max_output_tokens"], 50)
         self.assertNotIn("reasoning", body)
@@ -260,6 +303,19 @@ class DictionaryEntryGrading(unittest.TestCase):
 
     def _fails(self, out):
         return [n for n, ok, _ in vp.grade(self.CASE, out, "stop") if not ok]
+
+    def test_senses_must_be_in_the_primary_language(self):
+        english_senses = "# throughput\n**처리량** · `스루풋` · *noun*\n1. The amount of work done per unit of time.\n> The API throughput doubled. — API 처리량이 두 배가 되었다."
+        self.assertIn("senses-lang", self._fails(english_senses))
+        korean_senses = "# throughput\n**처리량** · `스루풋` · *noun*\n1. 단위 시간당 처리되는 작업의 양.\n2. 네트워크의 실제 전송률 (data rate).\n> The API throughput doubled. — API 처리량이 두 배가 되었다."
+        self.assertNotIn("senses-lang", self._fails(korean_senses))
+
+    def test_slot_names_copied_from_the_prompt_fail(self):
+        echoed = "# UNCENSORED\n**EQUIVALENT** · `언센서드` · *ADJECTIVE*\n1. 검열되지 않은.\n> EXAMPLE SENTENCE — 번역."
+        fails = self._fails(echoed)
+        self.assertIn("slot-echo", fails)
+        clean = "# uncensored\n**무검열** · `언센서드` · *adjective*\n1. 검열되지 않은.\n> An uncensored build. — 무검열 빌드."
+        self.assertNotIn("slot-echo", self._fails(clean))
 
     def test_hangul_transliteration_that_differs_from_the_equivalent_passes(self):
         self.assertEqual(self._fails("# throughput\n**처리량** · `스루풋` · *noun*\n1. 뜻"), [])

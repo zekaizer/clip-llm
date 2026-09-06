@@ -39,6 +39,7 @@ Exit code is non-zero if any case fails (CI-friendly).
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import re
 import sys
@@ -126,6 +127,8 @@ def load_defaults(path: Path = CONFIG_RS) -> dict:
         "lookup_to_primary": rust_str_const(src, "DEFAULT_LOOKUP_TO_PRIMARY"),
         "translate": rust_str_const(src, "DEFAULT_TRANSLATE_PROMPT"),
         "summarize": rust_str_const(src, "DEFAULT_SUMMARIZE_PROMPT"),
+        "explain": rust_str_const(src, "DEFAULT_EXPLAIN_PROMPT"),
+        "transcribe": rust_str_const(src, "DEFAULT_TRANSCRIBE_PROMPT"),
         "rephrase_base": rust_str_const(src, "DEFAULT_REPHRASE_BASE"),
         "style": {s: rust_str_const(src, "DEFAULT_REPHRASE_STYLE_" + s.upper()) for s in styles},
         "length": {l: rust_str_const(src, "DEFAULT_REPHRASE_LENGTH_" + l.upper()) for l in lengths},
@@ -177,8 +180,8 @@ def build_system(case: dict, cfg: dict, defaults: dict) -> str:
         else:
             sentence = substitute_tokens(defaults["direction_" + direction], lang_vars)
             body = substitute_tokens(tc.get("prompt") or defaults["translate"], lang_vars + [("{direction}", sentence)])
-    elif mode == "summarize":
-        body = substitute_tokens(cfg.get("summarize", {}).get("prompt") or defaults["summarize"], lang_vars)
+    elif mode in ("summarize", "explain", "transcribe"):
+        body = substitute_tokens(cfg.get(mode, {}).get("prompt") or defaults[mode], lang_vars)
     elif mode == "rephrase":
         rc = cfg.get("rephrase", {})
         style = case.get("style") or "correct"
@@ -366,13 +369,58 @@ def grok_access_token(auth_file: str | None = None) -> tuple[str, str | None]:
 # --- requests -----------------------------------------------------------------
 
 
+FIXTURES = HERE / "fixtures"
+
+
+def case_image(case: dict) -> dict | None:
+    """The image a vector attaches (``"image": "<file under scripts/fixtures>"``)
+    as the app sends it: a data URI plus the ``image 1: WxH px`` line of the
+    ``<metadata>`` block the client puts ahead of the content. ``None`` without
+    an image."""
+    name = case.get("image")
+    if not name:
+        return None
+    data = (FIXTURES / name).read_bytes()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError(f"{name}: only PNG fixtures are supported")
+    width, height = int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+    return {
+        "data_uri": "data:image/png;base64," + base64.b64encode(data).decode("ascii"),
+        "meta": f"image 1: {width}x{height} px",
+    }
+
+
+def structured_user_text(user: str, image: dict | None) -> str:
+    """The user text as the client sends it: the text inside ``<content>``,
+    preceded by the ``<metadata>`` block when an image is attached."""
+    head = f"<metadata>\nattachments: 1 image\n{image['meta']}\n</metadata>" if image else ""
+    body = f"<content>\n{user}\n</content>" if user else ""
+    return "\n".join(p for p in (head, body) if p)
+
+
+NO_VISION_RE = re.compile(r"image|vision|multimodal|content type", re.I)
+
+
+def is_no_vision_rejection(finish: str) -> bool:
+    """Whether a call's finish string is a text-only model refusing the image
+    part: HTTP 400 whose body talks about images / content types. The app
+    probes vision per profile and never sends images to such a model, so the
+    harness skips the case instead of failing it."""
+    return finish.startswith("HTTP 400") and bool(NO_VISION_RE.search(finish))
+
+
 def build_request(
     model: dict, system: str, user: str, thinking: str, max_tokens: int, turns: list[tuple[str, str]] = (),
+    image: dict | None = None,
 ) -> tuple[str, dict, dict]:
     """(url, headers, body) for one call, shaped like the app's request. ``turns``
-    are (assistant, user) pairs appended after the content message."""
+    are (assistant, user) pairs appended after the content message; ``image``
+    (from ``case_image``) structures the text and adds the image part."""
     if model.get("provider") == "grok-oauth":
-        inp = [{"role": "user", "content": [{"type": "input_text", "text": user}]}]
+        parts: list[dict] = [{"type": "input_text", "text": structured_user_text(user, image)}]
+        if image:
+            parts.append({"type": "input_image", "image_url": image["data_uri"]})
+        inp = [{"role": "user", "content": parts}]
         for reply, request in turns:
             inp.append({"role": "assistant", "content": [{"type": "output_text", "text": reply}]})
             inp.append({"role": "user", "content": [{"type": "input_text", "text": request}]})
@@ -391,7 +439,13 @@ def build_request(
     knob = (model.get("thinking_control") or "reasoning_effort").lower()
     if knob == "auto":
         knob = "reasoning_effort"
-    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    content: str | list[dict] = structured_user_text(user, None)
+    if image:
+        content = [
+            {"type": "text", "text": structured_user_text(user, image)},
+            {"type": "image_url", "image_url": {"url": image["data_uri"]}},
+        ]
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": content}]
     for reply, request in turns:
         messages.append({"role": "assistant", "content": reply})
         messages.append({"role": "user", "content": request})
@@ -444,10 +498,11 @@ def parse_response(provider: str, data: dict) -> tuple[str, str, int]:
 
 def call(
     model: dict, system: str, user: str, thinking: str, max_tokens: int, turns: list[tuple[str, str]] = (),
+    image: dict | None = None,
 ) -> tuple[str, str, int]:
     """Perform one request with retries on 429/5xx; errors come back as the
     finish string (``HTTP <code>: ...`` / ``ERR ...``)."""
-    url, headers, body = build_request(model, system, user, thinking, max_tokens, turns)
+    url, headers, body = build_request(model, system, user, thinking, max_tokens, turns, image)
     for attempt in range(4):
         req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers)
         try:
@@ -478,6 +533,8 @@ def hangul_ratio(text: str) -> float:
     return 0.0 if (h + l) == 0 else h / (h + l)
 
 
+SENSE_LINE_RE = re.compile(r"^\s*\d+\.\s")
+SLOT_ECHO_RE = re.compile(r"\b(HEADWORD|EQUIVALENT|TRANSLITERATION|PART-OF-SPEECH|SENSE|EXAMPLE SENTENCE)\b")
 KR_MARKER_RE = re.compile(
     r"(니다|습니다|입니다|세요|해요|에요|예요|는다|한다|됩니다|은|는|이|가|을|를|에|의|로|와|과|도|만)"
 )
@@ -582,6 +639,14 @@ def grade(case: dict, output: str, finish: str) -> list[tuple[str, bool, str]]:
             # Equality with the equivalent is fine for loanwords (cache → 캐시 · `캐시`).
             ok = bool(HANGUL_ONLY_RE.match(tr)) and not KOREAN_WORD_SUFFIX_RE.search(tr)
             res.append(("transliteration", ok, "" if ok else f"{tr!r} (equivalent {eq!r})"))
+        # Every sense is written in the primary language (Korean); English
+        # senses for an English headword were the small-model failure.
+        senses = [l for l in output.splitlines() if SENSE_LINE_RE.match(l)]
+        foreign = [l for l in senses if classify_lang(l) != "ko"]
+        res.append(("senses-lang", not foreign, "; ".join(l.strip()[:40] for l in foreign)))
+        # Slot names copied from the prompt's shape (**EQUIVALENT**) are not an entry.
+        echoed = SLOT_ECHO_RE.findall(output)
+        res.append(("slot-echo", not echoed, ", ".join(sorted(set(echoed)))))
 
     return res
 
@@ -646,7 +711,11 @@ def main() -> int:
                 ceiling, int(budget) if budget else None,
                 estimate_prompt_tokens(system) + estimate_prompt_tokens(case["input"]),
             )
-            out, finish, reasoning = call(m, system, case["input"], thinking, max_tokens)
+            image = case_image(case)
+            out, finish, reasoning = call(m, system, case["input"], thinking, max_tokens, image=image)
+            if image and is_no_vision_rejection(finish):
+                print(f"           {m['name']}: SKIP (no vision: {finish[:80]})")
+                continue
             # Revision rounds: each instruction revises the previous reply; the
             # last reply is what gets graded.
             rounds: list[tuple[str, str]] = []
@@ -655,7 +724,7 @@ def main() -> int:
                     break
                 rounds.append((out, instruction))
                 turns = revision_turns(rounds, cfg, defaults)
-                out, finish, reasoning = call(m, system, case["input"], thinking, max_tokens, turns)
+                out, finish, reasoning = call(m, system, case["input"], thinking, max_tokens, turns, image)
             results = grade(case, out, finish)
             ok = all(r[1] for r in results)
             totals[m["name"]][1] += 1

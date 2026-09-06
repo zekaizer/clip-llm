@@ -10,6 +10,7 @@ pub use clipboard::ClipboardContent;
 #[cfg(feature = "diagnostics")]
 pub mod diagnostics;
 pub mod hotkey;
+pub mod images;
 pub mod platform;
 pub mod settings;
 pub mod telemetry;
@@ -588,6 +589,11 @@ pub enum ClipboardError {
     /// A clipboard file could not be read from disk.
     #[error("failed to read file {name}: {reason}")]
     FileReadFailed { name: String, reason: String },
+
+    /// An image exceeds the pixel budget; refused before decoding so a
+    /// pathological header can never allocate gigabytes.
+    #[error("image too large: {width}x{height} (limit {limit_px} pixels)")]
+    ImageTooLarge { width: u32, height: u32, limit_px: u64 },
 
     #[error("copy simulation failed: {0}")]
     CopyFailed(#[from] PlatformError),

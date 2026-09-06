@@ -79,6 +79,43 @@ fn effective_max_tokens(ceiling: u32, budget: Option<u32>, prompt_est: u32) -> u
     }
 }
 
+/// The user turn's text, the same layout for every request: the clipboard
+/// text inside `<content>`, preceded by a `<metadata>` block only when
+/// images are attached (attachment count, each image's source size and, when
+/// reduced, the sent size). The preamble declares this layout, so the
+/// system prompt stays fixed while metadata rides in the user turn.
+fn structured_user_text(text: &str, images: &[crate::images::ImageAttachment]) -> String {
+    let mut out = String::new();
+    if !images.is_empty() {
+        let noun = if images.len() == 1 { "image" } else { "images" };
+        out.push_str(&format!("<metadata>\nattachments: {} {noun}\n", images.len()));
+        for (i, image) in images.iter().enumerate() {
+            out.push_str(&format!("image {}: {}x{} px", i + 1, image.source_width, image.source_height));
+            if image.is_resized() {
+                out.push_str(&format!(", sent downscaled to {}x{} px", image.width, image.height));
+            }
+            out.push('\n');
+        }
+        out.push_str("</metadata>");
+    }
+    if !text.is_empty() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&format!("<content>\n{text}\n</content>"));
+    }
+    out
+}
+
+/// Prompt tokens the attached images cost, for the token budget; zero when
+/// images are not being sent.
+fn image_prompt_tokens(content: &ClipboardContent, use_images: bool) -> u32 {
+    if !use_images {
+        return 0;
+    }
+    content.images.iter().map(|i| i.estimated_tokens()).sum()
+}
+
 /// Whether image parts should be attached to the request: an image-consuming
 /// mode ([`ProcessMode::consumes_images`]), a vision-capable model, and images
 /// actually present on the clipboard.
@@ -195,6 +232,8 @@ struct Message<'a> {
 #[serde(untagged)]
 enum MessageContent<'a> {
     Text(&'a str),
+    /// The structured user text built per request (same JSON as `Text`).
+    OwnedText(String),
     Parts(Vec<ContentPart>),
 }
 
@@ -261,6 +300,13 @@ enum ResponsesContentPart<'a> {
     /// A prior assistant reply replayed as conversation history.
     #[serde(rename = "output_text")]
     OutputText { text: &'a str },
+    /// Inline image as a data URI. The Responses schema carries the URL as a
+    /// plain string, not the `{url}` object of chat/completions.
+    #[serde(rename = "input_image")]
+    InputImage { image_url: String },
+    /// An owned `input_text` part (the structured text built per request).
+    #[serde(rename = "input_text")]
+    OwnedText { text: String },
 }
 
 /// The rounds a request carries: the last [`REVISION_WINDOW`].
@@ -814,6 +860,66 @@ fn classify_vision_status(status: u16) -> Option<bool> {
     }
 }
 
+/// Output cap for the Responses-flavor vision probe. The Responses schema
+/// rejects `max_output_tokens` below 16 with HTTP 400, which the probe would
+/// misread as "no vision" — so the cap is the schema minimum, not 1.
+const RESPONSES_PROBE_MAX_OUTPUT_TOKENS: u32 = 16;
+
+const VISION_PROBE_QUESTION: &str = "Describe this image in one word.";
+
+/// The vision-probe request body for `flavor`: the 1x1 probe image behind a
+/// one-word instruction, in that flavor's request schema.
+fn vision_probe_body(flavor: ApiFlavor, model: &str) -> serde_json::Value {
+    let data_uri = format!("data:image/png;base64,{PROBE_PNG_BASE64}");
+    match flavor {
+        ApiFlavor::OpenAiChat => {
+            let body = ChatRequest {
+                model,
+                messages: vec![Message {
+                    role: "user",
+                    content: MessageContent::Parts(vec![
+                        ContentPart::Text {
+                            text: VISION_PROBE_QUESTION.to_owned(),
+                        },
+                        ContentPart::ImageUrl {
+                            image_url: ImageUrl { url: data_uri },
+                        },
+                    ]),
+                }],
+                temperature: 0.0,
+                max_tokens: 1,
+                stream: None,
+                chat_template_kwargs: None,
+                reasoning_effort: None,
+            };
+            serde_json::to_value(&body).unwrap_or_default()
+        }
+        ApiFlavor::GrokResponses => {
+            // No `reasoning` knob: `effort: "none"` is rejected by some models
+            // (HTTP 400), which the probe would misread as "no vision".
+            let body = ResponsesRequest {
+                model,
+                instructions: "Reply with one word.",
+                input: vec![ResponsesInputItem {
+                    role: "user",
+                    content: vec![
+                        ResponsesContentPart::Text {
+                            text: VISION_PROBE_QUESTION,
+                        },
+                        ResponsesContentPart::InputImage { image_url: data_uri },
+                    ],
+                }],
+                temperature: 0.0,
+                max_output_tokens: RESPONSES_PROBE_MAX_OUTPUT_TOKENS,
+                store: false,
+                stream: None,
+                reasoning: None,
+            };
+            serde_json::to_value(&body).unwrap_or_default()
+        }
+    }
+}
+
 /// An automatic retry the client is about to perform, reported to the
 /// [`RetryNotifier`] right before it sleeps for `delay`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1204,35 +1310,7 @@ impl LlmClient {
             return cached;
         }
 
-        // The Responses flavor is text-only for now: its image input shape
-        // differs (`input_image` items) and is not implemented, so don't
-        // spend a probe request to learn what is already decided.
-        if inner.flavor != ApiFlavor::OpenAiChat {
-            info!("vision probe skipped for {:?}: flavor is text-only", inner.flavor);
-            let _ = inner.supports_vision.set(false);
-            return false;
-        }
-
-        let data_uri = format!("data:image/png;base64,{PROBE_PNG_BASE64}");
-        let body = ChatRequest {
-            model: &inner.model,
-            messages: vec![Message {
-                role: "user",
-                content: MessageContent::Parts(vec![
-                    ContentPart::Text {
-                        text: "Describe this image in one word.".to_owned(),
-                    },
-                    ContentPart::ImageUrl {
-                        image_url: ImageUrl { url: data_uri },
-                    },
-                ]),
-            }],
-            temperature: 0.0,
-            max_tokens: 1,
-            stream: None,
-            chat_template_kwargs: None,
-            reasoning_effort: None,
-        };
+        let body = vision_probe_body(inner.flavor, &inner.model);
 
         info!("probing model vision support...");
         if tracing::enabled!(tracing::Level::TRACE)
@@ -1454,8 +1532,9 @@ impl LlmClient {
         Some(ThinkingControlMethod::Unsupported)
     }
 
-    /// Build user message content: multimodal parts if images should be included,
-    /// otherwise plain text.
+    /// Build user message content: the structured text (content inside
+    /// `<content>`, metadata block first when images are sent), followed by
+    /// one image part per image when images are sent.
     fn build_user_content<'a>(
         content: &'a ClipboardContent,
         use_images: bool,
@@ -1463,25 +1542,45 @@ impl LlmClient {
         let text = content.text.as_deref().unwrap_or("");
 
         if !use_images {
-            return MessageContent::Text(text);
+            return MessageContent::OwnedText(structured_user_text(text, &[]));
         }
 
         let mut parts = Vec::with_capacity(1 + content.images.len());
-        if !text.is_empty() {
-            parts.push(ContentPart::Text {
-                text: text.to_owned(),
-            });
-        }
-        for png_bytes in &content.images {
-            use base64::Engine;
-            let b64 = base64::engine::general_purpose::STANDARD.encode(png_bytes.as_ref());
+        parts.push(ContentPart::Text {
+            text: structured_user_text(text, &content.images),
+        });
+        for image in &content.images {
             parts.push(ContentPart::ImageUrl {
                 image_url: ImageUrl {
-                    url: format!("data:image/png;base64,{b64}"),
+                    url: image.data_uri(),
                 },
             });
         }
         MessageContent::Parts(parts)
+    }
+
+    /// Responses-flavor user content: the structured text as an `input_text`
+    /// part; with `use_images`, followed by one `input_image` per image.
+    fn build_responses_user_content<'a>(
+        content: &'a ClipboardContent,
+        use_images: bool,
+    ) -> Vec<ResponsesContentPart<'a>> {
+        let text = content.text.as_deref().unwrap_or("");
+        if !use_images {
+            return vec![ResponsesContentPart::OwnedText {
+                text: structured_user_text(text, &[]),
+            }];
+        }
+        let mut parts = Vec::with_capacity(1 + content.images.len());
+        parts.push(ResponsesContentPart::OwnedText {
+            text: structured_user_text(text, &content.images),
+        });
+        for image in &content.images {
+            parts.push(ResponsesContentPart::InputImage {
+                image_url: image.data_uri(),
+            });
+        }
+        parts
     }
 
     /// Resolve thinking mode into API-level controls based on probe result.
@@ -1569,13 +1668,14 @@ impl LlmClient {
         let wrapped = wrap_revisions(rounds);
 
         // With a token_budget, shrink max_tokens to keep (prompt + completion)
-        // under it. Image inputs aren't text-estimable, so they keep the ceiling.
-        let budget = if use_images { None } else { inner.token_budget };
+        // under it; attached images count at their estimated token cost.
+        let budget = inner.token_budget;
         let prompt_est = budget.map_or(0, |_| {
             estimate_prompt_tokens(&sys_prompt)
                 + estimate_prompt_tokens(content.text.as_deref().unwrap_or(""))
                 + rounds.iter().map(|r| estimate_prompt_tokens(&r.reply_before)).sum::<u32>()
                 + wrapped.iter().map(|w| estimate_prompt_tokens(w)).sum::<u32>()
+                + image_prompt_tokens(content, use_images)
         });
         let max_tokens = effective_max_tokens(inner.max_tokens, budget, prompt_est);
         if budget.is_some() {
@@ -1616,9 +1716,7 @@ impl LlmClient {
             ApiFlavor::GrokResponses => {
                 let mut input = vec![ResponsesInputItem {
                     role: "user",
-                    content: vec![ResponsesContentPart::Text {
-                        text: content.text.as_deref().unwrap_or(""),
-                    }],
+                    content: Self::build_responses_user_content(content, use_images),
                 }];
                 input.extend(revision_responses_turns(rounds, &wrapped));
                 let body = ResponsesRequest {
@@ -1894,6 +1992,7 @@ impl LlmClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::images::ImageAttachment;
 
     // --- for_spec: per-profile client construction ---
 
@@ -2023,6 +2122,42 @@ mod tests {
         assert_eq!(estimate_prompt_tokens("가나다"), 3);
         // Mixed: 3 Hangul + "abc" (3/3=1) = 4; the space is ignored.
         assert_eq!(estimate_prompt_tokens("가나다 abc"), 4);
+    }
+
+    #[test]
+    fn structured_user_text_names_source_and_sent_sizes() {
+        let shrunk = ImageAttachment {
+            width: 1568,
+            height: 882,
+            source_width: 3840,
+            source_height: 2160,
+            ..ImageAttachment::stub(vec![])
+        };
+        let same = ImageAttachment { width: 600, height: 400, source_width: 600, source_height: 400, ..ImageAttachment::stub(vec![]) };
+        assert_eq!(
+            structured_user_text("t", &[shrunk.clone(), same.clone()]),
+            "<metadata>\nattachments: 2 images\nimage 1: 3840x2160 px, sent downscaled to 1568x882 px\nimage 2: 600x400 px\n</metadata>\n<content>\nt\n</content>"
+        );
+        // Text-only requests are wrapped too, without a metadata block.
+        assert_eq!(structured_user_text("t", &[]), "<content>\nt\n</content>");
+        assert_eq!(structured_user_text("", &[]), "");
+        // No text: the metadata block alone, no empty content block.
+        assert_eq!(structured_user_text("", &[same]), "<metadata>\nattachments: 1 image\nimage 1: 600x400 px\n</metadata>");
+    }
+
+    #[test]
+    fn image_prompt_tokens_count_only_when_sent() {
+        let content = ClipboardContent {
+            text: Some("t".into()),
+            images: vec![
+                ImageAttachment { width: 1500, height: 1500, ..ImageAttachment::stub(vec![]) },
+                ImageAttachment { width: 750, height: 750, ..ImageAttachment::stub(vec![]) },
+            ],
+            files: vec![],
+        };
+        assert_eq!(image_prompt_tokens(&content, true), 3000 + 750);
+        assert_eq!(image_prompt_tokens(&content, false), 0);
+        assert_eq!(image_prompt_tokens(&ClipboardContent::text_only("t".into()), true), 0);
     }
 
     #[test]
@@ -2896,21 +3031,24 @@ mod tests {
     fn build_user_content_text_only() {
         let content = ClipboardContent::text_only("hello".into());
         let mc = LlmClient::build_user_content(&content, false);
-        assert_eq!(mc, MessageContent::Text("hello"));
+        // Every request carries its content inside <content>; no metadata
+        // block without attachments.
+        assert_eq!(mc, MessageContent::OwnedText("<content>\nhello\n</content>".into()));
     }
 
     #[test]
     fn build_user_content_with_image_summarize() {
         let content = ClipboardContent {
             text: Some("caption".into()),
-            images: vec![Arc::new(vec![0x89, 0x50])],
+            images: vec![ImageAttachment::stub(vec![0x89, 0x50])],
             files: vec![],
         };
         let mc = LlmClient::build_user_content(&content, true);
         match mc {
             MessageContent::Parts(parts) => {
                 assert_eq!(parts.len(), 2);
-                assert!(matches!(&parts[0], ContentPart::Text { text } if text == "caption"));
+                assert!(matches!(&parts[0], ContentPart::Text { text }
+                    if text == "<metadata>\nattachments: 1 image\nimage 1: 2x2 px\n</metadata>\n<content>\ncaption\n</content>"));
                 assert!(matches!(&parts[1], ContentPart::ImageUrl { .. }));
             }
             _ => panic!("expected Parts"),
@@ -2921,27 +3059,30 @@ mod tests {
     fn build_user_content_no_images_returns_text() {
         let content = ClipboardContent {
             text: Some("hello".into()),
-            images: vec![Arc::new(vec![0x89])],
+            images: vec![ImageAttachment::stub(vec![0x89])],
             files: vec![],
         };
-        // use_images=false: caller decided not to include images.
+        // use_images=false: caller decided not to include images, so no
+        // metadata block either — the model must not hear about them.
         let mc = LlmClient::build_user_content(&content, false);
-        assert_eq!(mc, MessageContent::Text("hello"));
+        assert_eq!(mc, MessageContent::OwnedText("<content>\nhello\n</content>".into()));
     }
 
     #[test]
     fn build_user_content_image_only_no_text_part() {
         let content = ClipboardContent {
             text: None,
-            images: vec![Arc::new(vec![0x89, 0x50])],
+            images: vec![ImageAttachment::stub(vec![0x89, 0x50])],
             files: vec![],
         };
         let mc = LlmClient::build_user_content(&content, true);
         match mc {
             MessageContent::Parts(parts) => {
-                // Only image part, no text part since text is None.
-                assert_eq!(parts.len(), 1);
-                assert!(matches!(&parts[0], ContentPart::ImageUrl { .. }));
+                // No content block without text; the metadata block still leads.
+                assert_eq!(parts.len(), 2);
+                assert!(matches!(&parts[0], ContentPart::Text { text }
+                    if text == "<metadata>\nattachments: 1 image\nimage 1: 2x2 px\n</metadata>"));
+                assert!(matches!(&parts[1], ContentPart::ImageUrl { .. }));
             }
             _ => panic!("expected Parts"),
         }
@@ -2951,15 +3092,16 @@ mod tests {
     fn build_user_content_empty_text_with_image() {
         let content = ClipboardContent {
             text: Some("".into()),
-            images: vec![Arc::new(vec![0x89, 0x50])],
+            images: vec![ImageAttachment::stub(vec![0x89, 0x50])],
             files: vec![],
         };
         let mc = LlmClient::build_user_content(&content, true);
         match mc {
             MessageContent::Parts(parts) => {
                 // Empty text should be omitted, only image part.
-                assert_eq!(parts.len(), 1);
-                assert!(matches!(&parts[0], ContentPart::ImageUrl { .. }));
+                assert_eq!(parts.len(), 2);
+                assert!(matches!(&parts[0], ContentPart::Text { text } if text.starts_with("<metadata>") && !text.contains("<content>")));
+                assert!(matches!(&parts[1], ContentPart::ImageUrl { .. }));
             }
             _ => panic!("expected Parts"),
         }
@@ -3015,5 +3157,77 @@ mod tests {
         );
         assert_eq!(prefix.unwrap(), "/no_think\n");
         assert!(kwargs.is_none());
+    }
+
+    // --- Responses-flavor image input ---
+
+    fn png_stub() -> ImageAttachment {
+        ImageAttachment::stub(vec![0x89, 0x50, 0x4E, 0x47])
+    }
+
+    #[test]
+    fn responses_user_content_with_image() {
+        let content = ClipboardContent {
+            text: Some("caption".into()),
+            images: vec![png_stub()],
+            files: vec![],
+        };
+        let json = serde_json::to_value(LlmClient::build_responses_user_content(&content, true)).unwrap();
+        let parts = json.as_array().unwrap();
+        assert_eq!(parts.len(), 2, "{json}");
+        assert_eq!(parts[0]["type"], "input_text");
+        assert_eq!(parts[0]["text"], "<metadata>\nattachments: 1 image\nimage 1: 2x2 px\n</metadata>\n<content>\ncaption\n</content>");
+        assert_eq!(parts[1]["type"], "input_image");
+        let url = parts[1]["image_url"].as_str().expect("image_url is a plain string");
+        assert!(url.starts_with("data:image/png;base64,"), "{url}");
+    }
+
+    #[test]
+    fn responses_user_content_without_images_is_text_only() {
+        let content = ClipboardContent {
+            text: Some("hello".into()),
+            images: vec![png_stub()],
+            files: vec![],
+        };
+        let json = serde_json::to_value(LlmClient::build_responses_user_content(&content, false)).unwrap();
+        assert_eq!(json.as_array().unwrap().len(), 1);
+        assert_eq!(json[0]["type"], "input_text");
+        assert_eq!(json[0]["text"], "<content>\nhello\n</content>");
+    }
+
+    #[test]
+    fn responses_user_content_image_only_has_no_text_part() {
+        let content = ClipboardContent {
+            text: None,
+            images: vec![png_stub(), png_stub()],
+            files: vec![],
+        };
+        let json = serde_json::to_value(LlmClient::build_responses_user_content(&content, true)).unwrap();
+        let parts = json.as_array().unwrap();
+        assert_eq!(parts.len(), 3, "{json}");
+        assert_eq!(parts[0]["type"], "input_text");
+        assert_eq!(parts[0]["text"], "<metadata>\nattachments: 2 images\nimage 1: 2x2 px\nimage 2: 2x2 px\n</metadata>");
+        assert_eq!(parts[1]["type"], "input_image");
+        assert_eq!(parts[2]["type"], "input_image");
+    }
+
+    #[test]
+    fn vision_probe_body_matches_flavor() {
+        let chat = vision_probe_body(ApiFlavor::OpenAiChat, "m");
+        assert_eq!(chat["messages"][0]["content"][1]["type"], "image_url");
+        assert_eq!(chat["max_tokens"], 1);
+
+        let responses = vision_probe_body(ApiFlavor::GrokResponses, "grok-4.3");
+        assert_eq!(responses["model"], "grok-4.3");
+        assert!(responses["instructions"].is_string(), "{responses}");
+        assert_eq!(responses["input"][0]["role"], "user");
+        assert_eq!(responses["input"][0]["content"][0]["type"], "input_text");
+        assert_eq!(responses["input"][0]["content"][1]["type"], "input_image");
+        assert_eq!(responses["max_output_tokens"], RESPONSES_PROBE_MAX_OUTPUT_TOKENS);
+        assert_eq!(responses["store"], false);
+        // No reasoning knob: `effort: "none"` 400s on some models and would
+        // misread as "no vision".
+        assert!(responses.get("reasoning").is_none(), "{responses}");
+        assert!(responses.get("stream").is_none(), "{responses}");
     }
 }

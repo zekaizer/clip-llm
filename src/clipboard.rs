@@ -1,11 +1,14 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use arboard::Clipboard;
 use tracing::{debug, info, warn};
 
+use crate::images::encode::{check_pixel_budget, encode_for_upload};
+use crate::images::fetch::fetch_source;
+use crate::images::markup::images_from_html;
+use crate::images::{ImageAttachment, ImageOrigin};
 use crate::platform::{ModifierState, Platform};
 use crate::ClipboardError;
 
@@ -31,9 +34,9 @@ const FALLBACK_MODIFIER_SETTLE_MS: u64 = 200;
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClipboardContent {
     pub text: Option<String>,
-    /// PNG-encoded images. Vec for future multi-image support;
-    /// currently arboard provides at most one.
-    pub images: Vec<Arc<Vec<u8>>>,
+    /// Images ready for upload. The image flavor yields at most one; the
+    /// file list and markup paths can yield several.
+    pub images: Vec<ImageAttachment>,
     /// Display names of the files this content was read from (file-list
     /// clipboard), empty for plain text/image content. Shown in the overlay's
     /// source badge; never sent to the model.
@@ -71,134 +74,20 @@ impl ClipboardContent {
     }
 }
 
-/// Long edge (px) above which a clipboard image is downscaled before PNG
-/// encoding. 1568px is a common vision-model sweet spot (e.g. Anthropic/OpenAI
-/// vision APIs internally cap around this size); sending anything larger only
-/// inflates the base64 payload without improving model accuracy.
-const MAX_IMAGE_LONG_EDGE: u32 = 1568;
-
 /// Read the current image from the clipboard and encode it as PNG.
 /// Returns an empty vec if no image is present; propagates encoding errors.
 /// Oversized images (long edge > `MAX_IMAGE_LONG_EDGE`) are downscaled first to
 /// keep the base64-encoded payload small (latency + provider 413 risk).
-fn read_image_from_board(board: &mut Clipboard) -> Result<Vec<Arc<Vec<u8>>>, ClipboardError> {
+fn read_image_from_board(board: &mut Clipboard) -> Result<Vec<ImageAttachment>, ClipboardError> {
     match board.get_image() {
         Ok(img) => {
-            let png = encode_rgba_for_upload(img.bytes.into_owned(), img.width as u32, img.height as u32)?;
-            Ok(vec![Arc::new(png)])
+            let (width, height) = (img.width as u32, img.height as u32);
+            check_pixel_budget(width, height)?;
+            let att = encode_for_upload(img.bytes.into_owned(), width, height, ImageOrigin::Clipboard)?;
+            Ok(vec![att])
         }
         Err(_) => Ok(vec![]),
     }
-}
-
-/// Downscale (long edge > `MAX_IMAGE_LONG_EDGE`) and PNG-encode raw RGBA pixels
-/// for the vision API. Shared by the clipboard image and PNG-file paths so both
-/// obey the same payload bound.
-pub(crate) fn encode_rgba_for_upload(
-    rgba: Vec<u8>,
-    width: u32,
-    height: u32,
-) -> Result<Vec<u8>, ClipboardError> {
-    let (bytes, w, h) = match downscale_rgba(&rgba, width, height) {
-        Some((resized, new_w, new_h)) => {
-            debug!("downscaling image {}x{} -> {}x{}", width, height, new_w, new_h);
-            (resized, new_w, new_h)
-        }
-        None => (rgba, width, height),
-    };
-    let png = rgba_to_png(&bytes, w, h)?;
-    info!("encoded image ({}x{}, {} bytes PNG)", w, h, png.len());
-    Ok(png)
-}
-
-/// Downscale an RGBA image so its long edge is at most `MAX_IMAGE_LONG_EDGE`,
-/// preserving aspect ratio. Returns `None` if the image is already within
-/// bounds (no-op, avoids copying the buffer). Uses a hand-rolled box (area
-/// average) filter rather than pulling in an image-processing crate, per the
-/// project's single-binary / minimal-deps constraint.
-fn downscale_rgba(bytes: &[u8], width: u32, height: u32) -> Option<(Vec<u8>, u32, u32)> {
-    if width == 0 || height == 0 {
-        return None;
-    }
-    let long_edge = width.max(height);
-    if long_edge <= MAX_IMAGE_LONG_EDGE {
-        return None;
-    }
-
-    let scale = MAX_IMAGE_LONG_EDGE as f64 / long_edge as f64;
-    let new_width = ((width as f64 * scale).round() as u32).max(1);
-    let new_height = ((height as f64 * scale).round() as u32).max(1);
-
-    Some((
-        box_resample(bytes, width, height, new_width, new_height),
-        new_width,
-        new_height,
-    ))
-}
-
-/// Box-filter (area average) resample of an RGBA buffer from `src_w x src_h`
-/// down to `dst_w x dst_h`. Each destination pixel is the average of the
-/// source pixels its area covers, which avoids the aliasing a naive
-/// nearest-neighbor downscale would introduce.
-fn box_resample(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Vec<u8> {
-    let mut dst = vec![0u8; (dst_w as usize) * (dst_h as usize) * 4];
-    let x_ratio = src_w as f64 / dst_w as f64;
-    let y_ratio = src_h as f64 / dst_h as f64;
-
-    for dy in 0..dst_h {
-        let sy0 = (dy as f64 * y_ratio).floor() as u32;
-        let sy1 = (((dy + 1) as f64 * y_ratio).ceil() as u32)
-            .min(src_h)
-            .max(sy0 + 1);
-        for dx in 0..dst_w {
-            let sx0 = (dx as f64 * x_ratio).floor() as u32;
-            let sx1 = (((dx + 1) as f64 * x_ratio).ceil() as u32)
-                .min(src_w)
-                .max(sx0 + 1);
-
-            let mut r_sum: u64 = 0;
-            let mut g_sum: u64 = 0;
-            let mut b_sum: u64 = 0;
-            let mut a_sum: u64 = 0;
-            let mut count: u64 = 0;
-
-            for sy in sy0..sy1 {
-                for sx in sx0..sx1 {
-                    let idx = ((sy * src_w + sx) * 4) as usize;
-                    r_sum += src[idx] as u64;
-                    g_sum += src[idx + 1] as u64;
-                    b_sum += src[idx + 2] as u64;
-                    a_sum += src[idx + 3] as u64;
-                    count += 1;
-                }
-            }
-
-            let didx = ((dy * dst_w + dx) * 4) as usize;
-            dst[didx] = (r_sum / count) as u8;
-            dst[didx + 1] = (g_sum / count) as u8;
-            dst[didx + 2] = (b_sum / count) as u8;
-            dst[didx + 3] = (a_sum / count) as u8;
-        }
-    }
-
-    dst
-}
-
-/// Encode raw RGBA pixel data to PNG.
-pub(crate) fn rgba_to_png(bytes: &[u8], width: u32, height: u32) -> Result<Vec<u8>, ClipboardError> {
-    let mut out = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut out, width, height);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder
-            .write_header()
-            .map_err(|e| ClipboardError::ImageEncodeFailed(e.to_string()))?;
-        writer
-            .write_image_data(bytes)
-            .map_err(|e| ClipboardError::ImageEncodeFailed(e.to_string()))?;
-    }
-    Ok(out)
 }
 
 /// Wait for the user's Ctrl+Shift hotkey modifiers to release before a copy
@@ -235,6 +124,27 @@ fn wait_for_modifier_release(
     }
     thread::sleep(Duration::from_millis(MODIFIER_RELEASE_GRACE_MS));
     Ok(())
+}
+
+/// Run a capture body on its thread so a panic inside it becomes an error
+/// the UI receives, instead of a silently dead thread and an overlay stuck in
+/// Capturing. The panic is logged at error level with its message.
+pub fn guard_capture<F>(body: F) -> Result<ClipboardContent, ClipboardError>
+where
+    F: FnOnce() -> Result<ClipboardContent, ClipboardError>,
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(result) => result,
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+                .unwrap_or_else(|| "non-string panic payload".to_owned());
+            tracing::error!("capture thread panicked: {message}");
+            Err(ClipboardError::AccessFailed(format!("capture thread panicked: {message}")))
+        }
+    }
 }
 
 pub struct ClipboardManager {
@@ -336,8 +246,7 @@ impl ClipboardManager {
                 if let Some(paths) = self.file_list() {
                     return crate::files::ingest_files(&paths);
                 }
-                let text = self.board.get_text().ok().filter(|s| !s.trim().is_empty());
-                let images = read_image_from_board(&mut self.board)?;
+                let (text, images) = self.read_flavors()?;
 
                 if text.is_some() || !images.is_empty() {
                     let content = ClipboardContent { text, images, files: vec![] };
@@ -372,10 +281,7 @@ impl ClipboardManager {
         if let Some(paths) = self.file_list() {
             return crate::files::ingest_files(&paths);
         }
-        let text = self.board.get_text().ok().filter(|s| !s.trim().is_empty());
-
-        let images = read_image_from_board(&mut self.board)?;
-
+        let (text, images) = self.read_flavors()?;
         let content = ClipboardContent { text, images, files: vec![] };
         if content.is_empty() {
             return Err(ClipboardError::NoTextInClipboard);
@@ -385,6 +291,25 @@ impl ClipboardManager {
             info!("read clipboard text ({} chars)", t.len());
         }
         Ok(content)
+    }
+
+    /// Text and images across the flavors: the plain-text flavor, the image
+    /// flavor, and, only when the image flavor is empty, the images the HTML
+    /// flavor references (a rich-text selection carries its pictures solely
+    /// as markup references).
+    fn read_flavors(&mut self) -> Result<(Option<String>, Vec<ImageAttachment>), ClipboardError> {
+        let text = self.board.get_text().ok().filter(|s| !s.trim().is_empty());
+        let mut images = read_image_from_board(&mut self.board)?;
+        if images.is_empty()
+            && let Ok(html) = self.board.get().html()
+            && !html.trim().is_empty()
+        {
+            images = images_from_html(&html, &fetch_source);
+            if !images.is_empty() {
+                info!("html flavor: {} image(s) attached", images.len());
+            }
+        }
+        Ok((text, images))
     }
 
     /// Paths of a file-list clipboard (Finder/Explorer copy), if any.
@@ -498,6 +423,44 @@ mod tests {
         let content = mgr.read_content().unwrap();
         assert_eq!(content.text.as_deref(), Some("plain"));
         assert!(content.files.is_empty());
+    }
+
+    #[test]
+    fn read_content_takes_images_from_the_html_flavor() {
+        let _lock = lock_clipboard();
+        // A 600x400 non-flat PNG inline in the markup, next to plain text.
+        let img = image::RgbaImage::from_fn(600, 400, |x, y| {
+            if x > 100 && x < 300 && y > 100 && y < 300 {
+                image::Rgba([0, 0, 0, 255])
+            } else {
+                image::Rgba([(x % 256) as u8, (y % 256) as u8, 200, 255])
+            }
+        });
+        let mut png = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let stub = ImageAttachment::stub(png.into_inner());
+        let html = format!("<p>caption</p><img src=\"{}\"><img src=\"https://h/emoji/x.png\">", stub.data_uri());
+
+        let mut mgr = ClipboardManager::new().unwrap();
+        mgr.board.set().html(html.as_str(), Some("caption")).unwrap();
+        let content = mgr.read_content().unwrap();
+        assert_eq!(content.text.as_deref(), Some("caption"));
+        assert_eq!(content.images.len(), 1, "{:?}", content.images.iter().map(|i| (i.width, i.height)).collect::<Vec<_>>());
+        assert_eq!((content.images[0].width, content.images[0].height), (600, 400));
+        assert_eq!(content.images[0].origin, ImageOrigin::Markup);
+    }
+
+    #[test]
+    fn guard_capture_turns_a_panic_into_an_error() {
+        let ok = guard_capture(|| Ok(ClipboardContent::text_only("x".into())));
+        assert_eq!(ok.unwrap().text.as_deref(), Some("x"));
+        let err = guard_capture(|| -> Result<ClipboardContent, ClipboardError> { panic!("boom {}", 42) });
+        match err {
+            Err(ClipboardError::AccessFailed(msg)) => assert!(msg.contains("panicked") && msg.contains("boom 42"), "{msg}"),
+            other => panic!("expected AccessFailed, got {other:?}"),
+        }
+        let passthrough = guard_capture(|| Err(ClipboardError::EmptyCopy));
+        assert!(matches!(passthrough, Err(ClipboardError::EmptyCopy)));
     }
 
     #[test]
@@ -651,7 +614,7 @@ mod tests {
     fn clipboard_content_image_only() {
         let content = ClipboardContent {
             text: None,
-            images: vec![Arc::new(vec![0x89, 0x50, 0x4E, 0x47])],
+            images: vec![ImageAttachment::stub(vec![0x89, 0x50, 0x4E, 0x47])],
             files: vec![],
         };
         assert!(!content.is_empty());
@@ -682,112 +645,6 @@ mod tests {
     fn has_text_empty_string() {
         let content = ClipboardContent { text: Some("".into()), images: vec![], files: vec![] };
         assert!(!content.has_text());
-    }
-
-    // -- rgba_to_png tests --
-
-    #[test]
-    fn rgba_to_png_valid_data() {
-        // 2x2 RGBA pixels (16 bytes)
-        let pixels: Vec<u8> = vec![
-            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
-        ];
-        let png = rgba_to_png(&pixels, 2, 2).unwrap();
-
-        // PNG signature: 0x89 P N G
-        assert!(png.len() > 8);
-        assert_eq!(&png[..4], &[0x89, 0x50, 0x4E, 0x47]);
-    }
-
-    #[test]
-    fn rgba_to_png_invalid_dimensions() {
-        // 3 bytes is not enough for any valid RGBA image
-        let result = rgba_to_png(&[0, 0, 0], 2, 2);
-        assert!(matches!(result, Err(ClipboardError::ImageEncodeFailed(_))));
-    }
-
-    // -- downscale_rgba tests --
-
-    /// Build a solid-color RGBA buffer for testing (cheap, no need for varied pixels).
-    fn solid_rgba(width: u32, height: u32, color: [u8; 4]) -> Vec<u8> {
-        let mut buf = Vec::with_capacity((width * height * 4) as usize);
-        for _ in 0..(width * height) {
-            buf.extend_from_slice(&color);
-        }
-        buf
-    }
-
-    #[test]
-    fn downscale_rgba_noop_for_small_image() {
-        let pixels = solid_rgba(100, 50, [10, 20, 30, 255]);
-        let result = downscale_rgba(&pixels, 100, 50);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn downscale_rgba_noop_at_exact_threshold() {
-        // Long edge exactly at the cap must not be resampled.
-        let pixels = solid_rgba(MAX_IMAGE_LONG_EDGE, 100, [1, 2, 3, 255]);
-        let result = downscale_rgba(&pixels, MAX_IMAGE_LONG_EDGE, 100);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn downscale_rgba_scales_down_preserving_aspect_ratio() {
-        // 2x oversized square-ish image: long edge should land exactly on the cap.
-        let width = MAX_IMAGE_LONG_EDGE * 2;
-        let height = MAX_IMAGE_LONG_EDGE;
-        let pixels = solid_rgba(width, height, [200, 100, 50, 255]);
-
-        let (resized, new_w, new_h) = downscale_rgba(&pixels, width, height).unwrap();
-
-        assert_eq!(new_w, MAX_IMAGE_LONG_EDGE);
-        assert_eq!(new_h, MAX_IMAGE_LONG_EDGE / 2);
-        assert_eq!(resized.len(), (new_w * new_h * 4) as usize);
-
-        // Aspect ratio preserved (within rounding).
-        let orig_ratio = width as f64 / height as f64;
-        let new_ratio = new_w as f64 / new_h as f64;
-        assert!((orig_ratio - new_ratio).abs() < 0.01);
-    }
-
-    #[test]
-    fn downscale_rgba_solid_color_preserved() {
-        // A solid-color image should downscale to the same solid color (box
-        // filter averaging a uniform region yields that same value).
-        let width = MAX_IMAGE_LONG_EDGE * 2;
-        let height = MAX_IMAGE_LONG_EDGE;
-        let color = [77, 88, 99, 255];
-        let pixels = solid_rgba(width, height, color);
-
-        let (resized, new_w, new_h) = downscale_rgba(&pixels, width, height).unwrap();
-
-        for chunk in resized.as_chunks::<4>().0 {
-            assert_eq!(*chunk, color);
-        }
-        assert_eq!(resized.len(), (new_w * new_h * 4) as usize);
-    }
-
-    #[test]
-    fn downscale_rgba_degenerate_1px_wide() {
-        // Extremely tall, 1px-wide image: width must stay clamped to at least 1
-        // after scaling, height clamped to the cap.
-        let width = 1;
-        let height = MAX_IMAGE_LONG_EDGE * 10;
-        let pixels = solid_rgba(width, height, [5, 6, 7, 255]);
-
-        let (resized, new_w, new_h) = downscale_rgba(&pixels, width, height).unwrap();
-
-        assert_eq!(new_w, 1);
-        assert_eq!(new_h, MAX_IMAGE_LONG_EDGE);
-        assert_eq!(resized.len(), (new_w * new_h * 4) as usize);
-    }
-
-    #[test]
-    fn downscale_rgba_zero_dimension_is_noop() {
-        // Degenerate zero-sized image must not panic or divide by zero.
-        assert!(downscale_rgba(&[], 0, 0).is_none());
-        assert!(downscale_rgba(&[], 0, 100).is_none());
     }
 
     // -- wait_for_modifier_release tests --

@@ -1653,12 +1653,12 @@ impl OverlayApp {
         std::thread::spawn(move || {
             // Build a clipboard handle on this thread (avoids sharing the main
             // thread's, and sidesteps Send concerns). NativePlatform is a ZST.
-            let result = match ClipboardManager::new() {
+            let result = crate::clipboard::guard_capture(|| match ClipboardManager::new() {
                 Ok(cm) => cm
                     .with_modifier_state(modifier_state)
                     .copy_and_read(&NativePlatform, &cancel, target),
                 Err(e) => Err(e),
-            };
+            });
             let _ = tx.send((seq, result));
             ctx.request_repaint();
         });
@@ -1677,10 +1677,10 @@ impl OverlayApp {
         let tx = self.capture_tx.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let result = match ClipboardManager::new() {
+            let result = crate::clipboard::guard_capture(|| match ClipboardManager::new() {
                 Ok(mut cm) => cm.read_content(),
                 Err(e) => Err(e),
-            };
+            });
             let _ = tx.send((seq, result));
             ctx.request_repaint();
         });
@@ -2061,6 +2061,7 @@ impl eframe::App for OverlayApp {
                 self.sm.auto_copy(),
                 self.sm.capture_source(),
                 self.sm.content_files(),
+                self.sm.content_images(),
                 self.copy_confirmed_at.is_some(),
                 elapsed,
                 self.last_debug.is_some(),
@@ -2140,7 +2141,7 @@ fn friendly_clipboard_error(e: &crate::ClipboardError) -> String {
         WriteFailed(_) => "Could not write to clipboard.".to_string(),
         ImageEncodeFailed(_) => "Could not process the clipboard image.".to_string(),
         UnsupportedFiles(names) => format!(
-            "Unsupported file type: {}. Text and PNG files can be sent.",
+            "Unsupported file type: {}. Text and image files (PNG, JPEG, GIF, WebP, BMP) can be sent.",
             list_names(names)
         ),
         FileTooLarge { name, limit_bytes } => format!(
@@ -2148,6 +2149,10 @@ fn friendly_clipboard_error(e: &crate::ClipboardError) -> String {
             limit_bytes / (1024 * 1024)
         ),
         FileReadFailed { name, .. } => format!("Could not read {name}."),
+        ImageTooLarge { width, height, limit_px } => format!(
+            "Image is too large to send ({width}x{height}; limit {} megapixels).",
+            limit_px / 1_000_000
+        ),
     }
 }
 
@@ -2830,14 +2835,14 @@ mod tests {
         let e = crate::ClipboardError::UnsupportedFiles(vec!["a.pdf".into(), "b.docx".into()]);
         assert_eq!(
             friendly_clipboard_error(&e),
-            "Unsupported file type: a.pdf, b.docx. Text and PNG files can be sent."
+            "Unsupported file type: a.pdf, b.docx. Text and image files (PNG, JPEG, GIF, WebP, BMP) can be sent."
         );
         let many = crate::ClipboardError::UnsupportedFiles(
             (1..=5).map(|i| format!("f{i}.bin")).collect(),
         );
         assert_eq!(
             friendly_clipboard_error(&many),
-            "Unsupported file type: f1.bin, f2.bin, f3.bin (+2 more). Text and PNG files can be sent."
+            "Unsupported file type: f1.bin, f2.bin, f3.bin (+2 more). Text and image files (PNG, JPEG, GIF, WebP, BMP) can be sent."
         );
     }
 

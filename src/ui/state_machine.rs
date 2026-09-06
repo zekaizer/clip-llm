@@ -373,6 +373,13 @@ impl StateMachine {
             .map_or(&[][..], |c| c.files.as_slice())
     }
 
+    /// Images attached to the current content, else empty.
+    pub fn content_images(&self) -> &[crate::images::ImageAttachment] {
+        self.original_content
+            .as_ref()
+            .map_or(&[][..], |c| c.images.as_slice())
+    }
+
     /// Active model profile index.
     pub fn active_model(&self) -> usize {
         self.active_model
@@ -2287,7 +2294,7 @@ mod tests {
     fn image_only_content() -> ClipboardContent {
         ClipboardContent {
             text: None,
-            images: vec![std::sync::Arc::new(vec![0x89, 0x50, 0x4E, 0x47])],
+            images: vec![crate::images::ImageAttachment::stub(vec![0x89, 0x50, 0x4E, 0x47])],
             files: vec![],
         }
     }
@@ -2295,7 +2302,7 @@ mod tests {
     fn text_and_image_content() -> ClipboardContent {
         ClipboardContent {
             text: Some("caption".into()),
-            images: vec![std::sync::Arc::new(vec![0x89, 0x50, 0x4E, 0x47])],
+            images: vec![crate::images::ImageAttachment::stub(vec![0x89, 0x50, 0x4E, 0x47])],
             files: vec![],
         }
     }
