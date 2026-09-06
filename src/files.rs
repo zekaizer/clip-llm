@@ -7,7 +7,7 @@ use tracing::{info, warn};
 
 use crate::images::decode::decode_rgba;
 use crate::images::encode::encode_for_upload;
-use crate::images::{ImageAttachment, ImageOrigin};
+use crate::images::{cap_for_request, ImageAttachment, ImageOrigin};
 use crate::{ClipboardContent, ClipboardError};
 
 /// Per-file cap for text files; larger files are refused rather than
@@ -103,6 +103,7 @@ pub fn ingest_files(paths: &[PathBuf]) -> Result<ClipboardContent, ClipboardErro
     if text.is_none() && images.is_empty() {
         return Err(ClipboardError::EmptyCopy);
     }
+    let images = cap_for_request(images);
     info!(
         "ingested {} file(s): {} text chars, {} image(s)",
         names.len(),
@@ -259,6 +260,16 @@ mod tests {
         assert_eq!(c.images.len(), 3);
         assert!(c.images.iter().all(|i| i.bytes.starts_with(&[0x89, b'P', b'N', b'G'])));
         assert_eq!(c.files, vec!["a.JPG".to_string(), "b.gif".to_string(), "c.bmp".to_string()]);
+    }
+
+    #[test]
+    fn image_files_are_capped_per_request() {
+        let d = tmp_dir();
+        let paths: Vec<PathBuf> = (0..6).map(|i| write(&d, &format!("s{i}.png"), &tiny_png())).collect();
+        let c = ingest_files(&paths).unwrap();
+        assert_eq!(c.images.len(), crate::images::filter::MAX_IMAGES);
+        // The badge still names every file that was read.
+        assert_eq!(c.files.len(), 6);
     }
 
     #[test]

@@ -79,6 +79,15 @@ fn effective_max_tokens(ceiling: u32, budget: Option<u32>, prompt_est: u32) -> u
     }
 }
 
+/// Prompt tokens the attached images cost, for the token budget; zero when
+/// images are not being sent.
+fn image_prompt_tokens(content: &ClipboardContent, use_images: bool) -> u32 {
+    if !use_images {
+        return 0;
+    }
+    content.images.iter().map(|i| i.estimated_tokens()).sum()
+}
+
 /// Whether image parts should be attached to the request: an image-consuming
 /// mode ([`ProcessMode::consumes_images`]), a vision-capable model, and images
 /// actually present on the clipboard.
@@ -1625,13 +1634,14 @@ impl LlmClient {
         let wrapped = wrap_revisions(rounds);
 
         // With a token_budget, shrink max_tokens to keep (prompt + completion)
-        // under it. Image inputs aren't text-estimable, so they keep the ceiling.
-        let budget = if use_images { None } else { inner.token_budget };
+        // under it; attached images count at their estimated token cost.
+        let budget = inner.token_budget;
         let prompt_est = budget.map_or(0, |_| {
             estimate_prompt_tokens(&sys_prompt)
                 + estimate_prompt_tokens(content.text.as_deref().unwrap_or(""))
                 + rounds.iter().map(|r| estimate_prompt_tokens(&r.reply_before)).sum::<u32>()
                 + wrapped.iter().map(|w| estimate_prompt_tokens(w)).sum::<u32>()
+                + image_prompt_tokens(content, use_images)
         });
         let max_tokens = effective_max_tokens(inner.max_tokens, budget, prompt_est);
         if budget.is_some() {
@@ -2078,6 +2088,21 @@ mod tests {
         assert_eq!(estimate_prompt_tokens("가나다"), 3);
         // Mixed: 3 Hangul + "abc" (3/3=1) = 4; the space is ignored.
         assert_eq!(estimate_prompt_tokens("가나다 abc"), 4);
+    }
+
+    #[test]
+    fn image_prompt_tokens_count_only_when_sent() {
+        let content = ClipboardContent {
+            text: Some("t".into()),
+            images: vec![
+                ImageAttachment { width: 1500, height: 1500, ..ImageAttachment::stub(vec![]) },
+                ImageAttachment { width: 750, height: 750, ..ImageAttachment::stub(vec![]) },
+            ],
+            files: vec![],
+        };
+        assert_eq!(image_prompt_tokens(&content, true), 3000 + 750);
+        assert_eq!(image_prompt_tokens(&content, false), 0);
+        assert_eq!(image_prompt_tokens(&ClipboardContent::text_only("t".into()), true), 0);
     }
 
     #[test]
