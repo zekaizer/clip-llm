@@ -227,7 +227,9 @@ const JPEG_QUALITY: u8 = 85;
 /// `None` when the encoder fails; the caller keeps the PNG.
 fn rgba_to_jpeg(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
     let rgb: Vec<u8> = rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|px| {
             let a = u32::from(px[3]);
             let onto_white = |c: u8| ((u32::from(c) * a + 255 * (255 - a)) / 255) as u8;
