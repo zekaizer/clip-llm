@@ -75,13 +75,14 @@ const DEFAULT_REVISION_PROMPT: &str =
      to this request (keep the task's output language and format) and output only the \
      complete revised reply: {request}";
 
+// `{direction}` is replaced per request with one of the three sentences below
+// (ADR-0002): the direction is decided in code from the input's prose, and the
+// model-side rule remains only for inputs without text (images) or a
+// non-Korean primary language.
 const DEFAULT_TRANSLATE_PROMPT: &str =
     "You are a translator for software engineering text. The only two target languages \
      are {primary_lang} and {secondary_lang}. \
-     Determine the input language, then choose the target by this rule, with NO exceptions: \
-     if the input is mostly {primary_lang}, the target is {secondary_lang}; \
-     in EVERY other case — {secondary_lang}, any other language, or mixed — the target is {primary_lang}. \
-     Translate the entire input into the target language. \
+     {direction} \
      Rules: \
      - If the input contains code: preserve all whitespace, indentation, and structure exactly. \
      Never dedent or normalize. Do not translate code, variable names, or identifiers \
@@ -89,6 +90,21 @@ const DEFAULT_TRANSLATE_PROMPT: &str =
      - If the input is plain text: translate naturally while keeping the general structure. \
      - Output ONLY the translated text — no preamble, original text, detected language, \
      labels, quotes, notes, reasoning, or markdown.";
+
+// The prose is {primary_lang}: translate it into {secondary_lang}.
+const DEFAULT_DIRECTION_TO_SECONDARY: &str =
+    "The input's prose (sentences, comments, string literals) is written in {primary_lang}. \
+     Translate it into {secondary_lang}; code stays as it is.";
+// The prose is anything else: translate it into {primary_lang}.
+const DEFAULT_DIRECTION_TO_PRIMARY: &str =
+    "The input's prose is not {primary_lang}. Translate the entire input into {primary_lang}; \
+     code stays as it is.";
+// Fallback: the model decides (the pre-ADR-0002 rule).
+const DEFAULT_DIRECTION_RULE: &str =
+    "Determine the input language, then choose the target by this rule, with NO exceptions: \
+     if the input is mostly {primary_lang}, the target is {secondary_lang}; \
+     in EVERY other case — {secondary_lang}, any other language, or mixed — the target is {primary_lang}. \
+     Translate the entire input into the target language.";
 
 const DEFAULT_REPHRASE_BASE: &str =
     "You are a proofreader/rewriter for software engineering text. \
@@ -321,6 +337,17 @@ pub struct Config {
     explain: ExplainConfig,
     transcribe: TranscribeConfig,
     prompt: PromptConfig,
+}
+
+/// Which way a Translate request goes; see [`Config::translation_direction`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranslationDirection {
+    /// The prose is the primary language: translate into the secondary.
+    ToSecondary,
+    /// Anything else: translate into the primary language.
+    ToPrimary,
+    /// No text to decide from: the prompt keeps the model-side rule.
+    Undecided,
 }
 
 /// `[prompt]` — cross-cutting prompt settings shared by all modes.
@@ -915,6 +942,45 @@ impl Config {
         self.translate.prompt.as_deref().unwrap_or(DEFAULT_TRANSLATE_PROMPT)
     }
 
+    /// The Translate prompt with `{direction}` resolved for `direction` and the
+    /// languages substituted.
+    pub fn translate_prompt_for(&self, direction: TranslationDirection) -> String {
+        let primary = self.primary_lang();
+        let secondary = self.secondary_lang();
+        let sentence = substitute(
+            match direction {
+                TranslationDirection::ToSecondary => DEFAULT_DIRECTION_TO_SECONDARY,
+                TranslationDirection::ToPrimary => DEFAULT_DIRECTION_TO_PRIMARY,
+                TranslationDirection::Undecided => DEFAULT_DIRECTION_RULE,
+            },
+            primary,
+            secondary,
+        );
+        substitute_tokens(
+            self.translate_prompt(),
+            &[("{primary_lang}", primary), ("{secondary_lang}", secondary), ("{direction}", &sentence)],
+        )
+    }
+
+    /// The direction decided for `text` (`lang::prose_is_korean`), or
+    /// `Undecided` without text or when the primary language is not Korean
+    /// (the detector knows Hangul only).
+    pub fn translation_direction(&self, text: Option<&str>) -> TranslationDirection {
+        if !self.primary_lang().eq_ignore_ascii_case("korean") {
+            return TranslationDirection::Undecided;
+        }
+        match text {
+            Some(t) if !t.trim().is_empty() => {
+                if crate::lang::prose_is_korean(t) {
+                    TranslationDirection::ToSecondary
+                } else {
+                    TranslationDirection::ToPrimary
+                }
+            }
+            _ => TranslationDirection::Undecided,
+        }
+    }
+
     /// Rephrase-mode base template carrying `{style}` / `{length}`.
     pub fn rephrase_base(&self) -> &str {
         self.rephrase.base.as_deref().unwrap_or(DEFAULT_REPHRASE_BASE)
@@ -1355,6 +1421,7 @@ fn starter_template() -> String {
     // [translate]
     t.push_str("# [translate]\n");
     t.push_str(&s("thinking", "no_think", "default thinking mode: think | no_think"));
+    // {direction} is filled per request from the detected input language (ADR-0002).
     t.push_str(&s("prompt", DEFAULT_TRANSLATE_PROMPT, ""));
     t.push('\n');
 
@@ -1563,7 +1630,7 @@ mod tests {
         let primary = config.primary_lang();
         let secondary = config.secondary_lang();
         let mode_prompt = match mode {
-            ProcessMode::Translate => substitute(config.translate_prompt(), primary, secondary),
+            ProcessMode::Translate => config.translate_prompt_for(TranslationDirection::Undecided),
             ProcessMode::Rephrase => config.rephrase_prompt(params.style, params.length),
             ProcessMode::Summarize => substitute(config.summarize_prompt(), primary, secondary),
             ProcessMode::Explain => substitute(config.explain_prompt(), primary, secondary),
@@ -1893,6 +1960,26 @@ X-Test = "1"
         // Without a placeholder the instruction follows the template on its own line.
         let config: Config = toml::from_str("[prompt]\nrevision = \"REV\"").unwrap();
         assert_eq!(config.revision_request("x"), "REV\nx");
+    }
+
+    /// The direction is decided in code (ADR-0002): the prompt states it
+    /// instead of asking the model, and falls back to the rule without text.
+    #[test]
+    fn translate_prompt_states_the_decided_direction() {
+        let params = RephraseParams::default();
+        let ko = ProcessMode::Translate.system_prompt_for(params, Some("배포 완료했습니다."));
+        assert!(ko.contains("written in Korean") && ko.contains("into English"), "{ko}");
+        assert!(!ko.contains("Determine the input language"), "{ko}");
+        let en = ProcessMode::Translate.system_prompt_for(params, Some("Deploy it."));
+        assert!(en.contains("into Korean") && !en.contains("into English"), "{en}");
+        let none = ProcessMode::Translate.system_prompt_for(params, None);
+        assert!(none.contains("Determine the input language"), "{none}");
+        assert_eq!(none, ProcessMode::Translate.system_prompt(params));
+        // Other modes are untouched by the text.
+        assert_eq!(
+            ProcessMode::Summarize.system_prompt_for(params, Some("배포")),
+            ProcessMode::Summarize.system_prompt(params)
+        );
     }
 
     #[test]

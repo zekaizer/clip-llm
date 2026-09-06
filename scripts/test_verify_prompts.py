@@ -204,7 +204,32 @@ class RevisionRounds(unittest.TestCase):
 
 class LangDirectionVectors(unittest.TestCase):
     """scripts/lang_direction_vectors.json is shared with the Rust unit tests of
-    src/lang.rs; keep its schema stable."""
+    src/lang.rs; the Python mirror must agree with it case for case."""
+
+    def test_python_mirror_agrees_with_the_fixture(self):
+        cases = json.loads((vp.HERE / "lang_direction_vectors.json").read_text(encoding="utf-8"))
+        wrong = []
+        for c in cases:
+            if c["expect"] != "either":
+                got = "ko" if vp.prose_is_korean(c["text"]) else "en"
+                if got != c["expect"]:
+                    wrong.append(f"{c['id']}: direction expected {c['expect']} got {got}")
+            if vp.is_lookup(c["text"]) != c["lookup"]:
+                wrong.append(f"{c['id']}: lookup expected {c['lookup']}")
+        self.assertEqual(wrong, [])
+
+    def test_build_system_states_the_decided_direction(self):
+        defaults = vp.load_defaults()
+        ko = vp.build_system({"mode": "translate", "input": "배포 완료했습니다."}, {}, defaults)
+        self.assertIn("written in Korean", ko)
+        self.assertIn("into English", ko)
+        en = vp.build_system({"mode": "translate", "input": "Deploy it."}, {}, defaults)
+        self.assertIn("into Korean", en)
+        self.assertNotIn("Determine the input language", en)
+        rule = vp.build_system({"mode": "translate"}, {}, defaults)
+        self.assertIn("Determine the input language", rule)
+        other = vp.build_system({"mode": "translate", "input": "배포"}, {"languages": {"primary": "Japanese"}}, defaults)
+        self.assertIn("Determine the input language", other)
 
     def test_schema(self):
         cases = json.loads((vp.HERE / "lang_direction_vectors.json").read_text(encoding="utf-8"))

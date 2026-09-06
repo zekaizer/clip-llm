@@ -1559,7 +1559,7 @@ impl LlmClient {
             return Err(ApiError::NoUsableContent);
         }
 
-        let base_prompt = mode.system_prompt(rephrase_params);
+        let base_prompt = mode.system_prompt_for(rephrase_params, content.text.as_deref());
         let sys_prompt = if let Some(prefix) = sys_prefix {
             format!("{prefix}{base_prompt}")
         } else {

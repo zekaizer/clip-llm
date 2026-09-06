@@ -452,15 +452,15 @@ impl ProcessMode {
     /// names come from the external config when present, else built-in defaults.
     ///
     /// Medium-agnostic: each mode's prompt handles text, image(s), or both, so the
-    /// caller no longer distinguishes image-only input here.
-    pub fn system_prompt(self, params: RephraseParams) -> String {
+    /// caller no longer distinguishes image-only input here. `text` is the
+    /// input's text, from which Translate decides its direction (ADR-0002);
+    /// without it the prompt keeps the model-side rule.
+    pub fn system_prompt_for(self, params: RephraseParams, text: Option<&str>) -> String {
         let config = crate::config::get();
         let primary = config.primary_lang();
         let secondary = config.secondary_lang();
         let mode_prompt = match self {
-            Self::Translate => {
-                crate::config::substitute(config.translate_prompt(), primary, secondary)
-            }
+            Self::Translate => config.translate_prompt_for(config.translation_direction(text)),
             Self::Rephrase => config.rephrase_prompt(params.style, params.length),
             Self::Summarize => {
                 crate::config::substitute(config.summarize_prompt(), primary, secondary)
@@ -480,6 +480,13 @@ impl ProcessMode {
             None => mode_prompt,
         }
     }
+
+    /// The system prompt without an input to decide the translation direction
+    /// from: Translate keeps the model-side rule.
+    pub fn system_prompt(self, params: RephraseParams) -> String {
+        self.system_prompt_for(params, None)
+    }
+
 }
 
 #[derive(Debug, Error)]

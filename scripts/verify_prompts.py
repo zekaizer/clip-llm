@@ -112,6 +112,9 @@ def load_defaults(path: Path = CONFIG_RS) -> dict:
     return {
         "preamble": rust_str_const(src, "DEFAULT_PROMPT_PREAMBLE"),
         "revision": rust_str_const(src, "DEFAULT_REVISION_PROMPT"),
+        "direction_to_secondary": rust_str_const(src, "DEFAULT_DIRECTION_TO_SECONDARY"),
+        "direction_to_primary": rust_str_const(src, "DEFAULT_DIRECTION_TO_PRIMARY"),
+        "direction_rule": rust_str_const(src, "DEFAULT_DIRECTION_RULE"),
         "translate": rust_str_const(src, "DEFAULT_TRANSLATE_PROMPT"),
         "summarize": rust_str_const(src, "DEFAULT_SUMMARIZE_PROMPT"),
         "rephrase_base": rust_str_const(src, "DEFAULT_REPHRASE_BASE"),
@@ -148,14 +151,19 @@ def collapse_spaces(s: str) -> str:
 
 def build_system(case: dict, cfg: dict, defaults: dict) -> str:
     """The system prompt the app sends for ``case`` under ``cfg`` (a parsed
-    config.toml): preamble + mode prompt, overrides applied, languages substituted."""
+    config.toml): preamble + mode prompt, overrides applied, languages substituted,
+    the Translate direction decided from the case input like ``lang.rs`` does."""
     langs = cfg.get("languages", {})
     primary = langs.get("primary", "Korean")
     secondary = langs.get("secondary", "English")
     lang_vars = [("{primary_lang}", primary), ("{secondary_lang}", secondary)]
     mode = case["mode"]
     if mode == "translate":
-        body = substitute_tokens(cfg.get("translate", {}).get("prompt") or defaults["translate"], lang_vars)
+        direction = translation_direction(case.get("input"), primary)
+        sentence = substitute_tokens(defaults["direction_" + direction], lang_vars)
+        body = substitute_tokens(
+            cfg.get("translate", {}).get("prompt") or defaults["translate"], lang_vars + [("{direction}", sentence)]
+        )
     elif mode == "summarize":
         body = substitute_tokens(cfg.get("summarize", {}).get("prompt") or defaults["summarize"], lang_vars)
     elif mode == "rephrase":
@@ -175,6 +183,80 @@ def build_system(case: dict, cfg: dict, defaults: dict) -> str:
         preamble = defaults["preamble"]
     preamble = substitute_tokens(preamble, lang_vars)
     return f"{preamble}\n\n{body}" if preamble else body
+
+
+# --- input language (mirrors src/lang.rs; the shared fixture keeps them in step) --
+
+HANGUL_WEIGHT = 2.5
+PUNCTUATION = ",.;:!?'\"()[]{}<>\u2014-*`\u201c\u201d\u2018\u2019"
+CODE_CHARS = "_.:/\\=(){}[]<>@#$%^&*|~+"
+EN_FUNCTION_WORDS = frozenset(
+    "the a an and or of to in on for with is are was were be been this that it we you they not by from as "
+    "at if then when which who will would can could should has have had do does did but so than into "
+    "please after before".split()
+)
+KO_MARKERS = ("은", "는", "이", "가", "을", "를", "의", "에", "에서", "로", "으로", "와", "과", "도", "만",
+              "까지", "부터", "다", "요", "니다", "함", "음", "됨", "임")
+
+
+def _is_hangul(c: str) -> bool:
+    return "\uac00" <= c <= "\ud7a3" or "\u1100" <= c <= "\u11ff" or "\u3131" <= c <= "\u318e"
+
+
+def _is_code_like(core: str) -> bool:
+    return any(c in CODE_CHARS for c in core)
+
+
+def prose_is_korean(text: str) -> bool:
+    """Mirror of ``lang::prose_is_korean``."""
+    hangul = latin = ko_markers = en_function = 0
+    for line in text.splitlines():
+        code_line = line.rstrip().endswith((";", "{", "}"))
+        for token in line.split():
+            core = token.strip(PUNCTUATION)
+            if not core:
+                continue
+            h = sum(_is_hangul(c) for c in core)
+            if h:
+                hangul += h
+                if core.endswith(KO_MARKERS):
+                    ko_markers += 1
+                continue
+            if code_line or _is_code_like(core) or (len(core) >= 2 and core.isascii() and core.isupper()):
+                continue
+            if len(core) >= 2 and core.isascii() and core.isalpha():
+                latin += len(core)
+                if core.lower() in EN_FUNCTION_WORDS:
+                    en_function += 1
+    if ko_markers != en_function:
+        return ko_markers > en_function
+    hw = hangul * HANGUL_WEIGHT
+    total = hw + latin
+    return total > 0 and hw / total >= 0.5
+
+
+def is_lookup(text: str) -> bool:
+    """Mirror of ``lang::is_lookup``."""
+    text = text.strip()
+    if not text or "\n" in text or len(text) > 40 or not any(c.isalpha() for c in text):
+        return False
+    tokens = text.split()
+    if not tokens or len(tokens) > 2 or any(_is_code_like(t.strip(PUNCTUATION)) for t in tokens):
+        return False
+    last = tokens[-1]
+    if last.endswith((".", "!", "?", "\u3002", "\uff01", "\uff1f")):
+        return False
+    if len(tokens) == 1:
+        return True
+    core = last.strip(PUNCTUATION)
+    return not (core.endswith(KO_MARKERS) and any(_is_hangul(c) for c in last))
+
+
+def translation_direction(text: str | None, primary: str) -> str:
+    """``to_secondary`` / ``to_primary`` / ``rule`` (mirrors ``Config::translation_direction``)."""
+    if primary.lower() != "korean" or not text or not text.strip():
+        return "rule"
+    return "to_secondary" if prose_is_korean(text) else "to_primary"
 
 
 def revision_request(instruction: str, cfg: dict, defaults: dict) -> str:
