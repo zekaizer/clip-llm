@@ -188,9 +188,46 @@ fn decode_png_rgba(bytes: &[u8]) -> Result<Option<(Vec<u8>, u32, u32)>, Clipboar
     Ok(Some((rgba, info.width, info.height)))
 }
 
+
+/// Fixtures shared with other modules' tests.
+#[cfg(test)]
+pub(crate) mod test_support {
+    /// A syntactically valid PNG whose header claims `w x h` pixels but whose
+    /// IDAT holds no rows: enough for the header to parse, nothing to decode.
+    pub fn png_with_header(w: u32, h: u32) -> Vec<u8> {
+        fn crc32(data: &[u8]) -> u32 {
+            let mut crc = 0xFFFF_FFFFu32;
+            for &b in data {
+                crc ^= u32::from(b);
+                for _ in 0..8 {
+                    crc = if crc & 1 == 1 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+                }
+            }
+            !crc
+        }
+        fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], body: &[u8]) {
+            out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+            let mut typed = kind.to_vec();
+            typed.extend_from_slice(body);
+            out.extend_from_slice(&typed);
+            out.extend_from_slice(&crc32(&typed).to_be_bytes());
+        }
+        let mut out = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // 8-bit RGBA, no interlace
+        chunk(&mut out, b"IHDR", &ihdr);
+        chunk(&mut out, b"IDAT", &[0x78, 0x9C, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]); // empty zlib stream
+        chunk(&mut out, b"IEND", &[]);
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::test_support::png_with_header;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -259,37 +296,6 @@ mod tests {
         // Re-encoded through the same PNG path the clipboard image uses.
         assert!(c.images[0].starts_with(&[0x89, b'P', b'N', b'G']));
         assert_eq!(c.files, vec!["shot.png".to_string()]);
-    }
-
-    /// A syntactically valid PNG whose header claims `w x h` pixels but whose
-    /// IDAT holds no rows: enough for the header to parse, nothing to decode.
-    fn png_with_header(w: u32, h: u32) -> Vec<u8> {
-        fn crc32(data: &[u8]) -> u32 {
-            let mut crc = 0xFFFF_FFFFu32;
-            for &b in data {
-                crc ^= u32::from(b);
-                for _ in 0..8 {
-                    crc = if crc & 1 == 1 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
-                }
-            }
-            !crc
-        }
-        fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], body: &[u8]) {
-            out.extend_from_slice(&(body.len() as u32).to_be_bytes());
-            let mut typed = kind.to_vec();
-            typed.extend_from_slice(body);
-            out.extend_from_slice(&typed);
-            out.extend_from_slice(&crc32(&typed).to_be_bytes());
-        }
-        let mut out = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
-        let mut ihdr = Vec::new();
-        ihdr.extend_from_slice(&w.to_be_bytes());
-        ihdr.extend_from_slice(&h.to_be_bytes());
-        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // 8-bit RGBA, no interlace
-        chunk(&mut out, b"IHDR", &ihdr);
-        chunk(&mut out, b"IDAT", &[0x78, 0x9C, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]); // empty zlib stream
-        chunk(&mut out, b"IEND", &[]);
-        out
     }
 
     #[test]
