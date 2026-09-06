@@ -261,6 +261,10 @@ enum ResponsesContentPart<'a> {
     /// A prior assistant reply replayed as conversation history.
     #[serde(rename = "output_text")]
     OutputText { text: &'a str },
+    /// Inline image as a data URI. The Responses schema carries the URL as a
+    /// plain string, not the `{url}` object of chat/completions.
+    #[serde(rename = "input_image")]
+    InputImage { image_url: String },
 }
 
 /// The rounds a request carries: the last [`REVISION_WINDOW`].
@@ -814,6 +818,73 @@ fn classify_vision_status(status: u16) -> Option<bool> {
     }
 }
 
+/// Inline `data:` URI for a PNG payload, the image form both request schemas take.
+fn png_data_uri(png: &[u8]) -> String {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+    format!("data:image/png;base64,{b64}")
+}
+
+/// Output cap for the Responses-flavor vision probe. The Responses schema
+/// rejects `max_output_tokens` below 16 with HTTP 400, which the probe would
+/// misread as "no vision" — so the cap is the schema minimum, not 1.
+const RESPONSES_PROBE_MAX_OUTPUT_TOKENS: u32 = 16;
+
+const VISION_PROBE_QUESTION: &str = "Describe this image in one word.";
+
+/// The vision-probe request body for `flavor`: the 1x1 probe image behind a
+/// one-word instruction, in that flavor's request schema.
+fn vision_probe_body(flavor: ApiFlavor, model: &str) -> serde_json::Value {
+    let data_uri = format!("data:image/png;base64,{PROBE_PNG_BASE64}");
+    match flavor {
+        ApiFlavor::OpenAiChat => {
+            let body = ChatRequest {
+                model,
+                messages: vec![Message {
+                    role: "user",
+                    content: MessageContent::Parts(vec![
+                        ContentPart::Text {
+                            text: VISION_PROBE_QUESTION.to_owned(),
+                        },
+                        ContentPart::ImageUrl {
+                            image_url: ImageUrl { url: data_uri },
+                        },
+                    ]),
+                }],
+                temperature: 0.0,
+                max_tokens: 1,
+                stream: None,
+                chat_template_kwargs: None,
+                reasoning_effort: None,
+            };
+            serde_json::to_value(&body).unwrap_or_default()
+        }
+        ApiFlavor::GrokResponses => {
+            // No `reasoning` knob: `effort: "none"` is rejected by some models
+            // (HTTP 400), which the probe would misread as "no vision".
+            let body = ResponsesRequest {
+                model,
+                instructions: "Reply with one word.",
+                input: vec![ResponsesInputItem {
+                    role: "user",
+                    content: vec![
+                        ResponsesContentPart::Text {
+                            text: VISION_PROBE_QUESTION,
+                        },
+                        ResponsesContentPart::InputImage { image_url: data_uri },
+                    ],
+                }],
+                temperature: 0.0,
+                max_output_tokens: RESPONSES_PROBE_MAX_OUTPUT_TOKENS,
+                store: false,
+                stream: None,
+                reasoning: None,
+            };
+            serde_json::to_value(&body).unwrap_or_default()
+        }
+    }
+}
+
 /// An automatic retry the client is about to perform, reported to the
 /// [`RetryNotifier`] right before it sleeps for `delay`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1204,35 +1275,7 @@ impl LlmClient {
             return cached;
         }
 
-        // The Responses flavor is text-only for now: its image input shape
-        // differs (`input_image` items) and is not implemented, so don't
-        // spend a probe request to learn what is already decided.
-        if inner.flavor != ApiFlavor::OpenAiChat {
-            info!("vision probe skipped for {:?}: flavor is text-only", inner.flavor);
-            let _ = inner.supports_vision.set(false);
-            return false;
-        }
-
-        let data_uri = format!("data:image/png;base64,{PROBE_PNG_BASE64}");
-        let body = ChatRequest {
-            model: &inner.model,
-            messages: vec![Message {
-                role: "user",
-                content: MessageContent::Parts(vec![
-                    ContentPart::Text {
-                        text: "Describe this image in one word.".to_owned(),
-                    },
-                    ContentPart::ImageUrl {
-                        image_url: ImageUrl { url: data_uri },
-                    },
-                ]),
-            }],
-            temperature: 0.0,
-            max_tokens: 1,
-            stream: None,
-            chat_template_kwargs: None,
-            reasoning_effort: None,
-        };
+        let body = vision_probe_body(inner.flavor, &inner.model);
 
         info!("probing model vision support...");
         if tracing::enabled!(tracing::Level::TRACE)
@@ -1473,15 +1516,35 @@ impl LlmClient {
             });
         }
         for png_bytes in &content.images {
-            use base64::Engine;
-            let b64 = base64::engine::general_purpose::STANDARD.encode(png_bytes.as_ref());
             parts.push(ContentPart::ImageUrl {
                 image_url: ImageUrl {
-                    url: format!("data:image/png;base64,{b64}"),
+                    url: png_data_uri(png_bytes),
                 },
             });
         }
         MessageContent::Parts(parts)
+    }
+
+    /// Responses-flavor user content: the text as an `input_text` part plus,
+    /// when `use_images`, one `input_image` part per image (text first).
+    fn build_responses_user_content<'a>(
+        content: &'a ClipboardContent,
+        use_images: bool,
+    ) -> Vec<ResponsesContentPart<'a>> {
+        let text = content.text.as_deref().unwrap_or("");
+        if !use_images {
+            return vec![ResponsesContentPart::Text { text }];
+        }
+        let mut parts = Vec::with_capacity(1 + content.images.len());
+        if !text.is_empty() {
+            parts.push(ResponsesContentPart::Text { text });
+        }
+        for png_bytes in &content.images {
+            parts.push(ResponsesContentPart::InputImage {
+                image_url: png_data_uri(png_bytes),
+            });
+        }
+        parts
     }
 
     /// Resolve thinking mode into API-level controls based on probe result.
@@ -1616,9 +1679,7 @@ impl LlmClient {
             ApiFlavor::GrokResponses => {
                 let mut input = vec![ResponsesInputItem {
                     role: "user",
-                    content: vec![ResponsesContentPart::Text {
-                        text: content.text.as_deref().unwrap_or(""),
-                    }],
+                    content: Self::build_responses_user_content(content, use_images),
                 }];
                 input.extend(revision_responses_turns(rounds, &wrapped));
                 let body = ResponsesRequest {
@@ -3015,5 +3076,74 @@ mod tests {
         );
         assert_eq!(prefix.unwrap(), "/no_think\n");
         assert!(kwargs.is_none());
+    }
+
+    // --- Responses-flavor image input ---
+
+    fn png_stub() -> Arc<Vec<u8>> {
+        Arc::new(vec![0x89, 0x50, 0x4E, 0x47])
+    }
+
+    #[test]
+    fn responses_user_content_with_image() {
+        let content = ClipboardContent {
+            text: Some("caption".into()),
+            images: vec![png_stub()],
+            files: vec![],
+        };
+        let json = serde_json::to_value(LlmClient::build_responses_user_content(&content, true)).unwrap();
+        let parts = json.as_array().unwrap();
+        assert_eq!(parts.len(), 2, "{json}");
+        assert_eq!(parts[0]["type"], "input_text");
+        assert_eq!(parts[0]["text"], "caption");
+        assert_eq!(parts[1]["type"], "input_image");
+        let url = parts[1]["image_url"].as_str().expect("image_url is a plain string");
+        assert!(url.starts_with("data:image/png;base64,"), "{url}");
+    }
+
+    #[test]
+    fn responses_user_content_without_images_is_text_only() {
+        let content = ClipboardContent {
+            text: Some("hello".into()),
+            images: vec![png_stub()],
+            files: vec![],
+        };
+        let json = serde_json::to_value(LlmClient::build_responses_user_content(&content, false)).unwrap();
+        assert_eq!(json.as_array().unwrap().len(), 1);
+        assert_eq!(json[0]["type"], "input_text");
+        assert_eq!(json[0]["text"], "hello");
+    }
+
+    #[test]
+    fn responses_user_content_image_only_has_no_text_part() {
+        let content = ClipboardContent {
+            text: None,
+            images: vec![png_stub(), png_stub()],
+            files: vec![],
+        };
+        let json = serde_json::to_value(LlmClient::build_responses_user_content(&content, true)).unwrap();
+        let parts = json.as_array().unwrap();
+        assert_eq!(parts.len(), 2, "{json}");
+        assert!(parts.iter().all(|p| p["type"] == "input_image"), "{json}");
+    }
+
+    #[test]
+    fn vision_probe_body_matches_flavor() {
+        let chat = vision_probe_body(ApiFlavor::OpenAiChat, "m");
+        assert_eq!(chat["messages"][0]["content"][1]["type"], "image_url");
+        assert_eq!(chat["max_tokens"], 1);
+
+        let responses = vision_probe_body(ApiFlavor::GrokResponses, "grok-4.3");
+        assert_eq!(responses["model"], "grok-4.3");
+        assert!(responses["instructions"].is_string(), "{responses}");
+        assert_eq!(responses["input"][0]["role"], "user");
+        assert_eq!(responses["input"][0]["content"][0]["type"], "input_text");
+        assert_eq!(responses["input"][0]["content"][1]["type"], "input_image");
+        assert_eq!(responses["max_output_tokens"], RESPONSES_PROBE_MAX_OUTPUT_TOKENS);
+        assert_eq!(responses["store"], false);
+        // No reasoning knob: `effort: "none"` 400s on some models and would
+        // misread as "no vision".
+        assert!(responses.get("reasoning").is_none(), "{responses}");
+        assert!(responses.get("stream").is_none(), "{responses}");
     }
 }

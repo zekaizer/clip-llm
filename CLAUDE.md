@@ -147,4 +147,4 @@ on `WorkerCommand::SelectModel`, re-probing capabilities per profile):
 - Auth: piggybacks the official Grok CLI's OAuth session (`~/.grok/auth.json`); tokens auto-refresh via `https://auth.x.ai/oauth2/token` and rotated tokens are written back to the store (xAI rotates the refresh token on every use, so write-back is required to keep the CLI session alive)
 - Request shape: system prompt goes in top-level `instructions` (system items inside `input` are rejected); `store: false`; never request `reasoning.encrypted_content`
 - SSE: typed events, no `[DONE]` — `response.output_text.delta` (content), `response.reasoning_*_text.delta` (reasoning), terminal `response.completed`/`response.incomplete` (mapped in `SseParser` onto the same `SseEvent` vocabulary, token cap → `"length"`)
-- Text-only for now: vision/thinking probes are skipped for this flavor
+- Images: `input_image` parts carrying a `data:` URI as a plain string (not the `{url}` object of chat/completions), after the `input_text` part; vision is probed like the chat flavor, with `max_output_tokens` at the schema minimum of 16 so the probe cannot 400 on the cap itself
