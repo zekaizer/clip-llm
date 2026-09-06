@@ -1,0 +1,833 @@
+[
+  {
+    "id": "ko_plain-01",
+    "category": "ko_plain",
+    "expect": "ko",
+    "lookup": false,
+    "text": "핫키를 두 번 누르면 선택 영역을 복사한 뒤 결과를 클립보드에 씁니다."
+  },
+  {
+    "id": "ko_plain-02",
+    "category": "ko_plain",
+    "expect": "ko",
+    "lookup": false,
+    "text": "이번 주 금요일까지 회귀 테스트를 끝내야 합니다. 일정 변경이 필요하면 미리 알려 주세요."
+  },
+  {
+    "id": "ko_plain-03",
+    "category": "ko_plain",
+    "expect": "ko",
+    "lookup": false,
+    "text": "왜 이렇게 느리지? 캐시가 안 먹는 것 같은데."
+  },
+  {
+    "id": "ko_plain-04",
+    "category": "ko_plain",
+    "expect": "ko",
+    "lookup": false,
+    "text": "배포 완료했습니다."
+  },
+  {
+    "id": "ko_plain-05",
+    "category": "ko_plain",
+    "expect": "ko",
+    "lookup": false,
+    "text": "1차 배포는 화요일 오전 10시, 2차는 목요일 저녁 8시에 진행합니다. 총 소요 시간은 30분입니다."
+  },
+  {
+    "id": "ko_plain-06",
+    "category": "ko_plain",
+    "expect": "ko",
+    "lookup": false,
+    "text": "결함 심각도가 높으면 당일 수정, 어려우면 기능 플래그로 비활성화한 채 배포하는 것을 원칙으로 합니다."
+  },
+  {
+    "id": "ko_plain-07",
+    "category": "ko_plain",
+    "expect": "ko",
+    "lookup": false,
+    "text": "안녕하세요, 어제 말씀드린 문서 초안을 공유드립니다. 검토 후 의견 부탁드립니다."
+  },
+  {
+    "id": "ko_plain-08",
+    "category": "ko_plain",
+    "expect": "ko",
+    "lookup": false,
+    "text": "ㅋㅋㅋ 그거 제가 고쳤어요 ㅇㅇ",
+    "note": "chat with compatibility jamo"
+  },
+  {
+    "id": "ko_plain-09",
+    "category": "ko_plain",
+    "expect": "ko",
+    "lookup": false,
+    "text": "요약하면 세 가지다. 첫째, 느리다. 둘째, 비싸다. 셋째, 아무도 안 쓴다."
+  },
+  {
+    "id": "ko_plain-10",
+    "category": "ko_plain",
+    "expect": "ko",
+    "lookup": false,
+    "text": "다음 분기 목표는 응답 시간을 절반으로 줄이는 것입니다."
+  },
+  {
+    "id": "ko_terms-01",
+    "category": "ko_terms",
+    "expect": "ko",
+    "lookup": false,
+    "text": "이번 배포는 tokio runtime의 SSE streaming을 ThinkBlockFilter로 처리하고 WorkerResponse를 UI channel로 보낸다."
+  },
+  {
+    "id": "ko_terms-02",
+    "category": "ko_terms",
+    "expect": "ko",
+    "lookup": false,
+    "text": "PR #42 review: LGTM인데 retry backoff를 exponential로 바꾸고 max_attempts=3 유지해 주세요."
+  },
+  {
+    "id": "ko_terms-03",
+    "category": "ko_terms",
+    "expect": "ko",
+    "lookup": false,
+    "text": "오늘 standup에서 \"deployment failed: connection refused\" 에러를 공유했고, root cause는 DNS 캐시였다."
+  },
+  {
+    "id": "ko_terms-04",
+    "category": "ko_terms",
+    "expect": "ko",
+    "lookup": false,
+    "text": "API 응답의 JSON에서 usage.prompt_tokens를 읽어 max_tokens를 동적으로 계산한다."
+  },
+  {
+    "id": "ko_terms-05",
+    "category": "ko_terms",
+    "expect": "ko",
+    "lookup": false,
+    "text": "`cargo clippy -- -D warnings`가 실패하면 머지하지 마세요."
+  },
+  {
+    "id": "ko_terms-06",
+    "category": "ko_terms",
+    "expect": "ko",
+    "lookup": false,
+    "text": "Kubernetes HPA는 CPU utilization이나 custom metric 기준으로 replica 수를 조정한다."
+  },
+  {
+    "id": "ko_terms-07",
+    "category": "ko_terms",
+    "expect": "ko",
+    "lookup": false,
+    "text": "GET /v1/models로 model list를 받아서 /model command로 mid-session switch가 가능함."
+  },
+  {
+    "id": "ko_terms-08",
+    "category": "ko_terms",
+    "expect": "ko",
+    "lookup": false,
+    "text": "prefix cache hit이면 TTFT가 0.55s, miss면 2.44s. system prompt를 byte-identical하게 유지해야 함."
+  },
+  {
+    "id": "ko_terms-09",
+    "category": "ko_terms",
+    "expect": "ko",
+    "lookup": false,
+    "text": "LM Studio, vLLM, api.anthropic.com 모두 OpenAI-compatible endpoint를 제공한다."
+  },
+  {
+    "id": "ko_terms-10",
+    "category": "ko_terms",
+    "expect": "ko",
+    "lookup": false,
+    "text": "Retry-After 헤더가 있으면 그 값만큼 기다리고, 없으면 10s × attempt로 backoff."
+  },
+  {
+    "id": "ko_terms-11",
+    "category": "ko_terms",
+    "expect": "ko",
+    "lookup": false,
+    "text": "flaky test 원인: clipboard change counter가 macOS에서 늦게 올라옴 (#59 참고)."
+  },
+  {
+    "id": "ko_terms-12",
+    "category": "ko_terms",
+    "expect": "ko",
+    "lookup": false,
+    "text": "config.toml의 [translate].prompt override를 제거하니 en→ko 6/6 통과."
+  },
+  {
+    "id": "en_plain-01",
+    "category": "en_plain",
+    "expect": "en",
+    "lookup": false,
+    "text": "Initial release.\n\nOne endpoint for Claude Code in front of several Anthropic-compatible backends (vLLM, LM Studio, api.anthropic.com). Models are discovered through GET /v1/models and switched with /model mid-session."
+  },
+  {
+    "id": "en_plain-02",
+    "category": "en_plain",
+    "expect": "en",
+    "lookup": false,
+    "text": "Please summarize the document above and list the key points."
+  },
+  {
+    "id": "en_plain-03",
+    "category": "en_plain",
+    "expect": "en",
+    "lookup": false,
+    "text": "Retry logic caps at 3 attempts with exponential backoff starting at 500ms."
+  },
+  {
+    "id": "en_plain-04",
+    "category": "en_plain",
+    "expect": "en",
+    "lookup": false,
+    "text": "fix: type the Stroke width literals as f32"
+  },
+  {
+    "id": "en_plain-05",
+    "category": "en_plain",
+    "expect": "en",
+    "lookup": false,
+    "text": "Why is this so slow? The cache does not seem to kick in."
+  },
+  {
+    "id": "en_plain-06",
+    "category": "en_plain",
+    "expect": "en",
+    "lookup": false,
+    "text": "Hi team, attached is the draft we discussed yesterday. Comments welcome by Friday."
+  },
+  {
+    "id": "en_plain-07",
+    "category": "en_plain",
+    "expect": "en",
+    "lookup": false,
+    "text": "Done."
+  },
+  {
+    "id": "en_plain-08",
+    "category": "en_plain",
+    "expect": "en",
+    "lookup": false,
+    "text": "The overlay cannot appear over fullscreen apps; NSPanel and window level 101 were both tried without success."
+  },
+  {
+    "id": "en_plain-09",
+    "category": "en_plain",
+    "expect": "en",
+    "lookup": false,
+    "text": "Per-backend credentials: none, static, environment variable, or a shell command re-run periodically and once more on 401."
+  },
+  {
+    "id": "en_plain-10",
+    "category": "en_plain",
+    "expect": "en",
+    "lookup": false,
+    "text": "LGTM, merging."
+  },
+  {
+    "id": "en_terms-01",
+    "category": "en_terms",
+    "expect": "en",
+    "lookup": false,
+    "text": "The overlay uses eframe/egui for rendering, and 전체화면 지원은 아직 미구현 상태입니다."
+  },
+  {
+    "id": "en_terms-02",
+    "category": "en_terms",
+    "expect": "en",
+    "lookup": false,
+    "text": "Ask 민수 whether the 배포 window on Thursday still holds."
+  },
+  {
+    "id": "en_terms-03",
+    "category": "en_terms",
+    "expect": "en",
+    "lookup": false,
+    "text": "We tested the prompt on the Korean vectors (한→영 15/15, 영→한 0/10 with the old override)."
+  },
+  {
+    "id": "en_terms-04",
+    "category": "en_terms",
+    "expect": "en",
+    "lookup": false,
+    "text": "The status label reads \"배포 완료\" when the pipeline finishes."
+  },
+  {
+    "id": "en_terms-05",
+    "category": "en_terms",
+    "expect": "en",
+    "lookup": false,
+    "text": "Order kimchi (김치) and bibimbap (비빔밥) for the team lunch."
+  },
+  {
+    "id": "en_terms-06",
+    "category": "en_terms",
+    "expect": "en",
+    "lookup": false,
+    "text": "Translate the heading 주요 변경 사항 as \"Highlights\", not literally."
+  },
+  {
+    "id": "code_ko_comments-01",
+    "category": "code_ko_comments",
+    "expect": "ko",
+    "lookup": false,
+    "text": "```rust\n// 클립보드에서 텍스트를 읽는다\nfn read_clipboard() -> Option<String> {\n    // 실패 시 None 반환\n    clipboard.get_text().ok()\n}\n```"
+  },
+  {
+    "id": "code_ko_comments-02",
+    "category": "code_ko_comments",
+    "expect": "ko",
+    "lookup": false,
+    "text": "def parse(line):\n    # 빈 줄은 건너뛴다\n    if not line.strip():\n        return None\n    return json.loads(line)  # 제어 문자가 섞여 있을 수 있음"
+  },
+  {
+    "id": "code_ko_comments-03",
+    "category": "code_ko_comments",
+    "expect": "ko",
+    "lookup": false,
+    "text": "// 핫키 등록: 실패하면 트레이에 표시하고 계속 진행\nconst ok = registerHotkey('Ctrl+Shift+C');\nif (!ok) tray.setStatus('핫키 등록 실패');"
+  },
+  {
+    "id": "code_ko_comments-04",
+    "category": "code_ko_comments",
+    "expect": "ko",
+    "lookup": false,
+    "text": "// 재시도 간격은 지수적으로 증가한다\nfor i := 0; i < maxAttempts; i++ {\n    time.Sleep(backoff(i))\n}"
+  },
+  {
+    "id": "code_ko_comments-05",
+    "category": "code_ko_comments",
+    "expect": "ko",
+    "lookup": false,
+    "text": "/* 버퍼 크기는 페이지 단위로 맞춘다 */\nsize_t n = (len + PAGE - 1) & ~(PAGE - 1);"
+  },
+  {
+    "id": "code_ko_comments-06",
+    "category": "code_ko_comments",
+    "expect": "ko",
+    "lookup": false,
+    "text": "#!/usr/bin/env bash\n# 번들에 바이너리를 복사하고 서명한다\ncp -f target/release/clip-llm target/clip-llm.app/Contents/MacOS/\ncodesign --force --deep --sign - target/clip-llm.app"
+  },
+  {
+    "id": "code_ko_comments-07",
+    "category": "code_ko_comments",
+    "expect": "ko",
+    "lookup": false,
+    "text": "-- 최근 7일 요청 수 (모델별)\nSELECT model, count(*) FROM requests WHERE ts > now() - interval '7 days' GROUP BY model;"
+  },
+  {
+    "id": "code_ko_comments-08",
+    "category": "code_ko_comments",
+    "expect": "ko",
+    "lookup": false,
+    "text": "telemetry:\n  url: http://192.168.1.15:9428  # 사내 VictoriaLogs\n  level: debug  # 요청 본문까지 기록"
+  },
+  {
+    "id": "code_ko_comments-09",
+    "category": "code_ko_comments",
+    "expect": "ko",
+    "lookup": false,
+    "text": "[generation]\nmax_tokens = 16384  # grok은 서버에서 먼저 추론하므로 넉넉히\ninitial_response_timeout_secs = 60"
+  },
+  {
+    "id": "code_ko_comments-10",
+    "category": "code_ko_comments",
+    "expect": "ko",
+    "lookup": false,
+    "text": "<!-- 헤더는 고정, 본문만 스크롤 -->\n<div class=\"panel\"><header>clip-llm</header><main id=\"body\"></main></div>"
+  },
+  {
+    "id": "code_ko_comments-11",
+    "category": "code_ko_comments",
+    "expect": "ko",
+    "lookup": false,
+    "text": "let manager = ClipboardManager::new(); // 기본 설정 사용\nlet result = manager.read(); // 오류 발생 시 None 반환"
+  },
+  {
+    "id": "code_ko_comments-12",
+    "category": "code_ko_comments",
+    "expect": "ko",
+    "lookup": false,
+    "text": "print(\"배포를 시작합니다\")\nrun(\"deploy.sh\")\nprint(\"완료\")",
+    "note": "Korean only in string literals"
+  },
+  {
+    "id": "code_en_comments-01",
+    "category": "code_en_comments",
+    "expect": "en",
+    "lookup": false,
+    "text": "```rust\n// Read text from the clipboard\nfn read_clipboard() -> Option<String> {\n    // Return None on failure\n    clipboard.get_text().ok()\n}\n```"
+  },
+  {
+    "id": "code_en_comments-02",
+    "category": "code_en_comments",
+    "expect": "en",
+    "lookup": false,
+    "text": "def parse(line):\n    # skip blank lines\n    if not line.strip():\n        return None\n    return json.loads(line)"
+  },
+  {
+    "id": "code_en_comments-03",
+    "category": "code_en_comments",
+    "expect": "en",
+    "lookup": false,
+    "text": "// Register the hotkey; on failure show it in the tray and carry on\nconst ok = registerHotkey('Ctrl+Shift+C');"
+  },
+  {
+    "id": "code_en_comments-04",
+    "category": "code_en_comments",
+    "expect": "en",
+    "lookup": false,
+    "text": "-- requests per model, last 7 days\nSELECT model, count(*) FROM requests WHERE ts > now() - interval '7 days' GROUP BY model;"
+  },
+  {
+    "id": "code_en_comments-05",
+    "category": "code_en_comments",
+    "expect": "en",
+    "lookup": false,
+    "text": "telemetry:\n  url: http://192.168.1.15:9428  # on-prem VictoriaLogs\n  level: debug"
+  },
+  {
+    "id": "code_en_comments-06",
+    "category": "code_en_comments",
+    "expect": "en",
+    "lookup": false,
+    "text": "#!/usr/bin/env bash\n# copy the binary into the bundle and sign it\ncp -f target/release/clip-llm target/clip-llm.app/Contents/MacOS/"
+  },
+  {
+    "id": "code_en_comments-07",
+    "category": "code_en_comments",
+    "expect": "en",
+    "lookup": false,
+    "text": "print(\"starting deployment\")\nrun(\"deploy.sh\")\nprint(\"done\")"
+  },
+  {
+    "id": "code_en_comments-08",
+    "category": "code_en_comments",
+    "expect": "en",
+    "lookup": false,
+    "text": "/// Shared preamble prepended to every mode's system prompt.\npub fn prompt_preamble(&self) -> Option<&str> {"
+  },
+  {
+    "id": "code_only-01",
+    "category": "code_only",
+    "expect": "en",
+    "lookup": false,
+    "text": "fn main() {\n    let x = read()?;\n    Ok(x.len())\n}",
+    "note": "no prose: target Korean, output unchanged"
+  },
+  {
+    "id": "code_only-02",
+    "category": "code_only",
+    "expect": "en",
+    "lookup": false,
+    "text": "SELECT id, name FROM users WHERE active = 1 ORDER BY id;"
+  },
+  {
+    "id": "code_only-03",
+    "category": "code_only",
+    "expect": "en",
+    "lookup": false,
+    "text": "{\"model\": \"grok-4.3\", \"max_tokens\": 16384, \"store\": false}"
+  },
+  {
+    "id": "code_only-04",
+    "category": "code_only",
+    "expect": "en",
+    "lookup": false,
+    "text": "git rebase -i HEAD~3 && cargo test && git push --force-with-lease"
+  },
+  {
+    "id": "logs-01",
+    "category": "logs",
+    "expect": "en",
+    "lookup": false,
+    "text": "Error: connection refused (os error 61)\n  at src/api/client.rs:1541\n  note: retrying in 2s"
+  },
+  {
+    "id": "logs-02",
+    "category": "logs",
+    "expect": "en",
+    "lookup": false,
+    "text": "2026-09-06T03:31:16Z WARN worker: LLM error: HTTP 429 Too Many Requests (retry-after: 12)"
+  },
+  {
+    "id": "logs-03",
+    "category": "logs",
+    "expect": "ko",
+    "lookup": false,
+    "text": "2026-09-06 12:31:16 [ERROR] 요청 실패: 서버가 응답하지 않음 (endpoint=http://127.0.0.1:1234/v1, attempt=3)"
+  },
+  {
+    "id": "logs-04",
+    "category": "logs",
+    "expect": "en",
+    "lookup": false,
+    "text": "{\"level\":\"error\",\"msg\":\"clipboard write failed\",\"detail\":\"권한 없음\"}",
+    "note": "one Korean field in an English log"
+  },
+  {
+    "id": "logs-05",
+    "category": "logs",
+    "expect": "en",
+    "lookup": false,
+    "text": "thread 'main' panicked at src/ui/mod.rs:842:9:\ncalled `Option::unwrap()` on a `None` value"
+  },
+  {
+    "id": "markdown-01",
+    "category": "markdown",
+    "expect": "ko",
+    "lookup": false,
+    "text": "| 항목 | 값 |\n|---|---|\n| max_tokens | 16384 |\n| timeout | 60s |\n| 비고 | grok는 서버에서 먼저 추론함 |"
+  },
+  {
+    "id": "markdown-02",
+    "category": "markdown",
+    "expect": "en",
+    "lookup": false,
+    "text": "| Setting | Value |\n|---|---|\n| max_tokens | 16384 |\n| timeout | 60s |\n| note | grok reasons server-side first |"
+  },
+  {
+    "id": "markdown-03",
+    "category": "markdown",
+    "expect": "ko",
+    "lookup": false,
+    "text": "## 주요 변경 사항\n- `token_budget` 추가 (Groq TPM 대응)\n- SSE parser가 `[DONE]` 없이도 종료됨\n- 설정 패널에서 프로파일 전환 가능"
+  },
+  {
+    "id": "markdown-04",
+    "category": "markdown",
+    "expect": "en",
+    "lookup": false,
+    "text": "## Highlights\n- add `token_budget` (Groq TPM)\n- SSE parser terminates without `[DONE]`\n- profile switch from the settings panel"
+  },
+  {
+    "id": "markdown-05",
+    "category": "markdown",
+    "expect": "ko",
+    "lookup": false,
+    "text": "설치 방법은 간단합니다.\n\n```bash\ncargo build --release\ncp target/release/clip-llm ~/bin/\n```\n\n실행 후 접근성 권한을 허용하세요."
+  },
+  {
+    "id": "markdown-06",
+    "category": "markdown",
+    "expect": "en",
+    "lookup": false,
+    "text": "Installation is simple.\n\n```bash\ncargo build --release\ncp target/release/clip-llm ~/bin/\n```\n\nGrant the accessibility permission after the first launch."
+  },
+  {
+    "id": "markdown-07",
+    "category": "markdown",
+    "expect": "ko",
+    "lookup": false,
+    "text": "> 인용: \"prefix cache is probabilistic on xAI\"\n\n위 관찰은 5회 중 1회꼴로 재현됐다."
+  },
+  {
+    "id": "markdown-08",
+    "category": "markdown",
+    "expect": "en",
+    "lookup": false,
+    "text": "1. Build\n2. Sign\n3. Re-grant accessibility (cdhash changed)"
+  },
+  {
+    "id": "chat-01",
+    "category": "chat",
+    "expect": "ko",
+    "lookup": false,
+    "text": "이거 hotfix로 나가야 할 듯. release note 제가 쓸게요 🙏"
+  },
+  {
+    "id": "chat-02",
+    "category": "chat",
+    "expect": "en",
+    "lookup": false,
+    "text": "can you check the 배포 channel? something's off with the pipeline"
+  },
+  {
+    "id": "chat-03",
+    "category": "chat",
+    "expect": "ko",
+    "lookup": false,
+    "text": "ㅇㅋ 확인했어요. merge 해도 됨"
+  },
+  {
+    "id": "chat-04",
+    "category": "chat",
+    "expect": "en",
+    "lookup": false,
+    "text": "brb, coffee ☕"
+  },
+  {
+    "id": "chat-05",
+    "category": "chat",
+    "expect": "ko",
+    "lookup": false,
+    "text": "회의 10분만 미룰게요 죄송 🙇"
+  },
+  {
+    "id": "chat-06",
+    "category": "chat",
+    "expect": "en",
+    "lookup": false,
+    "text": "+1 on the proposal, 감사합니다!"
+  },
+  {
+    "id": "other_langs-01",
+    "category": "other_langs",
+    "expect": "en",
+    "lookup": false,
+    "text": "クリップボードのテキストを読み取り、翻訳結果を書き戻します。"
+  },
+  {
+    "id": "other_langs-02",
+    "category": "other_langs",
+    "expect": "en",
+    "lookup": false,
+    "text": "剪贴板文本读取失败时返回空值。"
+  },
+  {
+    "id": "other_langs-03",
+    "category": "other_langs",
+    "expect": "en",
+    "lookup": false,
+    "text": "剪貼簿文字讀取失敗時回傳空值。"
+  },
+  {
+    "id": "other_langs-04",
+    "category": "other_langs",
+    "expect": "en",
+    "lookup": false,
+    "text": "Ich habe die Konfiguration geändert, aber der Hotkey funktioniert nicht mehr."
+  },
+  {
+    "id": "other_langs-05",
+    "category": "other_langs",
+    "expect": "en",
+    "lookup": false,
+    "text": "La fenêtre ne s'affiche pas au-dessus des applications en plein écran."
+  },
+  {
+    "id": "other_langs-06",
+    "category": "other_langs",
+    "expect": "en",
+    "lookup": false,
+    "text": "Горячая клавиша не срабатывает после обновления."
+  },
+  {
+    "id": "edge-01",
+    "category": "edge",
+    "expect": "en",
+    "lookup": false,
+    "text": "annyeonghaseyo, baepo iljeong hwagin butak deurimnida.",
+    "note": "romanized Korean is not Korean for the rule"
+  },
+  {
+    "id": "edge-02",
+    "category": "edge",
+    "expect": "en",
+    "lookup": false,
+    "text": "🚀🎉👍"
+  },
+  {
+    "id": "edge-03",
+    "category": "edge",
+    "expect": "en",
+    "lookup": false,
+    "text": "2026-09-06 13:38 / 16384 / 0.55s"
+  },
+  {
+    "id": "edge-04",
+    "category": "edge",
+    "expect": "en",
+    "lookup": false,
+    "text": "https://internal.corp/docs/retry-policy#v2"
+  },
+  {
+    "id": "edge-05",
+    "category": "edge",
+    "expect": "en",
+    "lookup": false,
+    "text": "   \n\t\n"
+  },
+  {
+    "id": "edge-06",
+    "category": "edge",
+    "expect": "ko",
+    "lookup": false,
+    "text": "ㅋㅋㅋㅋ"
+  },
+  {
+    "id": "edge-07",
+    "category": "edge",
+    "expect": "ko",
+    "lookup": false,
+    "text": "ㄱㄱ",
+    "note": "compatibility jamo only"
+  },
+  {
+    "id": "edge-08",
+    "category": "edge",
+    "expect": "en",
+    "lookup": false,
+    "text": "OK"
+  },
+  {
+    "id": "words-01",
+    "category": "words",
+    "expect": "ko",
+    "lookup": true,
+    "text": "배포"
+  },
+  {
+    "id": "words-02",
+    "category": "words",
+    "expect": "en",
+    "lookup": true,
+    "text": "throughput"
+  },
+  {
+    "id": "words-03",
+    "category": "words",
+    "expect": "en",
+    "lookup": true,
+    "text": "pull request"
+  },
+  {
+    "id": "words-04",
+    "category": "words",
+    "expect": "ko",
+    "lookup": true,
+    "text": "기술 부채"
+  },
+  {
+    "id": "words-05",
+    "category": "words",
+    "expect": "en",
+    "lookup": true,
+    "text": "idempotent"
+  },
+  {
+    "id": "words-06",
+    "category": "words",
+    "expect": "ko",
+    "lookup": true,
+    "text": "멱등성"
+  },
+  {
+    "id": "words-07",
+    "category": "words",
+    "expect": "en",
+    "lookup": true,
+    "text": "race condition"
+  },
+  {
+    "id": "words-08",
+    "category": "words",
+    "expect": "en",
+    "lookup": true,
+    "text": "API"
+  },
+  {
+    "id": "words-09",
+    "category": "words",
+    "expect": "ko",
+    "lookup": true,
+    "text": "레이스 컨디션",
+    "note": "Korean transliteration of an English term"
+  },
+  {
+    "id": "words-10",
+    "category": "words",
+    "expect": "en",
+    "lookup": true,
+    "text": "Kubernetes"
+  },
+  {
+    "id": "words-11",
+    "category": "words",
+    "expect": "en",
+    "lookup": true,
+    "text": "on-call"
+  },
+  {
+    "id": "words-12",
+    "category": "words",
+    "expect": "ko",
+    "lookup": true,
+    "text": "회귀 테스트"
+  },
+  {
+    "id": "words-13",
+    "category": "words",
+    "expect": "en",
+    "lookup": true,
+    "text": "backoff.",
+    "note": "trailing period does not make it a sentence"
+  },
+  {
+    "id": "words-14",
+    "category": "words",
+    "expect": "ko",
+    "lookup": false,
+    "text": "배포 완료했습니다.",
+    "note": "a sentence, not a lookup"
+  },
+  {
+    "id": "words-15",
+    "category": "words",
+    "expect": "en",
+    "lookup": false,
+    "text": "Deploy it.",
+    "note": "a sentence, not a lookup"
+  },
+  {
+    "id": "words-16",
+    "category": "words",
+    "expect": "en",
+    "lookup": true,
+    "text": "cargo test",
+    "note": "two plain tokens: indistinguishable from a term, so it is looked up"
+  },
+  {
+    "id": "words-17",
+    "category": "words",
+    "expect": "ko",
+    "lookup": false,
+    "text": "배포 파이프라인 점검 완료",
+    "note": "3 tokens: phrase, not a lookup"
+  },
+  {
+    "id": "either-01",
+    "category": "either",
+    "expect": "either",
+    "lookup": false,
+    "text": "TODO(luke): handle the 429 path — see #63. 임시로 sleep(2) 넣어둠."
+  },
+  {
+    "id": "either-02",
+    "category": "either",
+    "expect": "either",
+    "lookup": false,
+    "text": "Deployment failed. 원인 분석 중입니다."
+  },
+  {
+    "id": "either-03",
+    "category": "either",
+    "expect": "either",
+    "lookup": false,
+    "text": "## Release v0.20.0\n수정 요청 기능 추가. Undo 지원."
+  },
+  {
+    "id": "either-04",
+    "category": "either",
+    "expect": "either",
+    "lookup": false,
+    "text": "배포 실패. Investigating the root cause now."
+  },
+  {
+    "id": "either-05",
+    "category": "either",
+    "expect": "either",
+    "lookup": false,
+    "text": "Note: 캐시 미스 발생 시 TTFT 2.4s"
+  }
+]

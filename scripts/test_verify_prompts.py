@@ -202,6 +202,22 @@ class RevisionRounds(unittest.TestCase):
         self.assertEqual(body["input"][2]["content"][0]["type"], "input_text")
 
 
+class LangDirectionVectors(unittest.TestCase):
+    """scripts/lang_direction_vectors.json is shared with the Rust unit tests of
+    src/lang.rs; keep its schema stable."""
+
+    def test_schema(self):
+        cases = json.loads((vp.HERE / "lang_direction_vectors.json").read_text(encoding="utf-8"))
+        ids = [c["id"] for c in cases]
+        self.assertEqual(len(ids), len(set(ids)), "duplicate ids")
+        for c in cases:
+            self.assertIn(c["expect"], ("ko", "en", "either"), c["id"])
+            self.assertIsInstance(c["lookup"], bool, c["id"])
+            self.assertIsInstance(c["text"], str, c["id"])
+            self.assertTrue(c["id"].startswith(c["category"] + "-"), c["id"])
+        self.assertGreaterEqual(len(cases), 100)
+
+
 class Grading(unittest.TestCase):
     def test_max_h2_headings_cap(self):
         case = {"id": "S-001", "mode": "summarize", "input": "x",
