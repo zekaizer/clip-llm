@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 pub mod decode;
 pub mod encode;
+pub mod fetch;
 pub mod filter;
 pub mod html;
 pub mod markup;
