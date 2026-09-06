@@ -10,6 +10,7 @@ pub use clipboard::ClipboardContent;
 #[cfg(feature = "diagnostics")]
 pub mod diagnostics;
 pub mod hotkey;
+pub mod images;
 pub mod platform;
 pub mod settings;
 pub mod telemetry;
