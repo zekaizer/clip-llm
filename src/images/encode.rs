@@ -31,6 +31,61 @@ pub fn check_pixel_budget(width: u32, height: u32) -> Result<(), ClipboardError>
 }
 
 
+/// Per-channel tolerance for a pixel to count as the margin color.
+const TRIM_TOLERANCE: u8 = 8;
+/// Margin kept around the content after a trim, so edge glyphs are not cut.
+const TRIM_PADDING: u32 = 8;
+
+/// Crop away the flat-colored margin around the content. The margin color is
+/// the one most corners share (within [`TRIM_TOLERANCE`]), so content touching
+/// one corner does not pass for background. `None` when there is nothing to
+/// gain: no margin, a fully flat image, or a crop under 5% of the area.
+pub fn trim_uniform_margins(rgba: &[u8], width: u32, height: u32) -> Option<(Vec<u8>, u32, u32)> {
+    let (w, h) = (width as usize, height as usize);
+    if w == 0 || h == 0 || rgba.len() != w * h * 4 {
+        return None;
+    }
+    let bg = margin_color(rgba, w, h)?;
+    let is_bg = |i: usize| (0..4).all(|c| rgba[i + c].abs_diff(bg[c]) <= TRIM_TOLERANCE);
+    let row_has_content = |y: usize| (0..w).any(|x| !is_bg((y * w + x) * 4));
+    let col_has_content = |x: usize, rows: std::ops::Range<usize>| rows.into_iter().any(|y| !is_bg((y * w + x) * 4));
+
+    let top = (0..h).find(|&y| row_has_content(y))?;
+    let bottom = (top..h).rev().find(|&y| row_has_content(y))?;
+    let left = (0..w).find(|&x| col_has_content(x, top..bottom + 1))?;
+    let right = (left..w).rev().find(|&x| col_has_content(x, top..bottom + 1))?;
+
+    let pad = TRIM_PADDING as usize;
+    let (x0, y0) = (left.saturating_sub(pad), top.saturating_sub(pad));
+    let (x1, y1) = ((right + 1 + pad).min(w), (bottom + 1 + pad).min(h));
+    let (cw, ch) = (x1 - x0, y1 - y0);
+    if cw * ch * 100 > w * h * 95 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(cw * ch * 4);
+    for y in y0..y1 {
+        out.extend_from_slice(&rgba[(y * w + x0) * 4..(y * w + x1) * 4]);
+    }
+    Some((out, cw as u32, ch as u32))
+}
+
+/// The color shared by the most corners, within [`TRIM_TOLERANCE`]; `None`
+/// when no two corners agree (no flat frame to trim).
+fn margin_color(rgba: &[u8], w: usize, h: usize) -> Option<[u8; 4]> {
+    let corner = |x: usize, y: usize| -> [u8; 4] {
+        let i = (y * w + x) * 4;
+        [rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]]
+    };
+    let corners = [corner(0, 0), corner(w - 1, 0), corner(0, h - 1), corner(w - 1, h - 1)];
+    let close = |a: &[u8; 4], b: &[u8; 4]| (0..4).all(|c| a[c].abs_diff(b[c]) <= TRIM_TOLERANCE);
+    corners
+        .iter()
+        .map(|c| (c, corners.iter().filter(|o| close(c, o)).count()))
+        .filter(|&(_, n)| n >= 2)
+        .max_by_key(|&(_, n)| n)
+        .map(|(c, _)| *c)
+}
+
 /// Downscale (long edge > `MAX_IMAGE_LONG_EDGE`) and PNG-encode raw RGBA pixels
 /// for the vision API. Shared by the clipboard image and PNG-file paths so both
 /// obey the same payload bound.
@@ -39,6 +94,19 @@ pub fn encode_rgba_for_upload(
     width: u32,
     height: u32,
 ) -> Result<Vec<u8>, ClipboardError> {
+    // Only an image that would be downscaled gains from a trim: the margin
+    // it sheds is resolution the content keeps.
+    let (rgba, width, height) = if width.max(height) > MAX_IMAGE_LONG_EDGE {
+        match trim_uniform_margins(&rgba, width, height) {
+            Some((cropped, w, h)) => {
+                debug!("trimmed flat margins {}x{} -> {}x{}", width, height, w, h);
+                (cropped, w, h)
+            }
+            None => (rgba, width, height),
+        }
+    } else {
+        (rgba, width, height)
+    };
     let (bytes, w, h) = match downscale_rgba(&rgba, width, height) {
         Some((resized, new_w, new_h)) => {
             debug!("downscaling image {}x{} -> {}x{}", width, height, new_w, new_h);
@@ -144,6 +212,86 @@ pub fn rgba_to_png(bytes: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Cli
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PNG IHDR dimensions, straight from the header bytes.
+    fn png_dims(png: &[u8]) -> (u32, u32) {
+        let w = u32::from_be_bytes(png[16..20].try_into().unwrap());
+        let h = u32::from_be_bytes(png[20..24].try_into().unwrap());
+        (w, h)
+    }
+
+    /// `w x h` of `bg` with a block of `fg` at `rect` = (x, y, width, height).
+    fn with_box(w: u32, h: u32, bg: [u8; 4], rect: (u32, u32, u32, u32), fg: [u8; 4]) -> Vec<u8> {
+        let (x, y, box_w, box_h) = rect;
+        let mut buf = solid_rgba(w, h, bg);
+        for yy in y..y + box_h {
+            for xx in x..x + box_w {
+                let i = ((yy * w + xx) * 4) as usize;
+                buf[i..i + 4].copy_from_slice(&fg);
+            }
+        }
+        buf
+    }
+
+    #[test]
+    fn trim_crops_to_content_plus_padding() {
+        let img = with_box(400, 300, [255, 255, 255, 255], (100, 50, 100, 100), [0, 0, 0, 255]);
+        let (cropped, w, h) = trim_uniform_margins(&img, 400, 300).unwrap();
+        assert_eq!((w, h), (100 + 2 * TRIM_PADDING, 100 + 2 * TRIM_PADDING));
+        assert_eq!(cropped.len(), (w * h * 4) as usize);
+        // Padding ring is background, the inner block is content.
+        assert_eq!(&cropped[..4], &[255, 255, 255, 255]);
+        let center = (((h / 2) * w + w / 2) * 4) as usize;
+        assert_eq!(&cropped[center..center + 4], &[0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn trim_padding_is_clamped_at_the_image_edge() {
+        // Content touches the top-left corner: nothing to pad on that side.
+        let img = with_box(300, 300, [20, 20, 20, 255], (0, 0, 50, 50), [200, 200, 200, 255]);
+        let (_, w, h) = trim_uniform_margins(&img, 300, 300).unwrap();
+        assert_eq!((w, h), (50 + TRIM_PADDING, 50 + TRIM_PADDING));
+    }
+
+    #[test]
+    fn trim_tolerates_near_background_noise() {
+        let mut img = with_box(400, 300, [250, 250, 250, 255], (100, 50, 100, 100), [0, 0, 0, 255]);
+        // Faint speckle in the margin, within tolerance.
+        img[4 * 10] = 245;
+        img[4 * (400 * 200 + 390)] = 255;
+        let (_, w, h) = trim_uniform_margins(&img, 400, 300).unwrap();
+        assert_eq!((w, h), (100 + 2 * TRIM_PADDING, 100 + 2 * TRIM_PADDING));
+    }
+
+    #[test]
+    fn trim_is_noop_without_a_worthwhile_margin() {
+        // Flat image: nothing is content.
+        assert!(trim_uniform_margins(&solid_rgba(300, 300, [9, 9, 9, 255]), 300, 300).is_none());
+        // Content fills the frame.
+        let full = with_box(300, 300, [255, 255, 255, 255], (0, 0, 300, 300), [0, 0, 0, 255]);
+        assert!(trim_uniform_margins(&full, 300, 300).is_none());
+        // A 2px margin is under the 5% threshold.
+        let thin = with_box(300, 300, [255, 255, 255, 255], (2, 2, 296, 296), [0, 0, 0, 255]);
+        assert!(trim_uniform_margins(&thin, 300, 300).is_none());
+        assert!(trim_uniform_margins(&[], 0, 0).is_none());
+    }
+
+    #[test]
+    fn upload_trims_margins_before_deciding_to_downscale() {
+        // 4000x3000 mostly white, 1000x800 of content: after the trim the long
+        // edge is under the cap, so the content is sent at full resolution.
+        let img = with_box(4000, 3000, [255, 255, 255, 255], (1500, 1100, 1000, 800), [0, 0, 0, 255]);
+        let png = encode_rgba_for_upload(img, 4000, 3000).unwrap();
+        assert_eq!(png_dims(&png), (1000 + 2 * TRIM_PADDING, 800 + 2 * TRIM_PADDING));
+    }
+
+    #[test]
+    fn upload_leaves_small_images_untouched() {
+        // Under the cap: no trim, no downscale, even with a wide margin.
+        let img = with_box(400, 300, [255, 255, 255, 255], (100, 50, 100, 100), [0, 0, 0, 255]);
+        let png = encode_rgba_for_upload(img, 400, 300).unwrap();
+        assert_eq!(png_dims(&png), (400, 300));
+    }
 
     #[test]
     fn pixel_budget_admits_up_to_the_limit() {
