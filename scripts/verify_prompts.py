@@ -534,6 +534,8 @@ def hangul_ratio(text: str) -> float:
     return 0.0 if (h + l) == 0 else h / (h + l)
 
 
+SENSE_LINE_RE = re.compile(r"^\s*\d+\.\s")
+SLOT_ECHO_RE = re.compile(r"\b(HEADWORD|EQUIVALENT|TRANSLITERATION|PART-OF-SPEECH|SENSE|EXAMPLE SENTENCE)\b")
 KR_MARKER_RE = re.compile(
     r"(니다|습니다|입니다|세요|해요|에요|예요|는다|한다|됩니다|은|는|이|가|을|를|에|의|로|와|과|도|만)"
 )
@@ -638,6 +640,14 @@ def grade(case: dict, output: str, finish: str) -> list[tuple[str, bool, str]]:
             # Equality with the equivalent is fine for loanwords (cache → 캐시 · `캐시`).
             ok = bool(HANGUL_ONLY_RE.match(tr)) and not KOREAN_WORD_SUFFIX_RE.search(tr)
             res.append(("transliteration", ok, "" if ok else f"{tr!r} (equivalent {eq!r})"))
+        # Every sense is written in the primary language (Korean); English
+        # senses for an English headword were the small-model failure.
+        senses = [l for l in output.splitlines() if SENSE_LINE_RE.match(l)]
+        foreign = [l for l in senses if classify_lang(l) != "ko"]
+        res.append(("senses-lang", not foreign, "; ".join(l.strip()[:40] for l in foreign)))
+        # Slot names copied from the prompt's shape (**EQUIVALENT**) are not an entry.
+        echoed = SLOT_ECHO_RE.findall(output)
+        res.append(("slot-echo", not echoed, ", ".join(sorted(set(echoed)))))
 
     return res
 

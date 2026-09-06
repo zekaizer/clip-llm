@@ -114,21 +114,26 @@ const DEFAULT_DIRECTION_RULE: &str =
 // Dictionary entry for a word or short term (`[translate].dictionary`), used
 // instead of the translate prompt when `lang::is_lookup` says so. Markdown: the
 // entry is pasted into notes. `{direction}` takes one of the two sentences below.
+// The shape is taught by a filled example rather than a slot skeleton: small
+// models copied slot names into the entry (**EQUIVALENT**) and wrote English
+// senses for English headwords; with the example gemma-4-e2b went 6/6
+// (measured 2026-09-06).
 const DEFAULT_DICTIONARY_PROMPT: &str =
     "You are a bilingual dictionary of software-engineering vocabulary for {primary_lang} and \
      {secondary_lang}. The user message is a single word or short term: the headword. \
      {direction} \
-     Write exactly one entry in Markdown, in this shape and nothing else (the capitalized \
-     words are slots to fill; keep every other character as shown):\n\
-     # HEADWORD\n\
-     **EQUIVALENT** \u{b7} `TRANSLITERATION` \u{b7} *PART-OF-SPEECH*\n\
-     1. SENSE, with a short gloss\n\
-     2. FURTHER SENSE, if any\n\
-     > EXAMPLE SENTENCE using the headword \u{2014} ITS TRANSLATION\n\
-     Line 2 names exactly one equivalent, in bold, then the transliteration inside backticks, \
+     Write exactly one entry in Markdown, in the same shape as this example and nothing else:\n\
+     # throughput\n\
+     **처리량** \u{b7} `스루풋` \u{b7} *noun*\n\
+     1. 단위 시간당 처리되는 작업이나 데이터의 양.\n\
+     2. 네트워크에서 실제로 전달되는 데이터 전송률.\n\
+     > The new cache doubled the throughput of the API. \u{2014} 새 캐시로 API 처리량이 두 배가 되었다.\n\
+     Line 2 names exactly one equivalent, in bold, then the pronunciation inside backticks, \
      then the part of speech in italics; further equivalents go inside a sense as \
-     term `transliteration`. Prefer the software-engineering senses. At most three senses and \
-     one example. No preamble, no notes, no text outside the entry.";
+     term `pronunciation`. Every sense is written in {primary_lang}; the example sentence is in \
+     the headword's language with its {primary_lang} translation after the dash. Prefer the \
+     software-engineering senses. At most three senses and one example. No preamble, no notes, \
+     no text outside the entry.";
 // Korean headword: English equivalents, each with its pronunciation in Hangul.
 // The slot-by-slot wording with examples is what small models need; gemma-4-e2b
 // otherwise romanizes or writes IPA and answers in the wrong language.
@@ -2081,7 +2086,9 @@ X-Test = "1"
     fn lookup_uses_the_dictionary_prompt() {
         let params = RephraseParams::default();
         let en = ProcessMode::Translate.system_prompt_for(params, Some("throughput"));
-        assert!(en.contains("dictionary") && en.contains("# HEADWORD"), "{en}");
+        // The shape is taught by a filled example, not a slot skeleton: small
+        // models copied slot names (**EQUIVALENT**) and wrote English senses.
+        assert!(en.contains("dictionary") && en.contains("# throughput") && !en.contains("HEADWORD"), "{en}");
         assert!(en.contains("The headword is English or another language"), "{en}");
         let ko = ProcessMode::Translate.system_prompt_for(params, Some("멱등성"));
         assert!(ko.contains("The headword is Korean"), "{ko}");

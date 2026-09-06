@@ -304,6 +304,19 @@ class DictionaryEntryGrading(unittest.TestCase):
     def _fails(self, out):
         return [n for n, ok, _ in vp.grade(self.CASE, out, "stop") if not ok]
 
+    def test_senses_must_be_in_the_primary_language(self):
+        english_senses = "# throughput\n**처리량** · `스루풋` · *noun*\n1. The amount of work done per unit of time.\n> The API throughput doubled. — API 처리량이 두 배가 되었다."
+        self.assertIn("senses-lang", self._fails(english_senses))
+        korean_senses = "# throughput\n**처리량** · `스루풋` · *noun*\n1. 단위 시간당 처리되는 작업의 양.\n2. 네트워크의 실제 전송률 (data rate).\n> The API throughput doubled. — API 처리량이 두 배가 되었다."
+        self.assertNotIn("senses-lang", self._fails(korean_senses))
+
+    def test_slot_names_copied_from_the_prompt_fail(self):
+        echoed = "# UNCENSORED\n**EQUIVALENT** · `언센서드` · *ADJECTIVE*\n1. 검열되지 않은.\n> EXAMPLE SENTENCE — 번역."
+        fails = self._fails(echoed)
+        self.assertIn("slot-echo", fails)
+        clean = "# uncensored\n**무검열** · `언센서드` · *adjective*\n1. 검열되지 않은.\n> An uncensored build. — 무검열 빌드."
+        self.assertNotIn("slot-echo", self._fails(clean))
+
     def test_hangul_transliteration_that_differs_from_the_equivalent_passes(self):
         self.assertEqual(self._fails("# throughput\n**처리량** · `스루풋` · *noun*\n1. 뜻"), [])
         self.assertEqual(self._fails("# race condition\n**경쟁 상태** · `레이스 컨디션` · *n.*"), [])
