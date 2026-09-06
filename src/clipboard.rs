@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use arboard::Clipboard;
 use tracing::{debug, info, warn};
 
-use crate::images::encode::encode_rgba_for_upload;
+use crate::images::encode::{check_pixel_budget, encode_rgba_for_upload};
 use crate::platform::{ModifierState, Platform};
 use crate::ClipboardError;
 
@@ -79,7 +79,9 @@ impl ClipboardContent {
 fn read_image_from_board(board: &mut Clipboard) -> Result<Vec<Arc<Vec<u8>>>, ClipboardError> {
     match board.get_image() {
         Ok(img) => {
-            let png = encode_rgba_for_upload(img.bytes.into_owned(), img.width as u32, img.height as u32)?;
+            let (width, height) = (img.width as u32, img.height as u32);
+            check_pixel_budget(width, height)?;
+            let png = encode_rgba_for_upload(img.bytes.into_owned(), width, height)?;
             Ok(vec![Arc::new(png)])
         }
         Err(_) => Ok(vec![]),

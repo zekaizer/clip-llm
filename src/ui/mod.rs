@@ -2148,6 +2148,10 @@ fn friendly_clipboard_error(e: &crate::ClipboardError) -> String {
             limit_bytes / (1024 * 1024)
         ),
         FileReadFailed { name, .. } => format!("Could not read {name}."),
+        ImageTooLarge { width, height, limit_px } => format!(
+            "Image is too large to send ({width}x{height}; limit {} megapixels).",
+            limit_px / 1_000_000
+        ),
     }
 }
 

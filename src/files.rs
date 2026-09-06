@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use tracing::{info, warn};
 
-use crate::images::encode::encode_rgba_for_upload;
+use crate::images::encode::{check_pixel_budget, encode_rgba_for_upload, MAX_IMAGE_PIXELS};
 use crate::{ClipboardContent, ClipboardError};
 
 /// Per-file cap for text files; larger files are refused rather than
@@ -49,7 +49,7 @@ pub fn ingest_files(paths: &[PathBuf]) -> Result<ClipboardContent, ClipboardErro
                 });
             }
             let bytes = read(path, &name)?;
-            match decode_png_rgba(&bytes) {
+            match decode_png_rgba(&bytes)? {
                 Some((rgba, w, h)) => {
                     images.push(Arc::new(encode_rgba_for_upload(rgba, w, h)?));
                     names.push(name);
@@ -143,15 +143,29 @@ fn as_text(bytes: &[u8]) -> Option<&str> {
     std::str::from_utf8(bytes).ok()
 }
 
-/// Decode a PNG into 8-bit RGBA. `None` for anything that is not a PNG.
-fn decode_png_rgba(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
-    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+/// Decode a PNG into 8-bit RGBA. `Ok(None)` for anything that is not a
+/// decodable PNG; `Err` only for an image over the pixel budget.
+fn decode_png_rgba(bytes: &[u8]) -> Result<Option<(Vec<u8>, u32, u32)>, ClipboardError> {
+    // The decoder may allocate at most one RGBA buffer at the pixel budget;
+    // the header check below is what actually refuses larger images.
+    let limits = png::Limits {
+        bytes: (MAX_IMAGE_PIXELS * 4) as usize,
+    };
+    let mut decoder = png::Decoder::new_with_limits(std::io::Cursor::new(bytes), limits);
     // Expand palettes / low bit depths and strip 16-bit so every color type
     // below arrives as 8-bit samples.
     decoder.set_transformations(png::Transformations::normalize_to_color8());
-    let mut reader = decoder.read_info().ok()?;
-    let mut buf = vec![0u8; reader.output_buffer_size()?];
-    let info = reader.next_frame(&mut buf).ok()?;
+    let Ok(mut reader) = decoder.read_info() else {
+        return Ok(None);
+    };
+    check_pixel_budget(reader.info().width, reader.info().height)?;
+    let Some(size) = reader.output_buffer_size() else {
+        return Ok(None);
+    };
+    let mut buf = vec![0u8; size];
+    let Ok(info) = reader.next_frame(&mut buf) else {
+        return Ok(None);
+    };
     let px = &buf[..info.buffer_size()];
     let rgba = match info.color_type {
         png::ColorType::Rgba => px.to_vec(),
@@ -169,9 +183,9 @@ fn decode_png_rgba(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
             .flat_map(|c| [c[0], c[0], c[0], c[1]])
             .collect(),
         // normalize_to_color8 expands palettes, so this cannot occur.
-        png::ColorType::Indexed => return None,
+        png::ColorType::Indexed => return Ok(None),
     };
-    Some((rgba, info.width, info.height))
+    Ok(Some((rgba, info.width, info.height)))
 }
 
 #[cfg(test)]
@@ -247,6 +261,47 @@ mod tests {
         assert_eq!(c.files, vec!["shot.png".to_string()]);
     }
 
+    /// A syntactically valid PNG whose header claims `w x h` pixels but whose
+    /// IDAT holds no rows: enough for the header to parse, nothing to decode.
+    fn png_with_header(w: u32, h: u32) -> Vec<u8> {
+        fn crc32(data: &[u8]) -> u32 {
+            let mut crc = 0xFFFF_FFFFu32;
+            for &b in data {
+                crc ^= u32::from(b);
+                for _ in 0..8 {
+                    crc = if crc & 1 == 1 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+                }
+            }
+            !crc
+        }
+        fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], body: &[u8]) {
+            out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+            let mut typed = kind.to_vec();
+            typed.extend_from_slice(body);
+            out.extend_from_slice(&typed);
+            out.extend_from_slice(&crc32(&typed).to_be_bytes());
+        }
+        let mut out = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // 8-bit RGBA, no interlace
+        chunk(&mut out, b"IHDR", &ihdr);
+        chunk(&mut out, b"IDAT", &[0x78, 0x9C, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]); // empty zlib stream
+        chunk(&mut out, b"IEND", &[]);
+        out
+    }
+
+    #[test]
+    fn oversized_png_is_refused_from_the_header() {
+        let d = tmp_dir();
+        let p = write(&d, "huge.png", &png_with_header(20_000, 20_000));
+        match ingest_files(&[p]) {
+            Err(ClipboardError::ImageTooLarge { width: 20_000, height: 20_000, .. }) => {}
+            other => panic!("expected ImageTooLarge, got {other:?}"),
+        }
+    }
+
     #[test]
     fn png_decode_handles_rgb_and_gray() {
         // RGB 1x1 and grayscale 1x1 encoded by hand via the png crate.
@@ -260,13 +315,13 @@ mod tests {
             drop(w);
             out
         }
-        let (rgba, w, h) = decode_png_rgba(&enc(png::ColorType::Rgb, &[10, 20, 30])).unwrap();
+        let (rgba, w, h) = decode_png_rgba(&enc(png::ColorType::Rgb, &[10, 20, 30])).unwrap().unwrap();
         assert_eq!((w, h), (1, 1));
         assert_eq!(rgba, vec![10, 20, 30, 255]);
-        let (rgba, ..) = decode_png_rgba(&enc(png::ColorType::Grayscale, &[77])).unwrap();
+        let (rgba, ..) = decode_png_rgba(&enc(png::ColorType::Grayscale, &[77])).unwrap().unwrap();
         assert_eq!(rgba, vec![77, 77, 77, 255]);
         let (rgba, ..) =
-            decode_png_rgba(&enc(png::ColorType::GrayscaleAlpha, &[77, 128])).unwrap();
+            decode_png_rgba(&enc(png::ColorType::GrayscaleAlpha, &[77, 128])).unwrap().unwrap();
         assert_eq!(rgba, vec![77, 77, 77, 128]);
     }
 

@@ -12,6 +12,24 @@ use crate::ClipboardError;
 /// inflates the base64 payload without improving model accuracy.
 const MAX_IMAGE_LONG_EDGE: u32 = 1568;
 
+/// Pixel budget an input image may have before decoding (about 8K x 6K).
+/// Checked from the header, so the RGBA buffer for a larger image is never
+/// allocated; the file path also caps the decoder's allocation at this many
+/// RGBA bytes.
+pub const MAX_IMAGE_PIXELS: u64 = 50_000_000;
+
+/// Refuse an image whose header exceeds [`MAX_IMAGE_PIXELS`].
+pub fn check_pixel_budget(width: u32, height: u32) -> Result<(), ClipboardError> {
+    if u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS {
+        return Err(ClipboardError::ImageTooLarge {
+            width,
+            height,
+            limit_px: MAX_IMAGE_PIXELS,
+        });
+    }
+    Ok(())
+}
+
 
 /// Downscale (long edge > `MAX_IMAGE_LONG_EDGE`) and PNG-encode raw RGBA pixels
 /// for the vision API. Shared by the clipboard image and PNG-file paths so both
@@ -126,6 +144,21 @@ pub fn rgba_to_png(bytes: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Cli
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pixel_budget_admits_up_to_the_limit() {
+        assert!(check_pixel_budget(10_000, 5_000).is_ok());
+        assert!(check_pixel_budget(1, 1).is_ok());
+    }
+
+    #[test]
+    fn pixel_budget_refuses_oversized_and_never_overflows() {
+        assert!(matches!(
+            check_pixel_budget(10_000, 5_001),
+            Err(ClipboardError::ImageTooLarge { width: 10_000, height: 5_001, limit_px: MAX_IMAGE_PIXELS })
+        ));
+        assert!(matches!(check_pixel_budget(u32::MAX, u32::MAX), Err(ClipboardError::ImageTooLarge { .. })));
+    }
 
     // -- rgba_to_png tests --
 
