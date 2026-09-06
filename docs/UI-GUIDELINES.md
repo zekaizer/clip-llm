@@ -31,7 +31,9 @@ height matching, egui Area resets). A fixed frame removes the whole class.
 
 Exception: the **Settings** panel is a form, not a live view — it keeps a
 fixed width (`theme::size::SETTINGS_WIDTH`) and sizes its height to the
-form. Long forms are split into sub-pages rather than scrolled.
+form. Long forms are split into sub-pages rather than scrolled. It is a
+dialog, so it opens in the middle of the display the cursor is on, never on
+the cursor itself (`[ui].position` does not apply to it).
 
 ## 2. Layout: header / status / body / footer
 
