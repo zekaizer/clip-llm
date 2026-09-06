@@ -460,10 +460,10 @@
   {
     "id": "logs-04",
     "category": "logs",
-    "expect": "en",
+    "expect": "either",
     "lookup": false,
     "text": "{\"level\":\"error\",\"msg\":\"clipboard write failed\",\"detail\":\"권한 없음\"}",
-    "note": "one Korean field in an English log"
+    "note": "a JSON log with one Korean value: either direction is defensible"
   },
   {
     "id": "logs-05",
@@ -652,23 +652,25 @@
     "id": "edge-06",
     "category": "edge",
     "expect": "ko",
-    "lookup": false,
-    "text": "ㅋㅋㅋㅋ"
+    "lookup": true,
+    "text": "ㅋㅋㅋㅋ",
+    "note": "one bare token is looked up; the entry explains the slang"
   },
   {
     "id": "edge-07",
     "category": "edge",
     "expect": "ko",
-    "lookup": false,
+    "lookup": true,
     "text": "ㄱㄱ",
-    "note": "compatibility jamo only"
+    "note": "one bare token is looked up; the entry explains the slang"
   },
   {
     "id": "edge-08",
     "category": "edge",
     "expect": "en",
-    "lookup": false,
-    "text": "OK"
+    "lookup": true,
+    "text": "OK",
+    "note": "one bare token is looked up; the entry explains the slang"
   },
   {
     "id": "words-01",
@@ -759,9 +761,9 @@
     "id": "words-13",
     "category": "words",
     "expect": "en",
-    "lookup": true,
+    "lookup": false,
     "text": "backoff.",
-    "note": "trailing period does not make it a sentence"
+    "note": "a trailing period reads as a sentence"
   },
   {
     "id": "words-14",

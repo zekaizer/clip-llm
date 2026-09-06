@@ -1,5 +1,6 @@
 #![deny(unused_must_use)]
 
+pub mod lang;
 pub mod api;
 pub mod clipboard;
 pub mod config;
