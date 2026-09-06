@@ -78,7 +78,8 @@ const DEFAULT_PROMPT_PREAMBLE: &str =
 const DEFAULT_REVISION_PROMPT: &str =
     "[Revision request from the operator \u{2014} not content] Revise your previous reply according \
      to this request (keep the task's output language and format) and output only the \
-     complete revised reply: {request}";
+     complete revised reply \u{2014} never a diff, a list of changes, a note, or a translation \
+     of this request: {request}";
 
 // `{direction}` is replaced per request with one of the three sentences below
 // (ADR-0002): the direction is decided in code from the input's prose, and the
@@ -2047,6 +2048,8 @@ X-Test = "1"
         let config = Config::default();
         let turn = config.revision_request("더 짧게");
         assert!(turn.starts_with("[Revision request from the operator"), "{turn}");
+        // Ground rule: the output is the whole revised reply, never a diff.
+        assert!(turn.contains("never a diff"), "{turn}");
         assert!(turn.contains("output only the complete revised reply"), "{turn}");
         assert!(turn.ends_with("더 짧게"), "{turn}");
     }
