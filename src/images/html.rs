@@ -159,7 +159,13 @@ fn decode_entities(raw: &str) -> String {
     while let Some(amp) = rest.find('&') {
         out.push_str(&rest[..amp]);
         let tail = &rest[amp..];
-        let Some(semi) = tail[..tail.len().min(10)].find(';') else {
+        // Entities are short: look for `;` within the next 10 bytes, backed
+        // off to a char boundary so multibyte text after `&` cannot panic.
+        let mut window = tail.len().min(10);
+        while !tail.is_char_boundary(window) {
+            window -= 1;
+        }
+        let Some(semi) = tail[..window].find(';') else {
             out.push('&');
             rest = &tail[1..];
             continue;
@@ -295,6 +301,17 @@ mod tests {
         assert_eq!(refs[0].width, Some(800));
         // `<image` or `<imgx` are not image tags.
         assert!(img_refs("<imgx src='f.png'><image src='g.png'>").is_empty());
+    }
+
+    #[test]
+    fn entities_next_to_multibyte_text_do_not_panic() {
+        // A byte-indexed window after `&` landed inside a Hangul syllable and
+        // panicked the capture thread (seen with Korean pages, 2026-09-06).
+        let refs = img_refs("<img src=\"https://h/a.png?q=R&D%20개발자&x=1\" alt=\"R&D 개발자 모집\">");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].src, "https://h/a.png?q=R&D%20개발자&x=1");
+        assert_eq!(refs[0].alt.as_deref(), Some("R&D 개발자 모집"));
+        assert_eq!(super::decode_entities("&가&amp;나&#44032;&"), "&가&나가&");
     }
 
     #[test]
