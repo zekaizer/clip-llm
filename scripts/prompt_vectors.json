@@ -1401,5 +1401,50 @@
       ],
       "max_chars": 80
     }
+  },
+  {
+    "id": "I-001",
+    "mode": "summarize",
+    "image": "chart.png",
+    "input": "분기 매출 보고\n\n첨부한 차트는 3분기 지역별 매출입니다. 아시아 지역이 전년 대비 12% 성장했고, 유럽은 보합, 북미는 3% 감소했습니다. 4분기에는 아시아 마케팅 예산을 20% 늘릴 계획입니다.",
+    "rationale": "Text plus an attached image. The [[image 1/1: 600x400]] marker the app places before the image is metadata and must not appear in the summary.",
+    "checks": {
+      "output_lang": "ko",
+      "must_not_contain": [
+        "[[image",
+        "600x400"
+      ]
+    }
+  },
+  {
+    "id": "I-002",
+    "mode": "transcribe",
+    "image": "chart.png",
+    "input": "Release checklist\n- bump version\n- run CI\n- tag",
+    "rationale": "Transcribe reproduces the input faithfully; the image marker is not part of the input and must not be transcribed.",
+    "checks": {
+      "must_preserve": [
+        "bump version",
+        "run CI"
+      ],
+      "must_not_contain": [
+        "[[image",
+        "600x400"
+      ]
+    }
+  },
+  {
+    "id": "I-003",
+    "mode": "explain",
+    "image": "chart.png",
+    "input": "The blue bar covers the middle of the gradient.",
+    "rationale": "Explain with an image: the explanation may describe the picture but never the marker line or its size figures.",
+    "checks": {
+      "output_lang": "ko",
+      "must_not_contain": [
+        "[[image",
+        "600x400"
+      ]
+    }
   }
 ]

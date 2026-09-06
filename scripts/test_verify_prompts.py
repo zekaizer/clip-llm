@@ -53,6 +53,17 @@ class SystemPromptComposition(unittest.TestCase):
         self.assertIn("are Korean and English", body)
         self.assertNotIn("{primary_lang}", system)
 
+    def test_explain_and_transcribe_come_from_config_rs_with_overrides(self):
+        defaults = vp.load_defaults()
+        explain = vp.build_system({"mode": "explain", "input": "x"}, {}, defaults)
+        self.assertIn("explanation", explain.lower())
+        self.assertTrue(explain.startswith(defaults["preamble"].replace("{primary_lang}", "Korean")))
+        transcribe = vp.build_system({"mode": "transcribe", "input": "x"}, {}, defaults)
+        self.assertIn("Transcribe", transcribe)
+        self.assertNotIn("{primary_lang}", explain + transcribe)
+        over = vp.build_system({"mode": "transcribe", "input": "x"}, {"transcribe": {"prompt": "T {primary_lang}"}}, defaults)
+        self.assertTrue(over.endswith("\n\nT Korean"), over[-40:])
+
     def test_rephrase_same_length_is_single_spaced(self):
         system = vp.build_system({"mode": "rephrase", "style": "correct", "length": "same"}, {}, self.defaults)
         self.assertNotIn("  ", system.split("\n\n", 1)[1])
@@ -124,6 +135,30 @@ class RequestShape(unittest.TestCase):
         self.assertEqual(body["messages"][0]["content"], "/no_think\nSYS")
         _, _, body = vp.build_request(self.openai(thinking_control="none"), "SYS", "U", "no_think", 1)
         self.assertNotIn("reasoning_effort", body)
+
+    def test_image_vectors_attach_marker_and_image_in_both_flavors(self):
+        image = {"data_uri": "data:image/png;base64,AAAA", "marker": "[[image 1/1: 600x400]]"}
+        _, _, body = vp.build_request(self.openai(), "SYS", "USER", "think", 1, image=image)
+        content = body["messages"][1]["content"]
+        self.assertEqual([p["type"] for p in content], ["text", "text", "image_url"])
+        self.assertEqual(content[0]["text"], "USER")
+        self.assertEqual(content[1]["text"], image["marker"])
+        self.assertEqual(content[2]["image_url"]["url"], image["data_uri"])
+        grok = {"name": "g", "provider": "grok-oauth", "model": "grok-4.3", "access_token": "tok"}
+        _, _, body = vp.build_request(grok, "SYS", "USER", "think", 1, image=image)
+        parts = body["input"][0]["content"]
+        self.assertEqual([p["type"] for p in parts], ["input_text", "input_text", "input_image"])
+        self.assertEqual(parts[1]["text"], image["marker"])
+        self.assertEqual(parts[2]["image_url"], image["data_uri"])
+        # Without an image the user content stays a plain string / single part.
+        _, _, body = vp.build_request(self.openai(), "SYS", "USER", "think", 1)
+        self.assertEqual(body["messages"][1]["content"], "USER")
+
+    def test_case_image_loads_the_fixture_with_the_app_marker(self):
+        self.assertIsNone(vp.case_image({"id": "x"}))
+        image = vp.case_image({"id": "x", "image": "chart.png"})
+        self.assertEqual(image["marker"], "[[image 1/1: 600x400]]")
+        self.assertTrue(image["data_uri"].startswith("data:image/png;base64,iVBOR"))
 
     def test_grok_oauth_uses_the_responses_api(self):
         m = {"name": "g", "provider": "grok-oauth", "model": "grok-4.3", "access_token": "tok"}
