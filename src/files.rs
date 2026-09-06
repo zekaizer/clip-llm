@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use tracing::{info, warn};
 
-use crate::clipboard::encode_rgba_for_upload;
+use crate::images::encode::encode_rgba_for_upload;
 use crate::{ClipboardContent, ClipboardError};
 
 /// Per-file cap for text files; larger files are refused rather than
@@ -200,7 +200,7 @@ mod tests {
 
     fn tiny_png() -> Vec<u8> {
         // 2x1 RGBA: red, green.
-        crate::clipboard::rgba_to_png(&[255, 0, 0, 255, 0, 255, 0, 255], 2, 1).unwrap()
+        crate::images::encode::rgba_to_png(&[255, 0, 0, 255, 0, 255, 0, 255], 2, 1).unwrap()
     }
 
     #[test]
