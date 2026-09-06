@@ -4,7 +4,7 @@ use super::panel::{self, GripAction, Slots};
 use super::state_machine::{CaptureSource, OverlayState};
 use super::theme::{self, color, font, size, space};
 use super::widgets::{
-    cancel_button, docked_action_button, hint_text, language_picker, pill,
+    cancel_button, docked_action_button, docked_action_button_enabled, hint_text, language_picker, pill,
     pill_row, pill_styled, pill_with_tip, row_label, section_header, small_button, status_row,
     think_block, think_toggle, PillTone,
 };
@@ -20,6 +20,23 @@ pub struct StreamingState<'a> {
     pub think_expanded: bool,
     /// `Some(reason)` when the shown Result is partial (stream cut short).
     pub incomplete: Option<&'a str>,
+}
+
+/// Revision-round state for the Result/Processing views.
+pub struct RevisionView<'a> {
+    /// Instructions of the rounds applied to the shown result, oldest first.
+    pub instructions: &'a [&'a str],
+    /// A revision request is in flight (Processing).
+    pub revising: bool,
+    /// The revision that just failed; shown over the restored reply.
+    pub error: Option<&'a str>,
+    /// The revise input's text, owned by the adapter across frames.
+    pub draft: &'a mut String,
+}
+
+/// egui id of the revise input (Result footer).
+pub fn revise_field_id() -> egui::Id {
+    egui::Id::new("revise_field")
 }
 
 /// Thinking mode state for UI rendering.
@@ -48,6 +65,10 @@ pub enum OverlayAction {
     CopyDebug,
     /// Switch to the next model profile and re-run the current content.
     CycleModel,
+    /// The user submitted a revision instruction for the shown result.
+    Revise(String),
+    /// Drop the last revision round and show the reply it revised.
+    UndoRevision,
     /// The resize grip was dragged; the new panel (frame) size, already
     /// clamped to `size::MIN_PANEL`.
     Resize(egui::Vec2),
@@ -93,6 +114,7 @@ pub fn render(
     completion_status: Option<String>,
     // More than one model profile exists: the status label switches models.
     model_switchable: bool,
+    revision: RevisionView<'_>,
     // Panel (frame incl. margin) size: the config default or the grip's
     // last value. Content never changes it.
     panel_size: egui::Vec2,
@@ -102,6 +124,29 @@ pub fn render(
         return OverlayOutput { action: OverlayAction::None, desired_size: None, content_size: None };
     }
 
+    let field_id = revise_field_id();
+    // Typing in the revise input: the focus state entering this frame - egui
+    // drops focus on Escape before any widget runs, so the current state
+    // alone would let that Escape close the panel too.
+    let typing = ctx.memory(|m| m.has_focus(field_id) || m.had_focus_last_frame(field_id));
+    // Tab focuses the revise input. egui already turned the Tab into a focus
+    // move at the start of the frame; clearing the direction keeps the focus
+    // where it was just put instead of handing it to the next widget.
+    if matches!(state, OverlayState::Result(_))
+        && !typing
+        && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab))
+    {
+        ctx.memory_mut(|m| {
+            m.request_focus(field_id);
+            m.move_focus(egui::FocusDirection::None);
+        });
+        // egui applies the input's key filter from its second focused frame
+        // on, and this app repaints only on events: without this frame the
+        // next arrow key would move the focus instead of the cursor.
+        ctx.request_repaint();
+    }
+    let revising = revision.revising;
+    let has_rounds = !revision.instructions.is_empty();
     let mut action = OverlayAction::None;
     let capturing = matches!(state, OverlayState::Capturing);
     let out = panel::show(ctx, panel_size, |slots| {
@@ -119,7 +164,7 @@ pub fn render(
             OverlayState::Capturing => {
                 view_capturing(slots, picking_text, source, elapsed, &mut action)
             }
-            OverlayState::Processing => view_processing(slots, mode, &streaming, elapsed, &mut action),
+            OverlayState::Processing => view_processing(slots, mode, &streaming, elapsed, revising, &mut action),
             OverlayState::Result(text) => view_result(
                 slots,
                 mode,
@@ -134,6 +179,7 @@ pub fn render(
                     completion_status: completion_status.as_deref(),
                     model_switchable,
                 },
+                revision,
                 &mut action,
             ),
             // Retry needs loaded content; a capture failure leaves none
@@ -156,14 +202,18 @@ pub fn render(
         action = OverlayAction::StartDrag;
     }
 
-    // Close on Escape key.
-    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-        action = OverlayAction::Close;
+    // Escape closes. While typing it only ends the input (egui does that
+    // itself), and during a revision it cancels the request and keeps the
+    // reply on screen.
+    if !typing && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        action = if revising { OverlayAction::Cancel } else { OverlayAction::Close };
     }
 
     // Keyboard mode switching once content is loaded (Result/Error): ←/→
     // step through the available tabs, Cmd/Ctrl+1…5 jump to a tab position.
-    if matches!(state, OverlayState::Result(_) | OverlayState::Error(_))
+    // Not while typing: the arrows move the input's cursor.
+    if !typing
+        && matches!(state, OverlayState::Result(_) | OverlayState::Error(_))
         && let Some(target) = keyboard_mode_switch(ctx, mode, available_modes)
     {
         action = OverlayAction::SwitchMode(target);
@@ -173,8 +223,13 @@ pub fn render(
     // action — paste-replace for double-tap, copy for single-tap — mirroring
     // the docked action button. Cmd/Ctrl+C copies the full result, but only
     // when no text is selected: egui's label selection handles its own copy,
-    // and overwriting it would clobber a deliberate partial-text copy.
-    if matches!(state, OverlayState::Result(_)) {
+    // and overwriting it would clobber a deliberate partial-text copy. None
+    // of this while typing: Enter submits the draft (see `view_result`) and
+    // Cmd/Ctrl+C copies from the input. Cmd/Ctrl+Z undoes the last revision.
+    if matches!(state, OverlayState::Result(_)) && !typing {
+        if has_rounds && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z)) {
+            action = OverlayAction::UndoRevision;
+        }
         if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
             action = if auto_copy {
                 OverlayAction::PasteReplace
@@ -284,6 +339,7 @@ fn view_processing(
     mode: ProcessMode,
     streaming: &StreamingState<'_>,
     elapsed: Option<std::time::Duration>,
+    revising: bool,
     action: &mut OverlayAction,
 ) {
     slots.status(|ui| {
@@ -299,8 +355,8 @@ fn view_processing(
             let label = theme::text("\u{25b6} Thinking", font::LABEL, color::text_muted());
             status_row(ui, false, label, elapsed);
         } else {
-            let label = theme::text(mode.processing_label(), font::LABEL, color::text());
-            status_row(ui, true, label, elapsed);
+            let text = if revising { "Revising..." } else { mode.processing_label() };
+            status_row(ui, true, theme::text(text, font::LABEL, color::text()), elapsed);
         }
     });
     slots.body(|body| {
@@ -357,13 +413,14 @@ struct ResultFooter<'a> {
 /// switches models when profiles exist); the body is the answer, preceded by
 /// the expanded Think block and an "incomplete" banner when they apply.
 /// Footer: source badge on the left; primary action, Retry and copy-debug
-/// on the right.
+/// on the right, then Undo and the revise input filling the middle.
 fn view_result(
     slots: &mut Slots<'_>,
     mode: ProcessMode,
     text: &str,
     streaming: &StreamingState<'_>,
     footer: ResultFooter<'_>,
+    revision: RevisionView<'_>,
     action: &mut OverlayAction,
 ) {
     slots.status(|ui| {
@@ -389,8 +446,26 @@ fn view_result(
                 ui.label(label);
             }
         }
+        // Which revision the shown text is: round count and the last
+        // instruction, the whole chain on hover.
+        if let Some(last) = revision.instructions.last() {
+            let label = format!(
+                "\u{270e} {} \u{b7} \u{201c}{}\u{201d}",
+                revision.instructions.len(),
+                truncate_chars(last, size::REVISION_LABEL_CHARS)
+            );
+            let chain: Vec<String> =
+                revision.instructions.iter().enumerate().map(|(i, s)| format!("{}. {s}", i + 1)).collect();
+            ui.label(theme::text(label, font::LABEL, color::text_muted())).on_hover_text(chain.join("\n"));
+        }
     });
     slots.body(|body| {
+        // A failed revision: the reply it was revising is shown, say why.
+        if let Some(message) = revision.error {
+            let banner = format!("\u{26a0} Revision failed \u{2014} {message}");
+            body.ui.label(theme::text(banner, font::LABEL, color::warning()));
+            body.ui.add_space(space::SM);
+        }
         // The partial reply is shown below, so say it is incomplete and why (#65).
         if let Some(reason) = streaming.incomplete {
             let banner = format!("\u{26a0} Incomplete — {reason}");
@@ -428,8 +503,40 @@ fn view_result(
             if footer.debug_available && copy_debug_button(ui) {
                 *action = OverlayAction::CopyDebug;
             }
+            // Undo and the revise input take the rest of the row; in this
+            // right-to-left layout the input lands next to the source badge.
+            let can_undo = !revision.instructions.is_empty();
+            let undo_tip = if can_undo { "Undo the last revision (Cmd/Ctrl+Z)" } else { "No revision to undo" };
+            if docked_action_button_enabled(ui, "\u{21b6}", undo_tip, can_undo) {
+                *action = OverlayAction::UndoRevision;
+            }
+            let width = ui.available_width() - space::SM;
+            if width >= size::REVISE_INPUT_MIN {
+                let field = egui::TextEdit::singleline(revision.draft)
+                    .id(revise_field_id())
+                    .desired_width(width)
+                    .font(egui::FontId::proportional(font::LABEL))
+                    .hint_text("Revise\u{2026} (Tab)");
+                let resp = ui.add(field);
+                // Enter ends the input (egui); a non-empty draft is submitted.
+                if resp.lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    && !revision.draft.trim().is_empty()
+                {
+                    *action = OverlayAction::Revise(std::mem::take(revision.draft));
+                }
+            }
         });
     });
+}
+
+/// The first `max` chars of `s`, with an ellipsis when it was longer.
+fn truncate_chars(s: &str, max: usize) -> String {
+    let mut out: String = s.chars().take(max).collect();
+    if s.chars().count() > max {
+        out.push('\u{2026}');
+    }
+    out
 }
 
 /// The copy-debug (🔍) action shared by Result and Error.
@@ -1278,6 +1385,7 @@ mod tests {
                 true,
                 Some("\u{2713} 2.4s".into()),
                 true,
+                RevisionView { instructions: &[], revising: false, error: None, draft: &mut String::new() },
                 panel_size,
                 ctx,
             ));
@@ -1389,11 +1497,139 @@ mod tests {
                 false,
                 None,
                 false,
+                RevisionView { instructions: &[], revising: false, error: None, draft: &mut String::new() },
                 size::DEFAULT_PANEL,
                 ctx,
             ));
         });
         output.unwrap().action
+    }
+
+    /// One frame of a Result/Processing view with revision state, on a shared
+    /// `ctx` so focus memory carries over between frames like real ones.
+    fn revision_frame(
+        ctx: &egui::Context,
+        input: egui::RawInput,
+        state: &OverlayState,
+        draft: &mut String,
+        instructions: &[&str],
+        revising: bool,
+    ) -> OverlayAction {
+        let mut output = None;
+        let _ = ctx.run(input, |ctx| {
+            output = Some(render(
+                state,
+                ProcessMode::Translate,
+                StreamingState {
+                    text: "",
+                    think_started: false,
+                    retry_notice: None,
+                    think_content: None,
+                    think_expanded: false,
+                    incomplete: None,
+                },
+                &[ProcessMode::Translate, ProcessMode::Summarize, ProcessMode::Explain],
+                None,
+                None,
+                RephraseParams::default(),
+                ThinkingState { mode: ThinkingMode::NoThink, supported: false },
+                false,
+                true,
+                CaptureSource::Selection,
+                &[],
+                false,
+                None,
+                false,
+                None,
+                false,
+                RevisionView { instructions, revising, error: None, draft },
+                size::DEFAULT_PANEL,
+                ctx,
+            ));
+        });
+        output.unwrap().action
+    }
+
+    fn revise_focused(ctx: &egui::Context) -> bool {
+        ctx.memory(|m| m.has_focus(revise_field_id()))
+    }
+
+    /// Tab, then the repaint frame the Tab handler requests (egui applies
+    /// the input's key filter only from its second focused frame).
+    fn focus_revise_input(ctx: &egui::Context, state: &OverlayState, draft: &mut String, instructions: &[&str]) {
+        let tab = key_event(egui::Key::Tab, egui::Modifiers::NONE);
+        assert_eq!(revision_frame(ctx, tab, state, draft, instructions, false), OverlayAction::None);
+        assert_eq!(revision_frame(ctx, egui::RawInput::default(), state, draft, instructions, false), OverlayAction::None);
+        assert!(revise_focused(ctx), "Tab focuses the input");
+    }
+
+    /// UI-GUIDELINES §4: Tab focuses the revise input; Enter there submits a
+    /// non-empty draft and never runs the primary action; an empty draft does
+    /// nothing at all.
+    #[test]
+    fn tab_focuses_the_revise_input_and_enter_submits_it() {
+        let ctx = egui::Context::default();
+        let result = OverlayState::Result("x".into());
+        let mut draft = String::new();
+        let idle = egui::RawInput::default();
+        revision_frame(&ctx, idle.clone(), &result, &mut draft, &[], false);
+        assert!(!revise_focused(&ctx));
+        focus_revise_input(&ctx, &result, &mut draft, &[]);
+        let enter = key_event(egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(revision_frame(&ctx, enter.clone(), &result, &mut draft, &[], false), OverlayAction::None);
+        assert!(!revise_focused(&ctx), "Enter ends the input");
+        focus_revise_input(&ctx, &result, &mut draft, &[]);
+        draft.push_str("shorter");
+        assert_eq!(
+            revision_frame(&ctx, enter.clone(), &result, &mut draft, &[], false),
+            OverlayAction::Revise("shorter".into())
+        );
+        assert!(draft.is_empty(), "a submitted draft is cleared");
+        // Not typing: Enter is the primary action as before.
+        assert_eq!(revision_frame(&ctx, enter, &result, &mut draft, &[], false), OverlayAction::PasteReplace);
+    }
+
+    #[test]
+    fn escape_and_arrows_while_typing_stay_in_the_input() {
+        let ctx = egui::Context::default();
+        let result = OverlayState::Result("x".into());
+        let mut draft = String::new();
+        revision_frame(&ctx, egui::RawInput::default(), &result, &mut draft, &[], false);
+        focus_revise_input(&ctx, &result, &mut draft, &[]);
+        let right = key_event(egui::Key::ArrowRight, egui::Modifiers::NONE);
+        assert_eq!(revision_frame(&ctx, right, &result, &mut draft, &[], false), OverlayAction::None);
+        assert!(revise_focused(&ctx), "arrows move the cursor, not the focus");
+        let esc = key_event(egui::Key::Escape, egui::Modifiers::NONE);
+        assert_eq!(revision_frame(&ctx, esc.clone(), &result, &mut draft, &[], false), OverlayAction::None);
+        assert!(!revise_focused(&ctx), "first Escape leaves the input");
+        assert_eq!(revision_frame(&ctx, esc, &result, &mut draft, &[], false), OverlayAction::Close);
+    }
+
+    #[test]
+    fn cmd_z_undoes_the_last_revision_when_there_is_one() {
+        let ctx = egui::Context::default();
+        let result = OverlayState::Result("x".into());
+        let mut draft = String::new();
+        let undo = key_event(egui::Key::Z, egui::Modifiers::COMMAND);
+        assert_eq!(revision_frame(&ctx, undo.clone(), &result, &mut draft, &[], false), OverlayAction::None);
+        assert_eq!(
+            revision_frame(&ctx, undo.clone(), &result, &mut draft, &["shorter"], false),
+            OverlayAction::UndoRevision
+        );
+        focus_revise_input(&ctx, &result, &mut draft, &["shorter"]);
+        assert_eq!(revision_frame(&ctx, undo, &result, &mut draft, &["shorter"], false), OverlayAction::None);
+    }
+
+    #[test]
+    fn escape_during_a_revision_cancels_instead_of_closing() {
+        let ctx = egui::Context::default();
+        let mut draft = String::new();
+        let esc = key_event(egui::Key::Escape, egui::Modifiers::NONE);
+        assert_eq!(
+            revision_frame(&ctx, esc.clone(), &OverlayState::Processing, &mut draft, &[], true),
+            OverlayAction::Cancel
+        );
+        assert_eq!(revision_frame(&ctx, esc, &OverlayState::Processing, &mut draft, &[], false), OverlayAction::Close);
     }
 
     /// Interaction policy (UI-GUIDELINES §4): ←/→ step through the available

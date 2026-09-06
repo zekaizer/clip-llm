@@ -332,11 +332,19 @@ pub(super) fn cancel_button(ui: &mut egui::Ui) -> bool {
 /// [`size::ACTION_BTN`] square, always visible in a subdued tone that
 /// brightens on hover. Returns true when clicked.
 pub(super) fn docked_action_button(ui: &mut egui::Ui, icon: &str, tooltip: &str) -> bool {
+    docked_action_button_enabled(ui, icon, tooltip, true)
+}
+
+/// A docked action button that can be disabled. The tooltip shows either way:
+/// a disabled control says why instead of swallowing the click.
+pub(super) fn docked_action_button_enabled(ui: &mut egui::Ui, icon: &str, tooltip: &str, enabled: bool) -> bool {
     let hovered = ui
         .ctx()
         .read_response(ui.next_auto_id())
         .is_some_and(|r| r.hovered());
-    let (fg, bg) = if hovered {
+    let (fg, bg) = if !enabled {
+        (color::text_disabled(), color::surface_subtle())
+    } else if hovered {
         (color::text(), color::surface_hover())
     } else {
         (color::text_secondary(), color::surface_subtle())
@@ -346,7 +354,7 @@ pub(super) fn docked_action_button(ui: &mut egui::Ui, icon: &str, tooltip: &str)
         .fill(bg)
         .stroke(egui::Stroke::NONE)
         .corner_radius(size::RADIUS_SM);
-    ui.add(btn).on_hover_text(tooltip).clicked()
+    ui.add_enabled(enabled, btn).on_hover_text(tooltip).on_disabled_hover_text(tooltip).clicked()
 }
 
 /// A labelled row of mutually exclusive pills. Returns the item the user
