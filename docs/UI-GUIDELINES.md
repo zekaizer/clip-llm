@@ -41,9 +41,9 @@ Every view fills the same four slots, top to bottom, provided by
 | Slot | Content | Height |
 |------|---------|--------|
 | **Header** | Mode tabs left; thinking pills, pin, close right. Rephrase adds its parameter rows underneath. A separator closes the header. | Natural |
-| **Status** | One line saying what is going on: spinner + phase + elapsed while capturing or processing; the Think toggle and completion summary (`✓ 2.4s · model`, doubles as the model switch) in Result; `✕ Request failed` in Error. | `theme::size::ROW` |
+| **Status** | One line saying what is going on: spinner + phase + elapsed while capturing or processing (`Revising…` for a revision round); the Think toggle, completion summary (`✓ 2.4s · model`, doubles as the model switch) and the revision label (`✎ 2 · "more formal"`, the whole chain on hover) in Result; `✕ Request failed` in Error. | `theme::size::ROW` |
 | **Body** | The one thing the state is about: picked text, streaming text, the answer, the error message. Text fills the remaining height and scrolls. | Remainder |
-| **Footer** | Left: the source badge. Right: actions, primary at the far right (`↩`/`📋`, then `↻`, then `🔍`; Capturing and Processing show Cancel). | `theme::size::ACTION_BTN` |
+| **Footer** | Left: the source badge. Right: actions, primary at the far right (`↩`/`📋`, then `↻`, then `🔍`, then `↶` Undo; Capturing and Processing show Cancel). Result fills the middle with the revise input. | `theme::size::ACTION_BTN` |
 
 Rules:
 - Every state fills every slot (an empty slot keeps its height), so a
@@ -95,9 +95,17 @@ buttons, `FRAME_RADIUS` 12 for the panel.
 
 ## 4. Interaction
 
-- **Escape** closes (a dropdown first, in Settings). **Enter** runs the
-  primary action in Result. **Cmd/Ctrl+C** copies the whole answer unless a
-  selection exists. **Cmd/Ctrl+S** saves in Settings.
+- **Escape** closes (a dropdown first, in Settings; the revise input first,
+  in Result; a revision in flight is cancelled and its reply kept). **Enter**
+  runs the primary action in Result. **Cmd/Ctrl+C** copies the whole answer
+  unless a selection exists. **Cmd/Ctrl+S** saves in Settings.
+- **Revision rounds** (Result): **Tab** or a click focuses the revise input;
+  there **Enter** submits a non-empty draft (an empty one does nothing) and
+  every other Result shortcut is off while typing. **Cmd/Ctrl+Z** / `↶`
+  undoes the last round. A failed revision returns to the reply it was
+  revising with a `WARNING` banner and its instruction back in the input.
+  Rounds live with the mode's cached result: they survive a tab round-trip
+  and reset on new content or a model switch.
 - **←/→** step through the available tabs, **Cmd/Ctrl+1…5** jump to a tab
   (Result and Error). **↑/↓**, **PageUp/PageDown/Space**, **Home/End** scroll
   the body text.
