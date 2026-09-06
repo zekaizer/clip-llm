@@ -126,6 +126,27 @@ fn wait_for_modifier_release(
     Ok(())
 }
 
+/// Run a capture body on its thread so a panic inside it becomes an error
+/// the UI receives, instead of a silently dead thread and an overlay stuck in
+/// Capturing. The panic is logged at error level with its message.
+pub fn guard_capture<F>(body: F) -> Result<ClipboardContent, ClipboardError>
+where
+    F: FnOnce() -> Result<ClipboardContent, ClipboardError>,
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(result) => result,
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+                .unwrap_or_else(|| "non-string panic payload".to_owned());
+            tracing::error!("capture thread panicked: {message}");
+            Err(ClipboardError::AccessFailed(format!("capture thread panicked: {message}")))
+        }
+    }
+}
+
 pub struct ClipboardManager {
     board: Clipboard,
     /// Live Ctrl+Shift hold state, consulted by `copy_and_read` to wait for an
@@ -427,6 +448,19 @@ mod tests {
         assert_eq!(content.images.len(), 1, "{:?}", content.images.iter().map(|i| (i.width, i.height)).collect::<Vec<_>>());
         assert_eq!((content.images[0].width, content.images[0].height), (600, 400));
         assert_eq!(content.images[0].origin, ImageOrigin::Markup);
+    }
+
+    #[test]
+    fn guard_capture_turns_a_panic_into_an_error() {
+        let ok = guard_capture(|| Ok(ClipboardContent::text_only("x".into())));
+        assert_eq!(ok.unwrap().text.as_deref(), Some("x"));
+        let err = guard_capture(|| -> Result<ClipboardContent, ClipboardError> { panic!("boom {}", 42) });
+        match err {
+            Err(ClipboardError::AccessFailed(msg)) => assert!(msg.contains("panicked") && msg.contains("boom 42"), "{msg}"),
+            other => panic!("expected AccessFailed, got {other:?}"),
+        }
+        let passthrough = guard_capture(|| Err(ClipboardError::EmptyCopy));
+        assert!(matches!(passthrough, Err(ClipboardError::EmptyCopy)));
     }
 
     #[test]

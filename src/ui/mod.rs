@@ -1653,12 +1653,12 @@ impl OverlayApp {
         std::thread::spawn(move || {
             // Build a clipboard handle on this thread (avoids sharing the main
             // thread's, and sidesteps Send concerns). NativePlatform is a ZST.
-            let result = match ClipboardManager::new() {
+            let result = crate::clipboard::guard_capture(|| match ClipboardManager::new() {
                 Ok(cm) => cm
                     .with_modifier_state(modifier_state)
                     .copy_and_read(&NativePlatform, &cancel, target),
                 Err(e) => Err(e),
-            };
+            });
             let _ = tx.send((seq, result));
             ctx.request_repaint();
         });
@@ -1677,10 +1677,10 @@ impl OverlayApp {
         let tx = self.capture_tx.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let result = match ClipboardManager::new() {
+            let result = crate::clipboard::guard_capture(|| match ClipboardManager::new() {
                 Ok(mut cm) => cm.read_content(),
                 Err(e) => Err(e),
-            };
+            });
             let _ = tx.send((seq, result));
             ctx.request_repaint();
         });
