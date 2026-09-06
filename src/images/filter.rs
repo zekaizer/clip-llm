@@ -83,7 +83,7 @@ pub fn prefilter(hint: &ImgHint) -> Result<(), Rejection> {
 /// `None` for `data:` URIs, whose payload is not a path.
 fn src_path(src: &str) -> Option<String> {
     let src = src.trim();
-    if src.len() >= 5 && src[..5].eq_ignore_ascii_case("data:") {
+    if src.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("data:")) {
         return None;
     }
     let after_scheme = match src.find("://") {
@@ -95,8 +95,7 @@ fn src_path(src: &str) -> Option<String> {
 }
 
 fn is_vector(src: &str) -> bool {
-    let trimmed = src.trim();
-    if trimmed.len() >= 14 && trimmed[..14].eq_ignore_ascii_case("data:image/svg") {
+    if src.trim().get(..14).is_some_and(|p| p.eq_ignore_ascii_case("data:image/svg")) {
         return true;
     }
     src_path(src).is_some_and(|p| p.ends_with(".svg"))
@@ -223,6 +222,15 @@ mod tests {
         assert_eq!(prefilter(&alt), Err(Rejection::Decorative("logo")));
         // Only the path is inspected, never the query string or host.
         assert_eq!(prefilter(&hint("https://icon.example/photos/beach.jpg?ref=logo")), Ok(()));
+    }
+
+    #[test]
+    fn prefilter_survives_multibyte_sources() {
+        // A byte-indexed scheme check would slice inside the second Hangul
+        // syllable here and panic.
+        assert_eq!(prefilter(&hint("한글경로/그림.png")), Ok(()));
+        assert_eq!(prefilter(&hint("한글경로/아이콘.svg")), Err(Rejection::Vector));
+        assert_eq!(prefilter(&hint("데이터:x")), Ok(()));
     }
 
     #[test]
