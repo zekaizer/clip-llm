@@ -1,12 +1,13 @@
 //! File-list clipboard ingestion: turns files copied in Finder/Explorer into
-//! [`ClipboardContent`] the pipeline already understands (text and PNG images).
+//! [`ClipboardContent`] the pipeline already understands (text and images).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tracing::{info, warn};
 
-use crate::images::encode::{check_pixel_budget, encode_rgba_for_upload, MAX_IMAGE_PIXELS};
+use crate::images::decode::decode_rgba;
+use crate::images::encode::encode_rgba_for_upload;
 use crate::{ClipboardContent, ClipboardError};
 
 /// Per-file cap for text files; larger files are refused rather than
@@ -14,12 +15,12 @@ use crate::{ClipboardContent, ClipboardError};
 pub const MAX_TEXT_FILE_BYTES: u64 = 1024 * 1024;
 /// Cap on the combined text of all files in one clipboard.
 pub const MAX_TOTAL_TEXT_BYTES: u64 = 2 * 1024 * 1024;
-/// Cap for a PNG file before decoding.
+/// Cap for an image file before decoding.
 pub const MAX_IMAGE_FILE_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Build clipboard content from a file list. Text files become the text
-/// (one file raw; several joined under `=== name ===` headers), PNG files
-/// become images; any unsupported file fails the whole ingest with
+/// (one file raw; several joined under `=== name ===` headers), image files
+/// (PNG, JPEG, GIF, WebP, BMP) become images; any unsupported file fails the whole ingest with
 /// [`ClipboardError::UnsupportedFiles`] so nothing is dropped silently.
 pub fn ingest_files(paths: &[PathBuf]) -> Result<ClipboardContent, ClipboardError> {
     if paths.is_empty() {
@@ -41,7 +42,7 @@ pub fn ingest_files(paths: &[PathBuf]) -> Result<ClipboardContent, ClipboardErro
             unsupported.push(name);
             continue;
         }
-        if is_png_name(path) {
+        if is_image_name(path) {
             if meta.len() > MAX_IMAGE_FILE_BYTES {
                 return Err(ClipboardError::FileTooLarge {
                     name,
@@ -49,13 +50,13 @@ pub fn ingest_files(paths: &[PathBuf]) -> Result<ClipboardContent, ClipboardErro
                 });
             }
             let bytes = read(path, &name)?;
-            match decode_png_rgba(&bytes)? {
+            match decode_rgba(&bytes)? {
                 Some((rgba, w, h)) => {
                     images.push(Arc::new(encode_rgba_for_upload(rgba, w, h)?));
                     names.push(name);
                 }
                 None => {
-                    warn!("file {name}: .png extension but not a decodable PNG");
+                    warn!("file {name}: image extension but not a decodable image");
                     unsupported.push(name);
                 }
             }
@@ -129,9 +130,14 @@ fn display_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-fn is_png_name(path: &Path) -> bool {
-    path.extension()
-        .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("png"))
+/// Extensions the decoder handles ([`decode_rgba`]).
+const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp"];
+
+fn is_image_name(path: &Path) -> bool {
+    path.extension().is_some_and(|e| {
+        let ext = e.to_string_lossy();
+        IMAGE_EXTENSIONS.iter().any(|known| ext.eq_ignore_ascii_case(known))
+    })
 }
 
 /// Text means valid UTF-8 with no NUL byte; anything else is treated as
@@ -142,52 +148,6 @@ fn as_text(bytes: &[u8]) -> Option<&str> {
     }
     std::str::from_utf8(bytes).ok()
 }
-
-/// Decode a PNG into 8-bit RGBA. `Ok(None)` for anything that is not a
-/// decodable PNG; `Err` only for an image over the pixel budget.
-fn decode_png_rgba(bytes: &[u8]) -> Result<Option<(Vec<u8>, u32, u32)>, ClipboardError> {
-    // The decoder may allocate at most one RGBA buffer at the pixel budget;
-    // the header check below is what actually refuses larger images.
-    let limits = png::Limits {
-        bytes: (MAX_IMAGE_PIXELS * 4) as usize,
-    };
-    let mut decoder = png::Decoder::new_with_limits(std::io::Cursor::new(bytes), limits);
-    // Expand palettes / low bit depths and strip 16-bit so every color type
-    // below arrives as 8-bit samples.
-    decoder.set_transformations(png::Transformations::normalize_to_color8());
-    let Ok(mut reader) = decoder.read_info() else {
-        return Ok(None);
-    };
-    check_pixel_budget(reader.info().width, reader.info().height)?;
-    let Some(size) = reader.output_buffer_size() else {
-        return Ok(None);
-    };
-    let mut buf = vec![0u8; size];
-    let Ok(info) = reader.next_frame(&mut buf) else {
-        return Ok(None);
-    };
-    let px = &buf[..info.buffer_size()];
-    let rgba = match info.color_type {
-        png::ColorType::Rgba => px.to_vec(),
-        png::ColorType::Rgb => px
-            .as_chunks::<3>()
-            .0
-            .iter()
-            .flat_map(|c| [c[0], c[1], c[2], 255])
-            .collect(),
-        png::ColorType::Grayscale => px.iter().flat_map(|&g| [g, g, g, 255]).collect(),
-        png::ColorType::GrayscaleAlpha => px
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .flat_map(|c| [c[0], c[0], c[0], c[1]])
-            .collect(),
-        // normalize_to_color8 expands palettes, so this cannot occur.
-        png::ColorType::Indexed => return Ok(None),
-    };
-    Ok(Some((rgba, info.width, info.height)))
-}
-
 
 /// Fixtures shared with other modules' tests.
 #[cfg(test)]
@@ -286,6 +246,22 @@ mod tests {
     }
 
     #[test]
+    fn jpeg_gif_and_bmp_files_become_images() {
+        use image::{ImageFormat, RgbImage};
+        let d = tmp_dir();
+        let mut paths = Vec::new();
+        for (name, format) in [("a.JPG", ImageFormat::Jpeg), ("b.gif", ImageFormat::Gif), ("c.bmp", ImageFormat::Bmp)] {
+            let mut out = std::io::Cursor::new(Vec::new());
+            RgbImage::from_pixel(4, 3, image::Rgb([10, 200, 30])).write_to(&mut out, format).unwrap();
+            paths.push(write(&d, name, &out.into_inner()));
+        }
+        let c = ingest_files(&paths).unwrap();
+        assert_eq!(c.images.len(), 3);
+        assert!(c.images.iter().all(|i| i.starts_with(&[0x89, b'P', b'N', b'G'])));
+        assert_eq!(c.files, vec!["a.JPG".to_string(), "b.gif".to_string(), "c.bmp".to_string()]);
+    }
+
+    #[test]
     fn png_file_becomes_image() {
         let d = tmp_dir();
         let p = write(&d, "shot.png", &tiny_png());
@@ -321,13 +297,13 @@ mod tests {
             drop(w);
             out
         }
-        let (rgba, w, h) = decode_png_rgba(&enc(png::ColorType::Rgb, &[10, 20, 30])).unwrap().unwrap();
+        let (rgba, w, h) = decode_rgba(&enc(png::ColorType::Rgb, &[10, 20, 30])).unwrap().unwrap();
         assert_eq!((w, h), (1, 1));
         assert_eq!(rgba, vec![10, 20, 30, 255]);
-        let (rgba, ..) = decode_png_rgba(&enc(png::ColorType::Grayscale, &[77])).unwrap().unwrap();
+        let (rgba, ..) = decode_rgba(&enc(png::ColorType::Grayscale, &[77])).unwrap().unwrap();
         assert_eq!(rgba, vec![77, 77, 77, 255]);
         let (rgba, ..) =
-            decode_png_rgba(&enc(png::ColorType::GrayscaleAlpha, &[77, 128])).unwrap().unwrap();
+            decode_rgba(&enc(png::ColorType::GrayscaleAlpha, &[77, 128])).unwrap().unwrap();
         assert_eq!(rgba, vec![77, 77, 77, 128]);
     }
 

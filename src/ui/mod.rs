@@ -2140,7 +2140,7 @@ fn friendly_clipboard_error(e: &crate::ClipboardError) -> String {
         WriteFailed(_) => "Could not write to clipboard.".to_string(),
         ImageEncodeFailed(_) => "Could not process the clipboard image.".to_string(),
         UnsupportedFiles(names) => format!(
-            "Unsupported file type: {}. Text and PNG files can be sent.",
+            "Unsupported file type: {}. Text and image files (PNG, JPEG, GIF, WebP, BMP) can be sent.",
             list_names(names)
         ),
         FileTooLarge { name, limit_bytes } => format!(
@@ -2834,14 +2834,14 @@ mod tests {
         let e = crate::ClipboardError::UnsupportedFiles(vec!["a.pdf".into(), "b.docx".into()]);
         assert_eq!(
             friendly_clipboard_error(&e),
-            "Unsupported file type: a.pdf, b.docx. Text and PNG files can be sent."
+            "Unsupported file type: a.pdf, b.docx. Text and image files (PNG, JPEG, GIF, WebP, BMP) can be sent."
         );
         let many = crate::ClipboardError::UnsupportedFiles(
             (1..=5).map(|i| format!("f{i}.bin")).collect(),
         );
         assert_eq!(
             friendly_clipboard_error(&many),
-            "Unsupported file type: f1.bin, f2.bin, f3.bin (+2 more). Text and PNG files can be sent."
+            "Unsupported file type: f1.bin, f2.bin, f3.bin (+2 more). Text and image files (PNG, JPEG, GIF, WebP, BMP) can be sent."
         );
     }
 
