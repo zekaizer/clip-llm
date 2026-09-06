@@ -32,8 +32,10 @@ height matching, egui Area resets). A fixed frame removes the whole class.
 Exception: the **Settings** panel is a form, not a live view — it keeps a
 fixed width (`theme::size::SETTINGS_WIDTH`) and sizes its height to the
 form. Long forms are split into sub-pages rather than scrolled. It is a
-dialog, so it opens in the middle of the display the cursor is on, never on
-the cursor itself (`[ui].position` does not apply to it).
+dialog: it reopens where it was last left (`[ui].settings_position`, written
+on close, clamped into the display's work area; a position on a display that
+is gone is ignored) and the first time in the middle of the display the
+cursor is on — never on the cursor itself (`[ui].position` does not apply).
 
 ## 2. Layout: header / status / body / footer
 
