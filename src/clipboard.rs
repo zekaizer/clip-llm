@@ -1,12 +1,12 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use arboard::Clipboard;
 use tracing::{debug, info, warn};
 
-use crate::images::encode::{check_pixel_budget, encode_rgba_for_upload};
+use crate::images::encode::{check_pixel_budget, encode_for_upload};
+use crate::images::{ImageAttachment, ImageOrigin};
 use crate::platform::{ModifierState, Platform};
 use crate::ClipboardError;
 
@@ -32,9 +32,9 @@ const FALLBACK_MODIFIER_SETTLE_MS: u64 = 200;
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClipboardContent {
     pub text: Option<String>,
-    /// PNG-encoded images. Vec for future multi-image support;
-    /// currently arboard provides at most one.
-    pub images: Vec<Arc<Vec<u8>>>,
+    /// Images ready for upload. The image flavor yields at most one; the
+    /// file list and markup paths can yield several.
+    pub images: Vec<ImageAttachment>,
     /// Display names of the files this content was read from (file-list
     /// clipboard), empty for plain text/image content. Shown in the overlay's
     /// source badge; never sent to the model.
@@ -76,13 +76,13 @@ impl ClipboardContent {
 /// Returns an empty vec if no image is present; propagates encoding errors.
 /// Oversized images (long edge > `MAX_IMAGE_LONG_EDGE`) are downscaled first to
 /// keep the base64-encoded payload small (latency + provider 413 risk).
-fn read_image_from_board(board: &mut Clipboard) -> Result<Vec<Arc<Vec<u8>>>, ClipboardError> {
+fn read_image_from_board(board: &mut Clipboard) -> Result<Vec<ImageAttachment>, ClipboardError> {
     match board.get_image() {
         Ok(img) => {
             let (width, height) = (img.width as u32, img.height as u32);
             check_pixel_budget(width, height)?;
-            let png = encode_rgba_for_upload(img.bytes.into_owned(), width, height)?;
-            Ok(vec![Arc::new(png)])
+            let att = encode_for_upload(img.bytes.into_owned(), width, height, ImageOrigin::Clipboard)?;
+            Ok(vec![att])
         }
         Err(_) => Ok(vec![]),
     }
@@ -538,7 +538,7 @@ mod tests {
     fn clipboard_content_image_only() {
         let content = ClipboardContent {
             text: None,
-            images: vec![Arc::new(vec![0x89, 0x50, 0x4E, 0x47])],
+            images: vec![ImageAttachment::stub(vec![0x89, 0x50, 0x4E, 0x47])],
             files: vec![],
         };
         assert!(!content.is_empty());

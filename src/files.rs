@@ -2,12 +2,12 @@
 //! [`ClipboardContent`] the pipeline already understands (text and images).
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use tracing::{info, warn};
 
 use crate::images::decode::decode_rgba;
-use crate::images::encode::encode_rgba_for_upload;
+use crate::images::encode::encode_for_upload;
+use crate::images::{ImageAttachment, ImageOrigin};
 use crate::{ClipboardContent, ClipboardError};
 
 /// Per-file cap for text files; larger files are refused rather than
@@ -27,7 +27,7 @@ pub fn ingest_files(paths: &[PathBuf]) -> Result<ClipboardContent, ClipboardErro
         return Err(ClipboardError::NoTextInClipboard);
     }
     let mut texts: Vec<(String, String)> = Vec::new();
-    let mut images: Vec<Arc<Vec<u8>>> = Vec::new();
+    let mut images: Vec<ImageAttachment> = Vec::new();
     let mut names: Vec<String> = Vec::new();
     let mut unsupported: Vec<String> = Vec::new();
     let mut total_text: u64 = 0;
@@ -52,7 +52,7 @@ pub fn ingest_files(paths: &[PathBuf]) -> Result<ClipboardContent, ClipboardErro
             let bytes = read(path, &name)?;
             match decode_rgba(&bytes)? {
                 Some((rgba, w, h)) => {
-                    images.push(Arc::new(encode_rgba_for_upload(rgba, w, h)?));
+                    images.push(encode_for_upload(rgba, w, h, ImageOrigin::File)?);
                     names.push(name);
                 }
                 None => {
@@ -257,7 +257,7 @@ mod tests {
         }
         let c = ingest_files(&paths).unwrap();
         assert_eq!(c.images.len(), 3);
-        assert!(c.images.iter().all(|i| i.starts_with(&[0x89, b'P', b'N', b'G'])));
+        assert!(c.images.iter().all(|i| i.bytes.starts_with(&[0x89, b'P', b'N', b'G'])));
         assert_eq!(c.files, vec!["a.JPG".to_string(), "b.gif".to_string(), "c.bmp".to_string()]);
     }
 
@@ -270,7 +270,8 @@ mod tests {
         assert_eq!(c.images.len(), 1);
         assert!(c.is_image_only());
         // Re-encoded through the same PNG path the clipboard image uses.
-        assert!(c.images[0].starts_with(&[0x89, b'P', b'N', b'G']));
+        assert!(c.images[0].bytes.starts_with(&[0x89, b'P', b'N', b'G']));
+        assert_eq!(c.images[0].origin, ImageOrigin::File);
         assert_eq!(c.files, vec!["shot.png".to_string()]);
     }
 

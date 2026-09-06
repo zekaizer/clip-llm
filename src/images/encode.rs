@@ -2,8 +2,11 @@
 //! then PNG-encode. One place, so the clipboard image, PNG files, and
 //! markup-embedded images obey the same payload bound.
 
+use std::sync::Arc;
+
 use tracing::{debug, info};
 
+use super::{ImageAttachment, ImageMime, ImageOrigin};
 use crate::ClipboardError;
 
 /// Long edge (px) above which a clipboard image is downscaled before PNG
@@ -86,14 +89,16 @@ fn margin_color(rgba: &[u8], w: usize, h: usize) -> Option<[u8; 4]> {
         .map(|(c, _)| *c)
 }
 
-/// Downscale (long edge > `MAX_IMAGE_LONG_EDGE`) and PNG-encode raw RGBA pixels
-/// for the vision API. Shared by the clipboard image and PNG-file paths so both
-/// obey the same payload bound.
-pub fn encode_rgba_for_upload(
+/// Trim, downscale (long edge > `MAX_IMAGE_LONG_EDGE`) and encode raw RGBA
+/// pixels for the vision API. Shared by every input path so all obey the same
+/// payload bound; the attachment records the source size alongside the sent one.
+pub fn encode_for_upload(
     rgba: Vec<u8>,
     width: u32,
     height: u32,
-) -> Result<Vec<u8>, ClipboardError> {
+    origin: ImageOrigin,
+) -> Result<ImageAttachment, ClipboardError> {
+    let (source_width, source_height) = (width, height);
     // Only an image that would be downscaled gains from a trim: the margin
     // it sheds is resolution the content keeps.
     let (rgba, width, height) = if width.max(height) > MAX_IMAGE_LONG_EDGE {
@@ -116,7 +121,15 @@ pub fn encode_rgba_for_upload(
     };
     let png = rgba_to_png(&bytes, w, h)?;
     info!("encoded image ({}x{}, {} bytes PNG)", w, h, png.len());
-    Ok(png)
+    Ok(ImageAttachment {
+        bytes: Arc::new(png),
+        mime: ImageMime::Png,
+        width: w,
+        height: h,
+        source_width,
+        source_height,
+        origin,
+    })
 }
 
 /// Downscale an RGBA image so its long edge is at most `MAX_IMAGE_LONG_EDGE`,
@@ -281,16 +294,29 @@ mod tests {
         // 4000x3000 mostly white, 1000x800 of content: after the trim the long
         // edge is under the cap, so the content is sent at full resolution.
         let img = with_box(4000, 3000, [255, 255, 255, 255], (1500, 1100, 1000, 800), [0, 0, 0, 255]);
-        let png = encode_rgba_for_upload(img, 4000, 3000).unwrap();
-        assert_eq!(png_dims(&png), (1000 + 2 * TRIM_PADDING, 800 + 2 * TRIM_PADDING));
+        let att = encode_for_upload(img, 4000, 3000, ImageOrigin::Clipboard).unwrap();
+        assert_eq!(png_dims(&att.bytes), (1000 + 2 * TRIM_PADDING, 800 + 2 * TRIM_PADDING));
+    }
+
+    #[test]
+    fn upload_records_source_and_sent_size() {
+        let img = with_box(4000, 3000, [255, 255, 255, 255], (1500, 1100, 1000, 800), [0, 0, 0, 255]);
+        let att = encode_for_upload(img, 4000, 3000, ImageOrigin::File).unwrap();
+        assert_eq!((att.source_width, att.source_height), (4000, 3000));
+        assert_eq!((att.width, att.height), (1000 + 2 * TRIM_PADDING, 800 + 2 * TRIM_PADDING));
+        assert_eq!(png_dims(&att.bytes), (att.width, att.height));
+        assert!(att.is_resized());
+        assert_eq!(att.origin, ImageOrigin::File);
+        assert_eq!(att.mime, ImageMime::Png);
     }
 
     #[test]
     fn upload_leaves_small_images_untouched() {
         // Under the cap: no trim, no downscale, even with a wide margin.
         let img = with_box(400, 300, [255, 255, 255, 255], (100, 50, 100, 100), [0, 0, 0, 255]);
-        let png = encode_rgba_for_upload(img, 400, 300).unwrap();
-        assert_eq!(png_dims(&png), (400, 300));
+        let att = encode_for_upload(img, 400, 300, ImageOrigin::Clipboard).unwrap();
+        assert_eq!(png_dims(&att.bytes), (400, 300));
+        assert!(!att.is_resized());
     }
 
     #[test]

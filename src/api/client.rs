@@ -818,13 +818,6 @@ fn classify_vision_status(status: u16) -> Option<bool> {
     }
 }
 
-/// Inline `data:` URI for a PNG payload, the image form both request schemas take.
-fn png_data_uri(png: &[u8]) -> String {
-    use base64::Engine;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(png);
-    format!("data:image/png;base64,{b64}")
-}
-
 /// Output cap for the Responses-flavor vision probe. The Responses schema
 /// rejects `max_output_tokens` below 16 with HTTP 400, which the probe would
 /// misread as "no vision" — so the cap is the schema minimum, not 1.
@@ -1515,10 +1508,10 @@ impl LlmClient {
                 text: text.to_owned(),
             });
         }
-        for png_bytes in &content.images {
+        for image in &content.images {
             parts.push(ContentPart::ImageUrl {
                 image_url: ImageUrl {
-                    url: png_data_uri(png_bytes),
+                    url: image.data_uri(),
                 },
             });
         }
@@ -1539,9 +1532,9 @@ impl LlmClient {
         if !text.is_empty() {
             parts.push(ResponsesContentPart::Text { text });
         }
-        for png_bytes in &content.images {
+        for image in &content.images {
             parts.push(ResponsesContentPart::InputImage {
-                image_url: png_data_uri(png_bytes),
+                image_url: image.data_uri(),
             });
         }
         parts
@@ -1955,6 +1948,7 @@ impl LlmClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::images::ImageAttachment;
 
     // --- for_spec: per-profile client construction ---
 
@@ -2964,7 +2958,7 @@ mod tests {
     fn build_user_content_with_image_summarize() {
         let content = ClipboardContent {
             text: Some("caption".into()),
-            images: vec![Arc::new(vec![0x89, 0x50])],
+            images: vec![ImageAttachment::stub(vec![0x89, 0x50])],
             files: vec![],
         };
         let mc = LlmClient::build_user_content(&content, true);
@@ -2982,7 +2976,7 @@ mod tests {
     fn build_user_content_no_images_returns_text() {
         let content = ClipboardContent {
             text: Some("hello".into()),
-            images: vec![Arc::new(vec![0x89])],
+            images: vec![ImageAttachment::stub(vec![0x89])],
             files: vec![],
         };
         // use_images=false: caller decided not to include images.
@@ -2994,7 +2988,7 @@ mod tests {
     fn build_user_content_image_only_no_text_part() {
         let content = ClipboardContent {
             text: None,
-            images: vec![Arc::new(vec![0x89, 0x50])],
+            images: vec![ImageAttachment::stub(vec![0x89, 0x50])],
             files: vec![],
         };
         let mc = LlmClient::build_user_content(&content, true);
@@ -3012,7 +3006,7 @@ mod tests {
     fn build_user_content_empty_text_with_image() {
         let content = ClipboardContent {
             text: Some("".into()),
-            images: vec![Arc::new(vec![0x89, 0x50])],
+            images: vec![ImageAttachment::stub(vec![0x89, 0x50])],
             files: vec![],
         };
         let mc = LlmClient::build_user_content(&content, true);
@@ -3080,8 +3074,8 @@ mod tests {
 
     // --- Responses-flavor image input ---
 
-    fn png_stub() -> Arc<Vec<u8>> {
-        Arc::new(vec![0x89, 0x50, 0x4E, 0x47])
+    fn png_stub() -> ImageAttachment {
+        ImageAttachment::stub(vec![0x89, 0x50, 0x4E, 0x47])
     }
 
     #[test]
