@@ -85,13 +85,20 @@ confirmations.
 **Surfaces**: `surface` the frame (also the color body text fades into) ·
 `surface_opaque` the settings panel frame (no translucency) ·
 `surface_raised` a selected neutral control · `surface_hover` hovered docked
-button · `surface_subtle` idle pill or docked button · `rule` form separators
-· `shadow` the frame's drop shadow.
+button · `surface_subtle` idle pill or docked button · `popup` tooltips and dropdown
+menus (opaque, a step above `surface_opaque`) · `rule` form separators and
+the popup outline · `shadow` the frame's and the popups' drop shadow.
 
 **Spacing and shape** (`theme::space`, `theme::size`): gaps `XS` 2 / `SM` 4 /
 `MD` 8 / `LG` 10; `ROW` 24 for status rows and pills; `ACTION_BTN` 26;
-corner radius `RADIUS_SM` 4 for icon buttons, `RADIUS` 6 for pills and text
-buttons, `FRAME_RADIUS` 12 for the panel.
+corner radius `RADIUS_SM` 4 for icon buttons, `RADIUS` 6 for pills, text
+buttons and popups, `FRAME_RADIUS` 12 for the panel; `TOOLTIP_WIDTH` 320
+caps a tooltip or dropdown (longer text wraps), `POPUP_MARGIN` 8×6 inside it.
+
+**egui's own style** — the popup frame (fill, outline, shadow, margin,
+width, text tone) and the light-widget contrast fixes — is set once from
+these tokens by `theme::configure` at startup. A tooltip or dropdown never
+styles itself at the call site.
 
 ## 4. Interaction
 
@@ -112,7 +119,9 @@ buttons, `FRAME_RADIUS` 12 for the panel.
 - Dragging anywhere on the panel moves it; dragging the grip resizes it.
 - A state with an in-flight operation always offers **Cancel**; Error always
   offers **Retry** when content exists. Actions are icon buttons with a
-  tooltip; the tooltip names the shortcut where one exists.
+  tooltip; the tooltip names the shortcut where one exists. A tooltip is one
+  short sentence: it wraps at `TOOLTIP_WIDTH`, so a paragraph belongs in the
+  docs, not on hover.
 - Focus loss hides the panel unless pinned (`📌`) or still processing.
   Error stays until dismissed the same way Result does.
 - Disabled controls stay visible in `text_disabled` with a tooltip that says
