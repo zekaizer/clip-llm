@@ -75,13 +75,14 @@ const DEFAULT_REVISION_PROMPT: &str =
      to this request (keep the task's output language and format) and output only the \
      complete revised reply: {request}";
 
+// `{direction}` is replaced per request with one of the three sentences below
+// (ADR-0002): the direction is decided in code from the input's prose, and the
+// model-side rule remains only for inputs without text (images) or a
+// non-Korean primary language.
 const DEFAULT_TRANSLATE_PROMPT: &str =
     "You are a translator for software engineering text. The only two target languages \
      are {primary_lang} and {secondary_lang}. \
-     Determine the input language, then choose the target by this rule, with NO exceptions: \
-     if the input is mostly {primary_lang}, the target is {secondary_lang}; \
-     in EVERY other case — {secondary_lang}, any other language, or mixed — the target is {primary_lang}. \
-     Translate the entire input into the target language. \
+     {direction} \
      Rules: \
      - If the input contains code: preserve all whitespace, indentation, and structure exactly. \
      Never dedent or normalize. Do not translate code, variable names, or identifiers \
@@ -89,6 +90,59 @@ const DEFAULT_TRANSLATE_PROMPT: &str =
      - If the input is plain text: translate naturally while keeping the general structure. \
      - Output ONLY the translated text — no preamble, original text, detected language, \
      labels, quotes, notes, reasoning, or markdown.";
+
+// The prose is {primary_lang}: translate it into {secondary_lang}.
+const DEFAULT_DIRECTION_TO_SECONDARY: &str =
+    "The input's prose (sentences, comments, string literals) is written in {primary_lang}. \
+     Translate it into {secondary_lang}; code stays as it is.";
+// The prose is anything else: translate it into {primary_lang}.
+const DEFAULT_DIRECTION_TO_PRIMARY: &str =
+    "The input's prose is not {primary_lang}. Translate the entire input into {primary_lang}; \
+     code stays as it is.";
+// Fallback: the model decides (the pre-ADR-0002 rule).
+const DEFAULT_DIRECTION_RULE: &str =
+    "Determine the input language, then choose the target by this rule, with NO exceptions: \
+     if the input is mostly {primary_lang}, the target is {secondary_lang}; \
+     in EVERY other case — {secondary_lang}, any other language, or mixed — the target is {primary_lang}. \
+     Translate the entire input into the target language.";
+
+// Dictionary entry for a word or short term (`[translate].dictionary`), used
+// instead of the translate prompt when `lang::is_lookup` says so. Markdown: the
+// entry is pasted into notes. `{direction}` takes one of the two sentences below.
+const DEFAULT_DICTIONARY_PROMPT: &str =
+    "You are a bilingual dictionary of software-engineering vocabulary for {primary_lang} and \
+     {secondary_lang}. The user message is a single word or short term: the headword. \
+     {direction} \
+     Write exactly one entry in Markdown, in this shape and nothing else (the capitalized \
+     words are slots to fill; keep every other character as shown):\n\
+     # HEADWORD\n\
+     **EQUIVALENT** \u{b7} `TRANSLITERATION` \u{b7} *PART-OF-SPEECH*\n\
+     1. SENSE, with a short gloss\n\
+     2. FURTHER SENSE, if any\n\
+     > EXAMPLE SENTENCE using the headword \u{2014} ITS TRANSLATION\n\
+     Line 2 names exactly one equivalent, in bold, then the transliteration inside backticks, \
+     then the part of speech in italics; further equivalents go inside a sense as \
+     term `transliteration`. Prefer the software-engineering senses. At most three senses and \
+     one example. No preamble, no notes, no text outside the entry.";
+// Korean headword: English equivalents, each with its pronunciation in Hangul.
+// The slot-by-slot wording with examples is what small models need; gemma-4-e2b
+// otherwise romanizes or writes IPA and answers in the wrong language.
+const DEFAULT_LOOKUP_TO_SECONDARY: &str =
+    "The headword is {primary_lang}. EQUIVALENT is its {secondary_lang} term. The backticked \
+     TRANSLITERATION is a pronunciation hint, NOT a {primary_lang} word: the sound of that \
+     {secondary_lang} term written in {primary_lang} syllables, e.g. deployment → `디플로이먼트`, \
+     race condition → `레이스 컨디션`; it contains only {primary_lang} letters, never IPA or \
+     romanization, and it is not EQUIVALENT repeated unless EQUIVALENT is itself that loanword. Every \
+     sense and the example's translation are written in {primary_lang}.";
+// English (or other) headword: Korean equivalents, the headword's pronunciation in Hangul.
+const DEFAULT_LOOKUP_TO_PRIMARY: &str =
+    "The headword is {secondary_lang} or another language. EQUIVALENT is its {primary_lang} term. \
+     The backticked TRANSLITERATION is a pronunciation hint, NOT a {primary_lang} word: the sound of \
+     the headword itself written in {primary_lang} syllables, e.g. throughput → `스루풋`, \
+     attached → `어태치드`, cache → `캐시`; it contains only {primary_lang} letters, never IPA or \
+     romanization, and it is not EQUIVALENT repeated unless EQUIVALENT is itself that loanword \
+     (cache → **캐시** · `캐시`). Every sense and the example's translation are written in \
+     {primary_lang}.";
 
 const DEFAULT_REPHRASE_BASE: &str =
     "You are a proofreader/rewriter for software engineering text. \
@@ -323,6 +377,17 @@ pub struct Config {
     prompt: PromptConfig,
 }
 
+/// Which way a Translate request goes; see [`Config::translation_direction`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranslationDirection {
+    /// The prose is the primary language: translate into the secondary.
+    ToSecondary,
+    /// Anything else: translate into the primary language.
+    ToPrimary,
+    /// No text to decide from: the prompt keeps the model-side rule.
+    Undecided,
+}
+
 /// `[prompt]` — cross-cutting prompt settings shared by all modes.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
@@ -534,6 +599,9 @@ impl Default for LanguagesConfig {
 #[serde(default)]
 struct TranslateConfig {
     prompt: Option<String>,
+    /// Prompt for a dictionary lookup (a word or short term); `{direction}`
+    /// is filled like in `prompt`.
+    dictionary: Option<String>,
     /// Default thinking mode for this mode: `"think"` or `"no_think"`.
     thinking: Option<String>,
 }
@@ -915,6 +983,71 @@ impl Config {
         self.translate.prompt.as_deref().unwrap_or(DEFAULT_TRANSLATE_PROMPT)
     }
 
+    /// The Translate prompt with `{direction}` resolved for `direction` and the
+    /// languages substituted.
+    pub fn translate_prompt_for(&self, direction: TranslationDirection) -> String {
+        let primary = self.primary_lang();
+        let secondary = self.secondary_lang();
+        let sentence = substitute(
+            match direction {
+                TranslationDirection::ToSecondary => DEFAULT_DIRECTION_TO_SECONDARY,
+                TranslationDirection::ToPrimary => DEFAULT_DIRECTION_TO_PRIMARY,
+                TranslationDirection::Undecided => DEFAULT_DIRECTION_RULE,
+            },
+            primary,
+            secondary,
+        );
+        substitute_tokens(
+            self.translate_prompt(),
+            &[("{primary_lang}", primary), ("{secondary_lang}", secondary), ("{direction}", &sentence)],
+        )
+    }
+
+    /// The Translate prompt for a dictionary lookup (`[translate].dictionary`)
+    /// with `{direction}` resolved for the headword's language.
+    pub fn dictionary_prompt_for(&self, direction: TranslationDirection) -> String {
+        let primary = self.primary_lang();
+        let secondary = self.secondary_lang();
+        let sentence = substitute(
+            match direction {
+                TranslationDirection::ToSecondary => DEFAULT_LOOKUP_TO_SECONDARY,
+                TranslationDirection::ToPrimary | TranslationDirection::Undecided => DEFAULT_LOOKUP_TO_PRIMARY,
+            },
+            primary,
+            secondary,
+        );
+        substitute_tokens(
+            self.translate.dictionary.as_deref().unwrap_or(DEFAULT_DICTIONARY_PROMPT),
+            &[("{primary_lang}", primary), ("{secondary_lang}", secondary), ("{direction}", &sentence)],
+        )
+    }
+
+    /// `text` is a dictionary lookup rather than text to translate: a single
+    /// word (`lang::is_lookup`), with a decided direction.
+    pub fn is_lookup(&self, text: Option<&str>) -> bool {
+        self.translation_direction(text) != TranslationDirection::Undecided
+            && text.is_some_and(crate::lang::is_lookup)
+    }
+
+    /// The direction decided for `text` (`lang::prose_is_korean`), or
+    /// `Undecided` without text or when the primary language is not Korean
+    /// (the detector knows Hangul only).
+    pub fn translation_direction(&self, text: Option<&str>) -> TranslationDirection {
+        if !self.primary_lang().eq_ignore_ascii_case("korean") {
+            return TranslationDirection::Undecided;
+        }
+        match text {
+            Some(t) if !t.trim().is_empty() => {
+                if crate::lang::prose_is_korean(t) {
+                    TranslationDirection::ToSecondary
+                } else {
+                    TranslationDirection::ToPrimary
+                }
+            }
+            _ => TranslationDirection::Undecided,
+        }
+    }
+
     /// Rephrase-mode base template carrying `{style}` / `{length}`.
     pub fn rephrase_base(&self) -> &str {
         self.rephrase.base.as_deref().unwrap_or(DEFAULT_REPHRASE_BASE)
@@ -1242,7 +1375,8 @@ pub fn candidate_path() -> Option<PathBuf> {
 fn starter_template() -> String {
     // A commented `# key = "value"` line, value TOML-escaped, optional trailing note.
     fn s(key: &str, value: &str, note: &str) -> String {
-        let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+        // TOML basic-string escapes; a raw newline would end the comment line.
+        let escaped = value.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
         if note.is_empty() {
             format!("# {key} = \"{escaped}\"\n")
         } else {
@@ -1355,6 +1489,8 @@ fn starter_template() -> String {
     // [translate]
     t.push_str("# [translate]\n");
     t.push_str(&s("thinking", "no_think", "default thinking mode: think | no_think"));
+    // {direction} is filled per request from the detected input language (ADR-0002).
+    t.push_str(&s("dictionary", DEFAULT_DICTIONARY_PROMPT, "entry for a single word / short term; {direction} as in prompt"));
     t.push_str(&s("prompt", DEFAULT_TRANSLATE_PROMPT, ""));
     t.push('\n');
 
@@ -1563,7 +1699,7 @@ mod tests {
         let primary = config.primary_lang();
         let secondary = config.secondary_lang();
         let mode_prompt = match mode {
-            ProcessMode::Translate => substitute(config.translate_prompt(), primary, secondary),
+            ProcessMode::Translate => config.translate_prompt_for(TranslationDirection::Undecided),
             ProcessMode::Rephrase => config.rephrase_prompt(params.style, params.length),
             ProcessMode::Summarize => substitute(config.summarize_prompt(), primary, secondary),
             ProcessMode::Explain => substitute(config.explain_prompt(), primary, secondary),
@@ -1893,6 +2029,47 @@ X-Test = "1"
         // Without a placeholder the instruction follows the template on its own line.
         let config: Config = toml::from_str("[prompt]\nrevision = \"REV\"").unwrap();
         assert_eq!(config.revision_request("x"), "REV\nx");
+    }
+
+    /// The direction is decided in code (ADR-0002): the prompt states it
+    /// instead of asking the model, and falls back to the rule without text.
+    #[test]
+    fn translate_prompt_states_the_decided_direction() {
+        let params = RephraseParams::default();
+        let ko = ProcessMode::Translate.system_prompt_for(params, Some("배포 완료했습니다."));
+        assert!(ko.contains("written in Korean") && ko.contains("into English"), "{ko}");
+        assert!(!ko.contains("Determine the input language"), "{ko}");
+        let en = ProcessMode::Translate.system_prompt_for(params, Some("Deploy it."));
+        assert!(en.contains("into Korean") && !en.contains("into English"), "{en}");
+        let none = ProcessMode::Translate.system_prompt_for(params, None);
+        assert!(none.contains("Determine the input language"), "{none}");
+        assert_eq!(none, ProcessMode::Translate.system_prompt(params));
+        // Other modes are untouched by the text.
+        assert_eq!(
+            ProcessMode::Summarize.system_prompt_for(params, Some("배포")),
+            ProcessMode::Summarize.system_prompt(params)
+        );
+    }
+
+    /// A word or short term gets a dictionary entry (Markdown) instead of a
+    /// translation; the direction still comes from the detector.
+    #[test]
+    fn lookup_uses_the_dictionary_prompt() {
+        let params = RephraseParams::default();
+        let en = ProcessMode::Translate.system_prompt_for(params, Some("throughput"));
+        assert!(en.contains("dictionary") && en.contains("# HEADWORD"), "{en}");
+        assert!(en.contains("The headword is English or another language"), "{en}");
+        let ko = ProcessMode::Translate.system_prompt_for(params, Some("멱등성"));
+        assert!(ko.contains("The headword is Korean"), "{ko}");
+        let phrase = ProcessMode::Translate.system_prompt_for(params, Some("기술 부채"));
+        assert!(!phrase.contains("dictionary"), "two words are translated: {phrase}");
+        let sentence = ProcessMode::Translate.system_prompt_for(params, Some("Deploy it."));
+        assert!(!sentence.contains("dictionary"), "{sentence}");
+        let config: Config = toml::from_str("[translate]\ndictionary = \"DICT {direction} END\"").unwrap();
+        assert_eq!(
+            config.dictionary_prompt_for(TranslationDirection::ToPrimary),
+            format!("DICT {} END", substitute(DEFAULT_LOOKUP_TO_PRIMARY, "Korean", "English"))
+        );
     }
 
     #[test]

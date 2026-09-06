@@ -41,7 +41,7 @@ Every view fills the same four slots, top to bottom, provided by
 | Slot | Content | Height |
 |------|---------|--------|
 | **Header** | Mode tabs left; thinking pills, pin, close right. Rephrase adds its parameter rows underneath. A separator closes the header. | Natural |
-| **Status** | One line saying what is going on: spinner + phase + elapsed while capturing or processing (`Revising…` for a revision round); the Think toggle, completion summary (`✓ 2.4s · model`, doubles as the model switch) and the revision label (`✎ 2 · "more formal"`, the whole chain on hover) in Result; `✕ Request failed` in Error. | `theme::size::ROW` |
+| **Status** | One line saying what is going on: spinner + phase + elapsed while capturing or processing (`Revising…` for a revision round, `Looking up…` for a dictionary lookup); the Think toggle, completion summary (`✓ 2.4s · model`, doubles as the model switch) and the revision label (`✎ 2 · "more formal"`, the whole chain on hover) in Result; `✕ Request failed` in Error. | `theme::size::ROW` |
 | **Body** | The one thing the state is about: picked text, streaming text, the answer, the error message. Text fills the remaining height and scrolls. | Remainder |
 | **Footer** | Left: the source badge. Right: actions, primary at the far right (`↩`/`📋`, then `↻`, then `🔍`, then `↶` Undo; Capturing and Processing show Cancel). Result fills the middle with the revise input. | `theme::size::ACTION_BTN` |
 

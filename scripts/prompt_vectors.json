@@ -1304,5 +1304,102 @@
         "죄송"
       ]
     }
+  },
+  {
+    "id": "D-001",
+    "mode": "translate",
+    "input": "throughput",
+    "rationale": "English headword: a Markdown entry in Korean whose line 2 carries the headword's Hangul transliteration (not the equivalent repeated, not IPA).",
+    "checks": {
+      "output_lang": "ko",
+      "require_markdown_heading_prefixes": [
+        "# "
+      ],
+      "must_preserve": [
+        "throughput"
+      ],
+      "must_not_contain": [
+        "죄송",
+        "I cannot"
+      ],
+      "max_chars": 900,
+      "dictionary_entry": true
+    }
+  },
+  {
+    "id": "D-002",
+    "mode": "translate",
+    "input": "배포",
+    "rationale": "Korean headword: English equivalents with Hangul pronunciation, senses in Korean.",
+    "checks": {
+      "output_lang": "any",
+      "require_markdown_heading_prefixes": [
+        "# "
+      ],
+      "must_preserve": [
+        "배포"
+      ],
+      "must_not_contain": [
+        "죄송",
+        "I cannot"
+      ],
+      "max_chars": 900,
+      "dictionary_entry": true
+    }
+  },
+  {
+    "id": "D-003",
+    "mode": "translate",
+    "input": "pull request",
+    "rationale": "A two-word term is translated, not looked up.",
+    "checks": {
+      "output_lang": "ko",
+      "must_not_contain": [
+        "# ",
+        "죄송"
+      ],
+      "max_chars": 60
+    }
+  },
+  {
+    "id": "D-004",
+    "mode": "translate",
+    "input": "레이스 컨디션",
+    "rationale": "A two-word Korean term is translated to English, not looked up.",
+    "checks": {
+      "output_lang": "en",
+      "must_not_contain": [
+        "# ",
+        "죄송"
+      ],
+      "max_chars": 60
+    }
+  },
+  {
+    "id": "D-005",
+    "mode": "translate",
+    "input": "Deploy it.",
+    "rationale": "A short sentence is translated, not looked up: no entry heading.",
+    "checks": {
+      "output_lang": "ko",
+      "must_not_contain": [
+        "# ",
+        "죄송"
+      ],
+      "max_chars": 80
+    }
+  },
+  {
+    "id": "D-006",
+    "mode": "translate",
+    "input": "배포 완료했습니다.",
+    "rationale": "A short Korean sentence is translated to English, not looked up.",
+    "checks": {
+      "output_lang": "en",
+      "must_not_contain": [
+        "# "
+      ],
+      "max_chars": 80
+    }
   }
 ]

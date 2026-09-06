@@ -1999,6 +1999,8 @@ impl eframe::App for OverlayApp {
                 self.revise_draft = instruction;
             }
             let model_switchable = self.model_count() > 1;
+            let lookup = self.sm.mode() == crate::ProcessMode::Translate
+                && crate::config::get().is_lookup(self.sm.original_text());
             let mut draft = std::mem::take(&mut self.revise_draft);
             let instructions = self.sm.revision_instructions();
             let mut output = overlay::render(
@@ -2035,6 +2037,7 @@ impl eframe::App for OverlayApp {
                     error: self.sm.revision_error(),
                     draft: &mut draft,
                 },
+                lookup,
                 self.panel_size,
                 ctx,
             );

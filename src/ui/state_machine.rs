@@ -428,7 +428,7 @@ impl StateMachine {
         }
     }
 
-    #[cfg(test)]
+    /// Text of the current content, if any.
     pub fn original_text(&self) -> Option<&str> {
         self.original_content.as_ref().and_then(|c| c.text.as_deref())
     }

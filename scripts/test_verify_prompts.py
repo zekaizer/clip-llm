@@ -202,6 +202,81 @@ class RevisionRounds(unittest.TestCase):
         self.assertEqual(body["input"][2]["content"][0]["type"], "input_text")
 
 
+class LangDirectionVectors(unittest.TestCase):
+    """scripts/lang_direction_vectors.json is shared with the Rust unit tests of
+    src/lang.rs; the Python mirror must agree with it case for case."""
+
+    def test_python_mirror_agrees_with_the_fixture(self):
+        cases = json.loads((vp.HERE / "lang_direction_vectors.json").read_text(encoding="utf-8"))
+        wrong = []
+        for c in cases:
+            if c["expect"] != "either":
+                got = "ko" if vp.prose_is_korean(c["text"]) else "en"
+                if got != c["expect"]:
+                    wrong.append(f"{c['id']}: direction expected {c['expect']} got {got}")
+            if vp.is_lookup(c["text"]) != c["lookup"]:
+                wrong.append(f"{c['id']}: lookup expected {c['lookup']}")
+        self.assertEqual(wrong, [])
+
+    def test_build_system_states_the_decided_direction(self):
+        defaults = vp.load_defaults()
+        ko = vp.build_system({"mode": "translate", "input": "배포 완료했습니다."}, {}, defaults)
+        self.assertIn("written in Korean", ko)
+        self.assertIn("into English", ko)
+        en = vp.build_system({"mode": "translate", "input": "Deploy it."}, {}, defaults)
+        self.assertIn("into Korean", en)
+        self.assertNotIn("Determine the input language", en)
+        rule = vp.build_system({"mode": "translate"}, {}, defaults)
+        self.assertIn("Determine the input language", rule)
+        other = vp.build_system({"mode": "translate", "input": "배포"}, {"languages": {"primary": "Japanese"}}, defaults)
+        self.assertIn("Determine the input language", other)
+
+    def test_build_system_uses_the_dictionary_prompt_for_lookups(self):
+        defaults = vp.load_defaults()
+        en = vp.build_system({"mode": "translate", "input": "throughput"}, {}, defaults)
+        self.assertIn("dictionary", en)
+        self.assertIn("The headword is English or another language", en)
+        ko = vp.build_system({"mode": "translate", "input": "멱등성"}, {}, defaults)
+        self.assertIn("The headword is Korean", ko)
+        phrase = vp.build_system({"mode": "translate", "input": "기술 부채"}, {}, defaults)
+        self.assertNotIn("dictionary", phrase)
+        sentence = vp.build_system({"mode": "translate", "input": "Deploy it."}, {}, defaults)
+        self.assertNotIn("dictionary", sentence)
+
+    def test_schema(self):
+        cases = json.loads((vp.HERE / "lang_direction_vectors.json").read_text(encoding="utf-8"))
+        ids = [c["id"] for c in cases]
+        self.assertEqual(len(ids), len(set(ids)), "duplicate ids")
+        for c in cases:
+            self.assertIn(c["expect"], ("ko", "en", "either"), c["id"])
+            self.assertIsInstance(c["lookup"], bool, c["id"])
+            self.assertIsInstance(c["text"], str, c["id"])
+            self.assertTrue(c["id"].startswith(c["category"] + "-"), c["id"])
+        self.assertGreaterEqual(len(cases), 100)
+
+
+class DictionaryEntryGrading(unittest.TestCase):
+    CASE = {"id": "D-x", "mode": "translate", "input": "throughput", "checks": {"dictionary_entry": True}}
+
+    def _fails(self, out):
+        return [n for n, ok, _ in vp.grade(self.CASE, out, "stop") if not ok]
+
+    def test_hangul_transliteration_that_differs_from_the_equivalent_passes(self):
+        self.assertEqual(self._fails("# throughput\n**처리량** · `스루풋` · *noun*\n1. 뜻"), [])
+        self.assertEqual(self._fails("# race condition\n**경쟁 상태** · `레이스 컨디션` · *n.*"), [])
+        # A loanword's equivalent is its own transliteration.
+        self.assertEqual(self._fails("# cache\n**캐시** · `캐시` · *n.*"), [])
+
+    def test_repeated_equivalent_ipa_jamo_and_old_order_fail(self):
+        self.assertIn("transliteration", self._fails("# Attached\n**첨부된** · `첨부된` · *형용사*\n1. x"))
+        self.assertIn("transliteration", self._fails("# throughput\n**처리량** · `처리량` · *noun*"))
+        self.assertIn("transliteration", self._fails("# throughput\n**처리량** · `ˈθruːpʊt` · *noun*"))
+        self.assertIn("transliteration", self._fails("# throughput\n**처리량** · `ㅊㅜㄹㅎㅕㄹ` · *noun*"))
+        self.assertIn("entry-line2", self._fails("# throughput\n**처리량** 스루풋 · *noun*"), "unbackticked")
+        self.assertIn("entry-line2", self._fails("# throughput\n`스루풋` · **처리량** · *noun*"), "hint first")
+        self.assertIn("entry-line2", self._fails("throughput: 처리량"))
+
+
 class Grading(unittest.TestCase):
     def test_max_h2_headings_cap(self):
         case = {"id": "S-001", "mode": "summarize", "input": "x",

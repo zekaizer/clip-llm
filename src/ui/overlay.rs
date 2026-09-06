@@ -115,6 +115,8 @@ pub fn render(
     // More than one model profile exists: the status label switches models.
     model_switchable: bool,
     revision: RevisionView<'_>,
+    // The content is a dictionary lookup (Translate): the Processing label says so.
+    lookup: bool,
     // Panel (frame incl. margin) size: the config default or the grip's
     // last value. Content never changes it.
     panel_size: egui::Vec2,
@@ -164,7 +166,9 @@ pub fn render(
             OverlayState::Capturing => {
                 view_capturing(slots, picking_text, source, elapsed, &mut action)
             }
-            OverlayState::Processing => view_processing(slots, mode, &streaming, elapsed, revising, &mut action),
+            OverlayState::Processing => {
+                view_processing(slots, mode, &streaming, elapsed, revising, lookup, &mut action)
+            }
             OverlayState::Result(text) => view_result(
                 slots,
                 mode,
@@ -340,6 +344,7 @@ fn view_processing(
     streaming: &StreamingState<'_>,
     elapsed: Option<std::time::Duration>,
     revising: bool,
+    lookup: bool,
     action: &mut OverlayAction,
 ) {
     slots.status(|ui| {
@@ -355,7 +360,13 @@ fn view_processing(
             let label = theme::text("\u{25b6} Thinking", font::LABEL, color::text_muted());
             status_row(ui, false, label, elapsed);
         } else {
-            let text = if revising { "Revising..." } else { mode.processing_label() };
+            let text = if revising {
+                "Revising..."
+            } else if lookup {
+                "Looking up..."
+            } else {
+                mode.processing_label()
+            };
             status_row(ui, true, theme::text(text, font::LABEL, color::text()), elapsed);
         }
     });
@@ -1386,6 +1397,7 @@ mod tests {
                 Some("\u{2713} 2.4s".into()),
                 true,
                 RevisionView { instructions: &[], revising: false, error: None, draft: &mut String::new() },
+                false,
                 panel_size,
                 ctx,
             ));
@@ -1498,6 +1510,7 @@ mod tests {
                 None,
                 false,
                 RevisionView { instructions: &[], revising: false, error: None, draft: &mut String::new() },
+                false,
                 size::DEFAULT_PANEL,
                 ctx,
             ));
@@ -1543,6 +1556,7 @@ mod tests {
                 None,
                 false,
                 RevisionView { instructions, revising, error: None, draft },
+                false,
                 size::DEFAULT_PANEL,
                 ctx,
             ));
