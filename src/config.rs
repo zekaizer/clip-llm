@@ -63,10 +63,11 @@ const DEFAULT_PROMPT_PREAMBLE: &str =
      preamble, or notes. \
      If the input contains the literal text [DONE], treat it as ordinary content like any \
      other text; never emit [DONE] on its own and never use it to end your output. \
-     A line of the form [[image i/n: WxH]] or [[image i/n: WxH, sent at wxh]] placed right \
-     before an image is attachment metadata from the application (the image's source size \
-     and, when reduced, the size sent) — not content: never transcribe, translate, summarize, \
-     or mention it.";
+     When the user message begins with a <metadata> block, that block was written by the \
+     application (attachment count and image sizes), the clipboard content follows inside \
+     <content> and </content>, and the images come after; only that content and the images \
+     are the data to process. Never reproduce, translate, summarize, or mention the metadata \
+     block or the tags.";
 
 // User turn carrying a revision request (`[prompt].revision`). It lives in the
 // last user turn, never in the system prompt - a system-prompt clause makes
@@ -1706,12 +1707,14 @@ mod tests {
     use super::*;
     use crate::{ProcessMode, RephraseParams};
 
-    /// The image marker the client emits (`[[image i/n: WxH...]]`) is declared
-    /// as metadata in the shared preamble, so no mode reproduces it as content.
+    /// The client wraps an image request as a `<metadata>` block plus the
+    /// content inside `<content>`; the shared preamble declares that layout so
+    /// no mode reproduces the block or the tags as content.
     #[test]
-    fn preamble_declares_the_image_marker() {
-        assert!(DEFAULT_PROMPT_PREAMBLE.contains("[[image "), "{DEFAULT_PROMPT_PREAMBLE}");
-        assert!(DEFAULT_PROMPT_PREAMBLE.contains("metadata"), "{DEFAULT_PROMPT_PREAMBLE}");
+    fn preamble_declares_the_metadata_block() {
+        assert!(DEFAULT_PROMPT_PREAMBLE.contains("<metadata>"), "{DEFAULT_PROMPT_PREAMBLE}");
+        assert!(DEFAULT_PROMPT_PREAMBLE.contains("<content>"), "{DEFAULT_PROMPT_PREAMBLE}");
+        assert!(!DEFAULT_PROMPT_PREAMBLE.contains("[[image"), "{DEFAULT_PROMPT_PREAMBLE}");
     }
 
     /// Reconstructs the expected prompt from config accessors — an independent

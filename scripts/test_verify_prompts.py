@@ -137,19 +137,20 @@ class RequestShape(unittest.TestCase):
         self.assertNotIn("reasoning_effort", body)
 
     def test_image_vectors_attach_marker_and_image_in_both_flavors(self):
-        image = {"data_uri": "data:image/png;base64,AAAA", "marker": "[[image 1/1: 600x400]]"}
+        image = {"data_uri": "data:image/png;base64,AAAA", "meta": "image 1: 600x400 px"}
+        structured = "<metadata>\nattachments: 1 image\nimage 1: 600x400 px\n</metadata>\n<content>\nUSER\n</content>"
         _, _, body = vp.build_request(self.openai(), "SYS", "USER", "think", 1, image=image)
         content = body["messages"][1]["content"]
-        self.assertEqual([p["type"] for p in content], ["text", "text", "image_url"])
-        self.assertEqual(content[0]["text"], "USER")
-        self.assertEqual(content[1]["text"], image["marker"])
-        self.assertEqual(content[2]["image_url"]["url"], image["data_uri"])
+        self.assertEqual([p["type"] for p in content], ["text", "image_url"])
+        self.assertEqual(content[0]["text"], structured)
+        self.assertEqual(content[1]["image_url"]["url"], image["data_uri"])
         grok = {"name": "g", "provider": "grok-oauth", "model": "grok-4.3", "access_token": "tok"}
         _, _, body = vp.build_request(grok, "SYS", "USER", "think", 1, image=image)
         parts = body["input"][0]["content"]
-        self.assertEqual([p["type"] for p in parts], ["input_text", "input_text", "input_image"])
-        self.assertEqual(parts[1]["text"], image["marker"])
-        self.assertEqual(parts[2]["image_url"], image["data_uri"])
+        self.assertEqual([p["type"] for p in parts], ["input_text", "input_image"])
+        self.assertEqual(parts[0]["text"], structured)
+        self.assertEqual(parts[1]["image_url"], image["data_uri"])
+        self.assertEqual(vp.structured_user_text("", image), "<metadata>\nattachments: 1 image\nimage 1: 600x400 px\n</metadata>")
         # Without an image the user content stays a plain string / single part.
         _, _, body = vp.build_request(self.openai(), "SYS", "USER", "think", 1)
         self.assertEqual(body["messages"][1]["content"], "USER")
@@ -164,7 +165,7 @@ class RequestShape(unittest.TestCase):
     def test_case_image_loads_the_fixture_with_the_app_marker(self):
         self.assertIsNone(vp.case_image({"id": "x"}))
         image = vp.case_image({"id": "x", "image": "chart.png"})
-        self.assertEqual(image["marker"], "[[image 1/1: 600x400]]")
+        self.assertEqual(image["meta"], "image 1: 600x400 px")
         self.assertTrue(image["data_uri"].startswith("data:image/png;base64,iVBOR"))
 
     def test_grok_oauth_uses_the_responses_api(self):

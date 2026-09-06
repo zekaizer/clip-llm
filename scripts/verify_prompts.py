@@ -374,8 +374,9 @@ FIXTURES = HERE / "fixtures"
 
 def case_image(case: dict) -> dict | None:
     """The image a vector attaches (``"image": "<file under scripts/fixtures>"``)
-    as the app sends it: a data URI plus the ``[[image 1/1: WxH]]`` marker the
-    client places right before the image part. ``None`` without an image."""
+    as the app sends it: a data URI plus the ``image 1: WxH px`` line of the
+    ``<metadata>`` block the client puts ahead of the content. ``None`` without
+    an image."""
     name = case.get("image")
     if not name:
         return None
@@ -385,8 +386,17 @@ def case_image(case: dict) -> dict | None:
     width, height = int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
     return {
         "data_uri": "data:image/png;base64," + base64.b64encode(data).decode("ascii"),
-        "marker": f"[[image 1/1: {width}x{height}]]",
+        "meta": f"image 1: {width}x{height} px",
     }
+
+
+def structured_user_text(user: str, image: dict | None) -> str:
+    """The user text as the client sends it: unchanged without an image, else the
+    ``<metadata>`` block followed by the text inside ``<content>``."""
+    if not image:
+        return user
+    head = f"<metadata>\nattachments: 1 image\n{image['meta']}\n</metadata>"
+    return f"{head}\n<content>\n{user}\n</content>" if user else head
 
 
 NO_VISION_RE = re.compile(r"image|vision|multimodal|content type", re.I)
@@ -406,11 +416,10 @@ def build_request(
 ) -> tuple[str, dict, dict]:
     """(url, headers, body) for one call, shaped like the app's request. ``turns``
     are (assistant, user) pairs appended after the content message; ``image``
-    (from ``case_image``) adds the marker and image parts after the text."""
+    (from ``case_image``) structures the text and adds the image part."""
     if model.get("provider") == "grok-oauth":
-        parts: list[dict] = [{"type": "input_text", "text": user}]
+        parts: list[dict] = [{"type": "input_text", "text": structured_user_text(user, image)}]
         if image:
-            parts.append({"type": "input_text", "text": image["marker"]})
             parts.append({"type": "input_image", "image_url": image["data_uri"]})
         inp = [{"role": "user", "content": parts}]
         for reply, request in turns:
@@ -434,8 +443,7 @@ def build_request(
     content: str | list[dict] = user
     if image:
         content = [
-            {"type": "text", "text": user},
-            {"type": "text", "text": image["marker"]},
+            {"type": "text", "text": structured_user_text(user, image)},
             {"type": "image_url", "image_url": {"url": image["data_uri"]}},
         ]
     messages = [{"role": "system", "content": system}, {"role": "user", "content": content}]

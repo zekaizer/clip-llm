@@ -79,16 +79,30 @@ fn effective_max_tokens(ceiling: u32, budget: Option<u32>, prompt_est: u32) -> u
     }
 }
 
-/// Metadata line placed right before image `index` (1-based) of `total`:
-/// the source size and, when the pipeline shrank it, the sent size. A fixed
-/// double-bracket form the preamble declares as metadata, not content.
-fn image_marker(index: usize, total: usize, image: &crate::images::ImageAttachment) -> String {
-    let source = format!("{}x{}", image.source_width, image.source_height);
-    if image.is_resized() {
-        format!("[[image {index}/{total}: {source}, sent at {}x{}]]", image.width, image.height)
-    } else {
-        format!("[[image {index}/{total}: {source}]]")
+/// The user turn's text when images are attached: a `<metadata>` block the
+/// preamble declares as the application's (attachment count, each image's
+/// source size and, when reduced, the sent size), then the clipboard text
+/// inside `<content>` (omitted when there is none). Without images the text
+/// is passed through unchanged, so text-only requests are untouched.
+fn structured_user_text(text: &str, images: &[crate::images::ImageAttachment]) -> String {
+    if images.is_empty() {
+        return text.to_string();
     }
+    let mut out = String::from("<metadata>\n");
+    let noun = if images.len() == 1 { "image" } else { "images" };
+    out.push_str(&format!("attachments: {} {noun}\n", images.len()));
+    for (i, image) in images.iter().enumerate() {
+        out.push_str(&format!("image {}: {}x{} px", i + 1, image.source_width, image.source_height));
+        if image.is_resized() {
+            out.push_str(&format!(", sent downscaled to {}x{} px", image.width, image.height));
+        }
+        out.push('\n');
+    }
+    out.push_str("</metadata>");
+    if !text.is_empty() {
+        out.push_str(&format!("\n<content>\n{text}\n</content>"));
+    }
+    out
 }
 
 /// Prompt tokens the attached images cost, for the token budget; zero when
@@ -286,9 +300,9 @@ enum ResponsesContentPart<'a> {
     /// plain string, not the `{url}` object of chat/completions.
     #[serde(rename = "input_image")]
     InputImage { image_url: String },
-    /// An owned `input_text` part (the image marker built per request).
+    /// An owned `input_text` part (the structured text built per request).
     #[serde(rename = "input_text")]
-    Marker { text: String },
+    OwnedText { text: String },
 }
 
 /// The rounds a request carries: the last [`REVISION_WINDOW`].
@@ -1514,8 +1528,8 @@ impl LlmClient {
         Some(ThinkingControlMethod::Unsupported)
     }
 
-    /// Build user message content: multimodal parts if images should be included,
-    /// otherwise plain text.
+    /// Build user message content: with images, the structured text (metadata
+    /// block + content) followed by one image part per image; otherwise plain text.
     fn build_user_content<'a>(
         content: &'a ClipboardContent,
         use_images: bool,
@@ -1526,17 +1540,11 @@ impl LlmClient {
             return MessageContent::Text(text);
         }
 
-        let total = content.images.len();
-        let mut parts = Vec::with_capacity(1 + 2 * total);
-        if !text.is_empty() {
-            parts.push(ContentPart::Text {
-                text: text.to_owned(),
-            });
-        }
-        for (i, image) in content.images.iter().enumerate() {
-            parts.push(ContentPart::Text {
-                text: image_marker(i + 1, total, image),
-            });
+        let mut parts = Vec::with_capacity(1 + content.images.len());
+        parts.push(ContentPart::Text {
+            text: structured_user_text(text, &content.images),
+        });
+        for image in &content.images {
             parts.push(ContentPart::ImageUrl {
                 image_url: ImageUrl {
                     url: image.data_uri(),
@@ -1546,8 +1554,8 @@ impl LlmClient {
         MessageContent::Parts(parts)
     }
 
-    /// Responses-flavor user content: the text as an `input_text` part plus,
-    /// when `use_images`, one `input_image` part per image (text first).
+    /// Responses-flavor user content: the text as an `input_text` part; with
+    /// `use_images`, the structured text followed by one `input_image` per image.
     fn build_responses_user_content<'a>(
         content: &'a ClipboardContent,
         use_images: bool,
@@ -1556,15 +1564,11 @@ impl LlmClient {
         if !use_images {
             return vec![ResponsesContentPart::Text { text }];
         }
-        let total = content.images.len();
-        let mut parts = Vec::with_capacity(1 + 2 * total);
-        if !text.is_empty() {
-            parts.push(ResponsesContentPart::Text { text });
-        }
-        for (i, image) in content.images.iter().enumerate() {
-            parts.push(ResponsesContentPart::Marker {
-                text: image_marker(i + 1, total, image),
-            });
+        let mut parts = Vec::with_capacity(1 + content.images.len());
+        parts.push(ResponsesContentPart::OwnedText {
+            text: structured_user_text(text, &content.images),
+        });
+        for image in &content.images {
             parts.push(ResponsesContentPart::InputImage {
                 image_url: image.data_uri(),
             });
@@ -2114,7 +2118,7 @@ mod tests {
     }
 
     #[test]
-    fn image_marker_names_source_and_sent_size() {
+    fn structured_user_text_names_source_and_sent_sizes() {
         let shrunk = ImageAttachment {
             width: 1568,
             height: 882,
@@ -2122,9 +2126,15 @@ mod tests {
             source_height: 2160,
             ..ImageAttachment::stub(vec![])
         };
-        assert_eq!(image_marker(1, 2, &shrunk), "[[image 1/2: 3840x2160, sent at 1568x882]]");
         let same = ImageAttachment { width: 600, height: 400, source_width: 600, source_height: 400, ..ImageAttachment::stub(vec![]) };
-        assert_eq!(image_marker(2, 2, &same), "[[image 2/2: 600x400]]");
+        assert_eq!(
+            structured_user_text("t", &[shrunk.clone(), same.clone()]),
+            "<metadata>\nattachments: 2 images\nimage 1: 3840x2160 px, sent downscaled to 1568x882 px\nimage 2: 600x400 px\n</metadata>\n<content>\nt\n</content>"
+        );
+        // Text-only requests are passed through untouched.
+        assert_eq!(structured_user_text("t", &[]), "t");
+        // No text: the metadata block alone, no empty content block.
+        assert_eq!(structured_user_text("", &[same]), "<metadata>\nattachments: 1 image\nimage 1: 600x400 px\n</metadata>");
     }
 
     #[test]
@@ -3026,10 +3036,10 @@ mod tests {
         let mc = LlmClient::build_user_content(&content, true);
         match mc {
             MessageContent::Parts(parts) => {
-                assert_eq!(parts.len(), 3);
-                assert!(matches!(&parts[0], ContentPart::Text { text } if text == "caption"));
-                assert!(matches!(&parts[1], ContentPart::Text { text } if text == "[[image 1/1: 2x2]]"));
-                assert!(matches!(&parts[2], ContentPart::ImageUrl { .. }));
+                assert_eq!(parts.len(), 2);
+                assert!(matches!(&parts[0], ContentPart::Text { text }
+                    if text == "<metadata>\nattachments: 1 image\nimage 1: 2x2 px\n</metadata>\n<content>\ncaption\n</content>"));
+                assert!(matches!(&parts[1], ContentPart::ImageUrl { .. }));
             }
             _ => panic!("expected Parts"),
         }
@@ -3057,9 +3067,10 @@ mod tests {
         let mc = LlmClient::build_user_content(&content, true);
         match mc {
             MessageContent::Parts(parts) => {
-                // No content text part; the marker still precedes the image.
+                // No content block without text; the metadata block still leads.
                 assert_eq!(parts.len(), 2);
-                assert!(matches!(&parts[0], ContentPart::Text { text } if text.starts_with("[[image 1/1")));
+                assert!(matches!(&parts[0], ContentPart::Text { text }
+                    if text == "<metadata>\nattachments: 1 image\nimage 1: 2x2 px\n</metadata>"));
                 assert!(matches!(&parts[1], ContentPart::ImageUrl { .. }));
             }
             _ => panic!("expected Parts"),
@@ -3078,7 +3089,7 @@ mod tests {
             MessageContent::Parts(parts) => {
                 // Empty text should be omitted, only image part.
                 assert_eq!(parts.len(), 2);
-                assert!(matches!(&parts[0], ContentPart::Text { text } if text.starts_with("[[image 1/1")));
+                assert!(matches!(&parts[0], ContentPart::Text { text } if text.starts_with("<metadata>") && !text.contains("<content>")));
                 assert!(matches!(&parts[1], ContentPart::ImageUrl { .. }));
             }
             _ => panic!("expected Parts"),
@@ -3152,13 +3163,11 @@ mod tests {
         };
         let json = serde_json::to_value(LlmClient::build_responses_user_content(&content, true)).unwrap();
         let parts = json.as_array().unwrap();
-        assert_eq!(parts.len(), 3, "{json}");
+        assert_eq!(parts.len(), 2, "{json}");
         assert_eq!(parts[0]["type"], "input_text");
-        assert_eq!(parts[0]["text"], "caption");
-        assert_eq!(parts[1]["type"], "input_text");
-        assert_eq!(parts[1]["text"], "[[image 1/1: 2x2]]");
-        assert_eq!(parts[2]["type"], "input_image");
-        let url = parts[2]["image_url"].as_str().expect("image_url is a plain string");
+        assert_eq!(parts[0]["text"], "<metadata>\nattachments: 1 image\nimage 1: 2x2 px\n</metadata>\n<content>\ncaption\n</content>");
+        assert_eq!(parts[1]["type"], "input_image");
+        let url = parts[1]["image_url"].as_str().expect("image_url is a plain string");
         assert!(url.starts_with("data:image/png;base64,"), "{url}");
     }
 
@@ -3184,11 +3193,11 @@ mod tests {
         };
         let json = serde_json::to_value(LlmClient::build_responses_user_content(&content, true)).unwrap();
         let parts = json.as_array().unwrap();
-        assert_eq!(parts.len(), 4, "{json}");
-        assert_eq!(parts[0]["text"], "[[image 1/2: 2x2]]");
+        assert_eq!(parts.len(), 3, "{json}");
+        assert_eq!(parts[0]["type"], "input_text");
+        assert_eq!(parts[0]["text"], "<metadata>\nattachments: 2 images\nimage 1: 2x2 px\nimage 2: 2x2 px\n</metadata>");
         assert_eq!(parts[1]["type"], "input_image");
-        assert_eq!(parts[2]["text"], "[[image 2/2: 2x2]]");
-        assert_eq!(parts[3]["type"], "input_image");
+        assert_eq!(parts[2]["type"], "input_image");
     }
 
     #[test]
