@@ -6,6 +6,8 @@ use arboard::Clipboard;
 use tracing::{debug, info, warn};
 
 use crate::images::encode::{check_pixel_budget, encode_for_upload};
+use crate::images::fetch::fetch_source;
+use crate::images::markup::images_from_html;
 use crate::images::{ImageAttachment, ImageOrigin};
 use crate::platform::{ModifierState, Platform};
 use crate::ClipboardError;
@@ -223,8 +225,7 @@ impl ClipboardManager {
                 if let Some(paths) = self.file_list() {
                     return crate::files::ingest_files(&paths);
                 }
-                let text = self.board.get_text().ok().filter(|s| !s.trim().is_empty());
-                let images = read_image_from_board(&mut self.board)?;
+                let (text, images) = self.read_flavors()?;
 
                 if text.is_some() || !images.is_empty() {
                     let content = ClipboardContent { text, images, files: vec![] };
@@ -259,10 +260,7 @@ impl ClipboardManager {
         if let Some(paths) = self.file_list() {
             return crate::files::ingest_files(&paths);
         }
-        let text = self.board.get_text().ok().filter(|s| !s.trim().is_empty());
-
-        let images = read_image_from_board(&mut self.board)?;
-
+        let (text, images) = self.read_flavors()?;
         let content = ClipboardContent { text, images, files: vec![] };
         if content.is_empty() {
             return Err(ClipboardError::NoTextInClipboard);
@@ -272,6 +270,25 @@ impl ClipboardManager {
             info!("read clipboard text ({} chars)", t.len());
         }
         Ok(content)
+    }
+
+    /// Text and images across the flavors: the plain-text flavor, the image
+    /// flavor, and, only when the image flavor is empty, the images the HTML
+    /// flavor references (a rich-text selection carries its pictures solely
+    /// as markup references).
+    fn read_flavors(&mut self) -> Result<(Option<String>, Vec<ImageAttachment>), ClipboardError> {
+        let text = self.board.get_text().ok().filter(|s| !s.trim().is_empty());
+        let mut images = read_image_from_board(&mut self.board)?;
+        if images.is_empty()
+            && let Ok(html) = self.board.get().html()
+            && !html.trim().is_empty()
+        {
+            images = images_from_html(&html, &fetch_source);
+            if !images.is_empty() {
+                info!("html flavor: {} image(s) attached", images.len());
+            }
+        }
+        Ok((text, images))
     }
 
     /// Paths of a file-list clipboard (Finder/Explorer copy), if any.
@@ -385,6 +402,31 @@ mod tests {
         let content = mgr.read_content().unwrap();
         assert_eq!(content.text.as_deref(), Some("plain"));
         assert!(content.files.is_empty());
+    }
+
+    #[test]
+    fn read_content_takes_images_from_the_html_flavor() {
+        let _lock = lock_clipboard();
+        // A 600x400 non-flat PNG inline in the markup, next to plain text.
+        let img = image::RgbaImage::from_fn(600, 400, |x, y| {
+            if x > 100 && x < 300 && y > 100 && y < 300 {
+                image::Rgba([0, 0, 0, 255])
+            } else {
+                image::Rgba([(x % 256) as u8, (y % 256) as u8, 200, 255])
+            }
+        });
+        let mut png = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let stub = ImageAttachment::stub(png.into_inner());
+        let html = format!("<p>caption</p><img src=\"{}\"><img src=\"https://h/emoji/x.png\">", stub.data_uri());
+
+        let mut mgr = ClipboardManager::new().unwrap();
+        mgr.board.set().html(html.as_str(), Some("caption")).unwrap();
+        let content = mgr.read_content().unwrap();
+        assert_eq!(content.text.as_deref(), Some("caption"));
+        assert_eq!(content.images.len(), 1, "{:?}", content.images.iter().map(|i| (i.width, i.height)).collect::<Vec<_>>());
+        assert_eq!((content.images[0].width, content.images[0].height), (600, 400));
+        assert_eq!(content.images[0].origin, ImageOrigin::Markup);
     }
 
     #[test]
