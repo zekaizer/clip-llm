@@ -690,15 +690,17 @@
     "id": "words-03",
     "category": "words",
     "expect": "en",
-    "lookup": true,
-    "text": "pull request"
+    "lookup": false,
+    "text": "pull request",
+    "note": "two words are a phrase: translated, not looked up"
   },
   {
     "id": "words-04",
     "category": "words",
     "expect": "ko",
-    "lookup": true,
-    "text": "기술 부채"
+    "lookup": false,
+    "text": "기술 부채",
+    "note": "two words are a phrase: translated, not looked up"
   },
   {
     "id": "words-05",
@@ -718,8 +720,9 @@
     "id": "words-07",
     "category": "words",
     "expect": "en",
-    "lookup": true,
-    "text": "race condition"
+    "lookup": false,
+    "text": "race condition",
+    "note": "two words are a phrase: translated, not looked up"
   },
   {
     "id": "words-08",
@@ -732,9 +735,9 @@
     "id": "words-09",
     "category": "words",
     "expect": "ko",
-    "lookup": true,
+    "lookup": false,
     "text": "레이스 컨디션",
-    "note": "Korean transliteration of an English term"
+    "note": "two words are a phrase: translated, not looked up"
   },
   {
     "id": "words-10",
@@ -754,8 +757,9 @@
     "id": "words-12",
     "category": "words",
     "expect": "ko",
-    "lookup": true,
-    "text": "회귀 테스트"
+    "lookup": false,
+    "text": "회귀 테스트",
+    "note": "two words are a phrase: translated, not looked up"
   },
   {
     "id": "words-13",
@@ -785,9 +789,9 @@
     "id": "words-16",
     "category": "words",
     "expect": "en",
-    "lookup": true,
+    "lookup": false,
     "text": "cargo test",
-    "note": "two plain tokens: indistinguishable from a term, so it is looked up"
+    "note": "two words are a phrase: translated, not looked up"
   },
   {
     "id": "words-17",

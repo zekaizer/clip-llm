@@ -91,7 +91,7 @@ fn is_code_like(core: &str) -> bool {
     core.chars().any(|c| "_.:/\\=(){}[]<>@#$%^&*|~+".contains(c))
 }
 
-/// `text` is a word or a short term to look up rather than text to translate.
+/// `text` is a single word to look up rather than text to translate.
 pub fn is_lookup(text: &str) -> bool {
     let text = text.trim();
     if text.is_empty() || text.contains('\n') || text.chars().count() > LOOKUP_MAX_CHARS {
@@ -101,28 +101,17 @@ pub fn is_lookup(text: &str) -> bool {
     if !text.chars().any(char::is_alphabetic) {
         return false;
     }
-    let tokens: Vec<&str> = text.split_whitespace().collect();
-    if tokens.is_empty() || tokens.len() > LOOKUP_MAX_TOKENS {
+    // One word. Two words are already a phrase ("번역 완료" is a status, not
+    // a term) and get translated.
+    let mut tokens = text.split_whitespace();
+    let (Some(word), None) = (tokens.next(), tokens.next()) else { return false };
+    if is_code_like(word.trim_matches(|c: char| PUNCTUATION.contains(c))) {
         return false;
     }
-    if tokens.iter().any(|t| is_code_like(t.trim_matches(|c: char| PUNCTUATION.contains(c)))) {
-        return false;
-    }
-    // A sentence, however short, is translated: terminal punctuation
-    // (Latin or CJK) or a Korean sentence ending on the last token.
-    let last = tokens[tokens.len() - 1];
-    if last.ends_with(['.', '!', '?', '\u{3002}', '\u{ff01}', '\u{ff1f}']) {
-        return false;
-    }
-    if tokens.len() == 1 {
-        return true;
-    }
-    let korean_sentence = has_korean_marker(last.trim_matches(|c: char| PUNCTUATION.contains(c)))
-        && last.chars().any(is_hangul);
-    !korean_sentence
+    // A sentence, however short, is translated: terminal punctuation, Latin or CJK.
+    !word.ends_with(['.', '!', '?', '\u{3002}', '\u{ff01}', '\u{ff1f}'])
 }
 
-const LOOKUP_MAX_TOKENS: usize = 2;
 const LOOKUP_MAX_CHARS: usize = 40;
 
 #[cfg(test)]

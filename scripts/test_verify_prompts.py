@@ -231,6 +231,18 @@ class LangDirectionVectors(unittest.TestCase):
         other = vp.build_system({"mode": "translate", "input": "배포"}, {"languages": {"primary": "Japanese"}}, defaults)
         self.assertIn("Determine the input language", other)
 
+    def test_build_system_uses_the_dictionary_prompt_for_lookups(self):
+        defaults = vp.load_defaults()
+        en = vp.build_system({"mode": "translate", "input": "throughput"}, {}, defaults)
+        self.assertIn("dictionary", en)
+        self.assertIn("The headword is English or another language", en)
+        ko = vp.build_system({"mode": "translate", "input": "멱등성"}, {}, defaults)
+        self.assertIn("The headword is Korean", ko)
+        phrase = vp.build_system({"mode": "translate", "input": "기술 부채"}, {}, defaults)
+        self.assertNotIn("dictionary", phrase)
+        sentence = vp.build_system({"mode": "translate", "input": "Deploy it."}, {}, defaults)
+        self.assertNotIn("dictionary", sentence)
+
     def test_schema(self):
         cases = json.loads((vp.HERE / "lang_direction_vectors.json").read_text(encoding="utf-8"))
         ids = [c["id"] for c in cases]
@@ -241,6 +253,28 @@ class LangDirectionVectors(unittest.TestCase):
             self.assertIsInstance(c["text"], str, c["id"])
             self.assertTrue(c["id"].startswith(c["category"] + "-"), c["id"])
         self.assertGreaterEqual(len(cases), 100)
+
+
+class DictionaryEntryGrading(unittest.TestCase):
+    CASE = {"id": "D-x", "mode": "translate", "input": "throughput", "checks": {"dictionary_entry": True}}
+
+    def _fails(self, out):
+        return [n for n, ok, _ in vp.grade(self.CASE, out, "stop") if not ok]
+
+    def test_hangul_transliteration_that_differs_from_the_equivalent_passes(self):
+        self.assertEqual(self._fails("# throughput\n**처리량** · `스루풋` · *noun*\n1. 뜻"), [])
+        self.assertEqual(self._fails("# race condition\n**경쟁 상태** · `레이스 컨디션` · *n.*"), [])
+        # A loanword's equivalent is its own transliteration.
+        self.assertEqual(self._fails("# cache\n**캐시** · `캐시` · *n.*"), [])
+
+    def test_repeated_equivalent_ipa_jamo_and_old_order_fail(self):
+        self.assertIn("transliteration", self._fails("# Attached\n**첨부된** · `첨부된` · *형용사*\n1. x"))
+        self.assertIn("transliteration", self._fails("# throughput\n**처리량** · `처리량` · *noun*"))
+        self.assertIn("transliteration", self._fails("# throughput\n**처리량** · `ˈθruːpʊt` · *noun*"))
+        self.assertIn("transliteration", self._fails("# throughput\n**처리량** · `ㅊㅜㄹㅎㅕㄹ` · *noun*"))
+        self.assertIn("entry-line2", self._fails("# throughput\n**처리량** 스루풋 · *noun*"), "unbackticked")
+        self.assertIn("entry-line2", self._fails("# throughput\n`스루풋` · **처리량** · *noun*"), "hint first")
+        self.assertIn("entry-line2", self._fails("throughput: 처리량"))
 
 
 class Grading(unittest.TestCase):

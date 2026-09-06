@@ -460,6 +460,9 @@ impl ProcessMode {
         let primary = config.primary_lang();
         let secondary = config.secondary_lang();
         let mode_prompt = match self {
+            Self::Translate if config.is_lookup(text) => {
+                config.dictionary_prompt_for(config.translation_direction(text))
+            }
             Self::Translate => config.translate_prompt_for(config.translation_direction(text)),
             Self::Rephrase => config.rephrase_prompt(params.style, params.length),
             Self::Summarize => {

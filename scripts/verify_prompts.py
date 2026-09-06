@@ -79,6 +79,12 @@ THINK_RE = re.compile(r"(?s)<(think|thought|thinking|reasoning)>.*?</\1>")
 HANGUL_RE = re.compile(r"[가-힣ᄀ-ᇿ㄰-㆏]")
 LATIN_RE = re.compile(r"[A-Za-z]")
 H2_RE = re.compile(r"^## ", re.M)
+# Dictionary entry line 2: **equivalent** · `transliteration` · *part of speech*
+ENTRY_LINE2_RE = re.compile(r"^\*\*(.+?)\*\*\s*·\s*`([^`]+)`\s*·\s*\*(.+?)\*\s*$", re.M)
+HANGUL_ONLY_RE = re.compile(r"^[가-힣 ]+$")
+# A "transliteration" ending in a Korean derivational or inflectional suffix is a
+# Korean word repeated (첨부된, 처리량), not the sound of an English term.
+KOREAN_WORD_SUFFIX_RE = re.compile(r"(된|한|할|하다|하는|함|됨|적|성|량|화|법)$")
 REFUSAL_MARKERS = ["i cannot", "i can't", "i'm sorry", "i am sorry", "as an ai", "죄송", "할 수 없", "도와드릴 수 없"]
 
 
@@ -115,6 +121,9 @@ def load_defaults(path: Path = CONFIG_RS) -> dict:
         "direction_to_secondary": rust_str_const(src, "DEFAULT_DIRECTION_TO_SECONDARY"),
         "direction_to_primary": rust_str_const(src, "DEFAULT_DIRECTION_TO_PRIMARY"),
         "direction_rule": rust_str_const(src, "DEFAULT_DIRECTION_RULE"),
+        "dictionary": rust_str_const(src, "DEFAULT_DICTIONARY_PROMPT"),
+        "lookup_to_secondary": rust_str_const(src, "DEFAULT_LOOKUP_TO_SECONDARY"),
+        "lookup_to_primary": rust_str_const(src, "DEFAULT_LOOKUP_TO_PRIMARY"),
         "translate": rust_str_const(src, "DEFAULT_TRANSLATE_PROMPT"),
         "summarize": rust_str_const(src, "DEFAULT_SUMMARIZE_PROMPT"),
         "rephrase_base": rust_str_const(src, "DEFAULT_REPHRASE_BASE"),
@@ -160,10 +169,14 @@ def build_system(case: dict, cfg: dict, defaults: dict) -> str:
     mode = case["mode"]
     if mode == "translate":
         direction = translation_direction(case.get("input"), primary)
-        sentence = substitute_tokens(defaults["direction_" + direction], lang_vars)
-        body = substitute_tokens(
-            cfg.get("translate", {}).get("prompt") or defaults["translate"], lang_vars + [("{direction}", sentence)]
-        )
+        tc = cfg.get("translate", {})
+        if direction != "rule" and is_lookup(case["input"]):
+            key = "lookup_to_secondary" if direction == "to_secondary" else "lookup_to_primary"
+            sentence = substitute_tokens(defaults[key], lang_vars)
+            body = substitute_tokens(tc.get("dictionary") or defaults["dictionary"], lang_vars + [("{direction}", sentence)])
+        else:
+            sentence = substitute_tokens(defaults["direction_" + direction], lang_vars)
+            body = substitute_tokens(tc.get("prompt") or defaults["translate"], lang_vars + [("{direction}", sentence)])
     elif mode == "summarize":
         body = substitute_tokens(cfg.get("summarize", {}).get("prompt") or defaults["summarize"], lang_vars)
     elif mode == "rephrase":
@@ -236,20 +249,14 @@ def prose_is_korean(text: str) -> bool:
 
 
 def is_lookup(text: str) -> bool:
-    """Mirror of ``lang::is_lookup``."""
+    """Mirror of ``lang::is_lookup``: a single word, not code, not a sentence."""
     text = text.strip()
     if not text or "\n" in text or len(text) > 40 or not any(c.isalpha() for c in text):
         return False
     tokens = text.split()
-    if not tokens or len(tokens) > 2 or any(_is_code_like(t.strip(PUNCTUATION)) for t in tokens):
+    if len(tokens) != 1 or _is_code_like(tokens[0].strip(PUNCTUATION)):
         return False
-    last = tokens[-1]
-    if last.endswith((".", "!", "?", "\u3002", "\uff01", "\uff1f")):
-        return False
-    if len(tokens) == 1:
-        return True
-    core = last.strip(PUNCTUATION)
-    return not (core.endswith(KO_MARKERS) and any(_is_hangul(c) for c in last))
+    return not tokens[0].endswith((".", "!", "?", "\u3002", "\uff01", "\uff1f"))
 
 
 def translation_direction(text: str | None, primary: str) -> str:
@@ -563,6 +570,18 @@ def grade(case: dict, output: str, finish: str) -> list[tuple[str, bool, str]]:
     mx = checks.get("max_chars")
     if mx:
         res.append((f"len<= {mx}", len(output) <= mx, f"{len(output)} chars"))
+
+    # Dictionary entry: line 2 is `**equivalent** · \`transliteration\` · *pos*` with a
+    # Hangul-only transliteration that is not the equivalent repeated.
+    if checks.get("dictionary_entry"):
+        m = ENTRY_LINE2_RE.search(output)
+        if not m:
+            res.append(("entry-line2", False, "no `**equivalent** · `transliteration` · *pos*` line"))
+        else:
+            eq, tr = m.group(1).strip(), m.group(2).strip()
+            # Equality with the equivalent is fine for loanwords (cache → 캐시 · `캐시`).
+            ok = bool(HANGUL_ONLY_RE.match(tr)) and not KOREAN_WORD_SUFFIX_RE.search(tr)
+            res.append(("transliteration", ok, "" if ok else f"{tr!r} (equivalent {eq!r})"))
 
     return res
 
