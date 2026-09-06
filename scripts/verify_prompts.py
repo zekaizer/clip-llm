@@ -389,6 +389,17 @@ def case_image(case: dict) -> dict | None:
     }
 
 
+NO_VISION_RE = re.compile(r"image|vision|multimodal|content type", re.I)
+
+
+def is_no_vision_rejection(finish: str) -> bool:
+    """Whether a call's finish string is a text-only model refusing the image
+    part: HTTP 400 whose body talks about images / content types. The app
+    probes vision per profile and never sends images to such a model, so the
+    harness skips the case instead of failing it."""
+    return finish.startswith("HTTP 400") and bool(NO_VISION_RE.search(finish))
+
+
 def build_request(
     model: dict, system: str, user: str, thinking: str, max_tokens: int, turns: list[tuple[str, str]] = (),
     image: dict | None = None,
@@ -685,6 +696,9 @@ def main() -> int:
             )
             image = case_image(case)
             out, finish, reasoning = call(m, system, case["input"], thinking, max_tokens, image=image)
+            if image and is_no_vision_rejection(finish):
+                print(f"           {m['name']}: SKIP (no vision: {finish[:80]})")
+                continue
             # Revision rounds: each instruction revises the previous reply; the
             # last reply is what gets graded.
             rounds: list[tuple[str, str]] = []

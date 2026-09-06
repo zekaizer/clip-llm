@@ -154,6 +154,13 @@ class RequestShape(unittest.TestCase):
         _, _, body = vp.build_request(self.openai(), "SYS", "USER", "think", 1)
         self.assertEqual(body["messages"][1]["content"], "USER")
 
+    def test_no_vision_rejection_is_recognised_only_for_image_cases(self):
+        self.assertTrue(vp.is_no_vision_rejection("HTTP 400: {\"error\":\"model does not support image_url content\"}"))
+        self.assertTrue(vp.is_no_vision_rejection("HTTP 400: content type not supported by this model"))
+        self.assertFalse(vp.is_no_vision_rejection("HTTP 400: max_tokens too large"))
+        self.assertFalse(vp.is_no_vision_rejection("HTTP 429: rate limited (image)"))
+        self.assertFalse(vp.is_no_vision_rejection("stop"))
+
     def test_case_image_loads_the_fixture_with_the_app_marker(self):
         self.assertIsNone(vp.case_image({"id": "x"}))
         image = vp.case_image({"id": "x", "image": "chart.png"})
