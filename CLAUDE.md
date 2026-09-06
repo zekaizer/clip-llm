@@ -57,7 +57,8 @@ The project follows a 7-phase incremental plan defined in [docs/REQUIREMENTS.md]
 - `src/coordinator.rs` — hotkey event → tap detection → `TapEvent` dispatch (dedicated thread)
 - `src/hotkey.rs` — `HotkeyDetector` state machine, `TapAction`, `TapEvent`
 - `src/clipboard.rs` — `ClipboardManager` (read/write, copy simulation + poll)
-- `src/files.rs` — file-list clipboard ingestion (`ingest_files`: UTF-8 text + PNG → `ClipboardContent`)
+- `src/files.rs` — file-list clipboard ingestion (`ingest_files`: UTF-8 text + image files → `ClipboardContent`)
+- `src/images/` — everything an image goes through before a request: `ImageAttachment` (bytes + MIME + source/sent size + origin), `cap_for_request` (4 images / 8 MiB); `decode.rs` (PNG/JPEG/GIF/WebP/BMP → RGBA, pixel budget from the header), `encode.rs` (margin trim → 1568px → PNG, JPEG fallback over 1.5 MB), `filter.rs` (meaningfulness: markup prefilter + pixel checks + `select_top`), `html.rs` (`<img>` refs from `public.html` / CF_HTML), `fetch.rs` (`data:` / `file:` / `http(s)` bytes, bounded), `markup.rs` (the pipeline over an injected fetcher). Only markup images are filtered; clipboard/file images are deliberate
 - `src/lang.rs` — input-language cues for Translate: `prose_is_korean` (direction, ADR-0002) and `is_lookup` (dictionary entry); fixture `scripts/lang_direction_vectors.json` shared with the harness
 - `src/settings.rs` — settings panel model (`SettingsForm` → `SettingsPatch` → `toml_edit` in-place write; ADR-0001)
 - `src/worker.rs` — async LLM request worker thread
@@ -137,6 +138,7 @@ on `WorkerCommand::SelectModel`, re-probing capabilities per profile):
 - Endpoint: OpenAI-compatible `/v1/chat/completions`
 - Response parsing: extract `choices[0].message.content`
 - Think-block stripping: regex `(?s)<think>.*?</think>`, trim whitespace after
+- Images (both flavors): each image part is preceded by a text part `[[image i/n: WxH]]` / `[[image i/n: WxH, sent at wxh]]` (source size, sent size when reduced). The shared preamble (`DEFAULT_PROMPT_PREAMBLE`) declares that marker as application metadata so Transcribe/Summarize never reproduce it — keep the marker format and the preamble sentence in sync; `scripts/prompt_vectors.json` I-001..I-003 check for leaks with `scripts/fixtures/chart.png`
 - Thinking control (No Think) is probed per profile by **effect**, not acceptance: `reasoning_effort:"none"` → `chat_template_kwargs.enable_thinking=false` → `/no_think`, keeping the first whose reply shows no reasoning (`reasoning_tokens`, `reasoning_content`, inline `<think>`). LM Studio accepts unknown fields with 200 and keeps thinking, which is why acceptance was never enough. `thinking_control` in a profile forces the method.
 - SSE (Phase 2+): parse `data: {...}` lines, accumulate `choices[0].delta.content`, finalize on `[DONE]`
 - Revision rounds (both flavors): `system` and the content turn are byte-identical to the base request (prefix cache), then per round an `assistant` turn (the reply being revised) and a `user` turn (the instruction inside `[prompt].revision`, a fixed operator frame). Only the last `REVISION_WINDOW` rounds are replayed. The frame is in the user turn on purpose: a system-prompt clause made models treat request-shaped content as instructions (gemma T-006, grok G-004) — do not move it.
