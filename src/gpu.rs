@@ -6,7 +6,7 @@
 //! `main.rs` maps the live adapters through [`choose`].
 
 use tracing::warn;
-use wgpu::{AdapterInfo, DeviceType};
+use wgpu::{AdapterInfo, Backend, DeviceType};
 
 /// `[ui].gpu` — which adapter the overlay renders with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,8 +38,9 @@ impl GpuPreference {
 /// Index into `infos` of the adapter to use; `None` when `infos` is empty.
 ///
 /// Hardware GPUs rank above `Other`/virtual adapters, and software (`Cpu`)
-/// adapters come last so they are only ever a fallback. A name filter with
-/// no match falls back to the high-performance order with a warning.
+/// adapters come last so they are only ever a fallback; among equals the
+/// backend decides (see [`backend_rank`]). A name filter with no match falls
+/// back to the high-performance order with a warning.
 pub fn choose(infos: &[AdapterInfo], pref: &GpuPreference) -> Option<usize> {
     if infos.is_empty() {
         return None;
@@ -64,7 +65,21 @@ pub fn choose(infos: &[AdapterInfo], pref: &GpuPreference) -> Option<usize> {
     // `min_by_key` keeps the first of equal keys - enumeration order breaks ties.
     candidates
         .into_iter()
-        .min_by_key(|&i| rank(infos[i].device_type))
+        .min_by_key(|&i| (rank(infos[i].device_type), backend_rank(infos[i].backend)))
+}
+
+/// Tie-break among adapters of the same device type - a GPU is listed once
+/// per backend. DX12 leads on Windows because the transparent overlay only
+/// composes through it: DWM honors the alpha of a DXGI flip swapchain, while
+/// Vulkan swapchains there present opaque.
+fn backend_rank(backend: Backend) -> u8 {
+    match backend {
+        Backend::Dx12 => 0,
+        Backend::Metal => 1,
+        Backend::Vulkan => 2,
+        Backend::Gl => 3,
+        Backend::Noop | Backend::BrowserWebGpu => 4,
+    }
 }
 
 /// High-performance order; `Other` may be a real GPU behind an API without
@@ -90,7 +105,6 @@ fn integrated_first(device_type: DeviceType) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wgpu::Backend;
 
     fn info(name: &str, device_type: DeviceType, backend: Backend) -> AdapterInfo {
         AdapterInfo {
@@ -195,6 +209,31 @@ mod tests {
         ];
         assert_eq!(
             choose(&infos, &GpuPreference::Name("radeon".into())),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn same_gpu_on_several_backends_prefers_dx12_then_metal_then_vulkan() {
+        // Windows lists a GPU under Vulkan first; the transparent overlay only
+        // composes correctly through DX12, so the backend breaks the tie.
+        let infos = [
+            info("dgpu", DeviceType::DiscreteGpu, Backend::Vulkan),
+            info("igpu", DeviceType::IntegratedGpu, Backend::Vulkan),
+            info("dgpu", DeviceType::DiscreteGpu, Backend::Dx12),
+            info("igpu", DeviceType::IntegratedGpu, Backend::Dx12),
+            info("dgpu", DeviceType::DiscreteGpu, Backend::Gl),
+        ];
+        assert_eq!(choose(&infos, &GpuPreference::HighPerformance), Some(2));
+        assert_eq!(choose(&infos, &GpuPreference::LowPower), Some(3));
+        assert_eq!(choose(&infos, &GpuPreference::Name("igpu".into())), Some(3));
+        // The device preference still outranks the backend.
+        let dgpu_only_on_vulkan = [
+            info("igpu", DeviceType::IntegratedGpu, Backend::Dx12),
+            info("dgpu", DeviceType::DiscreteGpu, Backend::Vulkan),
+        ];
+        assert_eq!(
+            choose(&dgpu_only_on_vulkan, &GpuPreference::HighPerformance),
             Some(1)
         );
     }
