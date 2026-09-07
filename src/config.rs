@@ -1501,7 +1501,7 @@ fn starter_template() -> String {
     t.push_str(&s("position", "cursor", "\"cursor\" = centered on the trigger point; \"remembered\" = where you last left it (panel_position is written for you; Settings always reopens where it was left, via settings_position)"));
     t.push_str(&r("zoom", "1.0", "UI scale 0.5-3.0; Cmd/Ctrl +/- change it at runtime and it is written back"));
     t.push_str(&s("theme", "dark", "\"dark\" | \"light\" | \"system\" (follow the OS appearance)"));
-    t.push_str(&s("gpu", "high-performance", "\"high-performance\" | \"low-power\" | text matched against adapter names (the \"wgpu adapter\" lines in the log list them)"));
+    t.push_str(&s("gpu", "high-performance", "\"high-performance\" | \"low-power\" | text matched against adapter names (the \"wgpu adapter\" lines in the log list them); adapters that cannot compose alpha are skipped while another can"));
     t.push('\n');
 
     // [languages] — substituted into {primary_lang} / {secondary_lang}.

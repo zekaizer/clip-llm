@@ -86,7 +86,19 @@ fn select_wgpu_adapter(
     }
 
     let usable_infos: Vec<wgpu::AdapterInfo> = usable.iter().map(|&i| infos[i].clone()).collect();
-    let index = usable[clip_llm::gpu::choose(&usable_infos, pref)
+    // The overlay is transparent: an adapter whose surface cannot compose
+    // alpha renders it on a black panel. Unknown without a surface = capable.
+    let composes_alpha: Vec<bool> = usable
+        .iter()
+        .map(|&i| {
+            surface.is_none_or(|s| {
+                let modes = s.get_capabilities(&adapters[i]).alpha_modes;
+                modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+                    || modes.contains(&wgpu::CompositeAlphaMode::PostMultiplied)
+            })
+        })
+        .collect();
+    let index = usable[clip_llm::gpu::choose(&usable_infos, &composes_alpha, pref)
         .ok_or_else(|| "no wgpu adapter can present to the overlay surface".to_string())?];
     let info = &infos[index];
     if info.device_type == wgpu::DeviceType::Cpu {
