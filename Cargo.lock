@@ -412,6 +412,7 @@ dependencies = [
  "tracing-subscriber",
  "tray-icon",
  "wgpu",
+ "wgpu-types",
  "windows-sys 0.61.2",
  "winit",
  "winresource",
