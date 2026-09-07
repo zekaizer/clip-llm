@@ -31,6 +31,7 @@ use std::sync::{Arc, RwLock};
 use serde::Deserialize;
 use tracing::{debug, info, warn};
 
+use crate::gpu::GpuPreference;
 use crate::{ProcessMode, RephraseLength, RephraseStyle, ThinkingMode, PRIMARY_LANG, SECONDARY_LANG};
 
 /// Environment variable holding an explicit config file path (overrides the
@@ -571,6 +572,9 @@ struct UiConfig {
     zoom: Option<f32>,
     /// `"dark"` (default), `"light"`, or `"system"` (follow the OS appearance).
     theme: Option<String>,
+    /// Which GPU the overlay renders with: `"high-performance"` (default),
+    /// `"low-power"`, or text matched against adapter names.
+    gpu: Option<String>,
 }
 
 /// `[ui].theme` — which palette the overlay uses.
@@ -935,6 +939,11 @@ impl Config {
             Some("system") => ThemeChoice::System,
             _ => ThemeChoice::Dark,
         }
+    }
+
+    /// `[ui].gpu` — the adapter preference; blank or absent = high performance.
+    pub fn ui_gpu(&self) -> GpuPreference {
+        GpuPreference::parse(self.ui.gpu.as_deref())
     }
 
     /// Tab-bar display order (`[ui].tabs`). Order-only semantics: listed modes
@@ -1492,6 +1501,7 @@ fn starter_template() -> String {
     t.push_str(&s("position", "cursor", "\"cursor\" = centered on the trigger point; \"remembered\" = where you last left it (panel_position is written for you; Settings always reopens where it was left, via settings_position)"));
     t.push_str(&r("zoom", "1.0", "UI scale 0.5-3.0; Cmd/Ctrl +/- change it at runtime and it is written back"));
     t.push_str(&s("theme", "dark", "\"dark\" | \"light\" | \"system\" (follow the OS appearance)"));
+    t.push_str(&s("gpu", "high-performance", "\"high-performance\" | \"low-power\" | text matched against adapter names (the \"wgpu adapter\" lines in the log list them)"));
     t.push('\n');
 
     // [languages] — substituted into {primary_lang} / {secondary_lang}.
@@ -2139,6 +2149,7 @@ X-Test = "1"
         assert!(t.contains("\napi_key  = \"\""));
         // Commented values are the ACTUAL built-in defaults (sampled).
         assert!(t.contains("max_tokens = 16384"));
+        assert!(t.contains("# gpu = \"high-performance\""));
         assert!(t.contains(DEFAULT_REPHRASE_STYLE_CORRECT));
         assert!(t.contains("The user message contains the clipboard content"));
     }
@@ -2328,6 +2339,15 @@ X-Test = "1"
         assert_eq!(l.ui_theme(), ThemeChoice::Light);
         let odd: Config = toml::from_str("[ui]\ntheme = \"sepia\"\n").unwrap();
         assert_eq!(odd.ui_theme(), ThemeChoice::Dark);
+    }
+
+    #[test]
+    fn ui_gpu_parses_keywords_and_names() {
+        assert_eq!(Config::default().ui_gpu(), GpuPreference::HighPerformance);
+        let c: Config = toml::from_str("[ui]\ngpu = \" Low-Power \"\n").unwrap();
+        assert_eq!(c.ui_gpu(), GpuPreference::LowPower);
+        let n: Config = toml::from_str("[ui]\ngpu = \"Intel\"\n").unwrap();
+        assert_eq!(n.ui_gpu(), GpuPreference::Name("Intel".into()));
     }
 
     #[test]

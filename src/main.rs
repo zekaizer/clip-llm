@@ -9,6 +9,7 @@ use tracing::{debug, error, info, warn};
 
 use clip_llm::api::client::build_profiles;
 use clip_llm::clipboard::ClipboardManager;
+use clip_llm::gpu::GpuPreference;
 use clip_llm::hotkey::TapEvent;
 use clip_llm::ui::OverlayApp;
 use clip_llm::worker::{spawn_worker, WorkerCommand, WorkerResponse};
@@ -56,54 +57,49 @@ fn configure_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// Select the best wgpu adapter: prefer hardware GPU, fall back to software (WARP on Windows).
+/// Select the wgpu adapter per `[ui].gpu` among those that can present to
+/// the overlay surface; the software adapter (WARP on Windows) is used only
+/// when no hardware GPU exists.
 fn select_wgpu_adapter(
     adapters: &[wgpu::Adapter],
-    _surface: Option<&wgpu::Surface<'_>>,
+    surface: Option<&wgpu::Surface<'_>>,
+    pref: &GpuPreference,
 ) -> Result<wgpu::Adapter, String> {
-    for (i, a) in adapters.iter().enumerate() {
-        let info = a.get_info();
+    let infos: Vec<wgpu::AdapterInfo> = adapters.iter().map(wgpu::Adapter::get_info).collect();
+    // An adapter that cannot present to the surface fails at configure time
+    // whatever the preference says, so it never enters the ranking.
+    let usable: Vec<usize> = (0..adapters.len())
+        .filter(|&i| surface.is_none_or(|s| adapters[i].is_surface_supported(s)))
+        .collect();
+    for (i, info) in infos.iter().enumerate() {
+        // Alpha modes as the backend reports them - DX12 on an HWND reports
+        // Opaque only yet composes alpha through DWM.
+        let alpha_modes = surface.map(|s| s.get_capabilities(&adapters[i]).alpha_modes);
         info!(
-            "wgpu adapter[{i}]: {} ({:?}, {:?})",
-            info.name, info.device_type, info.backend
+            "wgpu adapter[{i}]: {} ({:?}, {:?}) surface {}, alpha modes {:?}",
+            info.name,
+            info.device_type,
+            info.backend,
+            if usable.contains(&i) { "ok" } else { "unsupported" },
+            alpha_modes
         );
     }
 
-    let hw = adapters
-        .iter()
-        .find(|a| a.get_info().device_type == wgpu::DeviceType::DiscreteGpu)
-        .or_else(|| {
-            adapters
-                .iter()
-                .find(|a| a.get_info().device_type == wgpu::DeviceType::IntegratedGpu)
-        })
-        .or_else(|| {
-            adapters
-                .iter()
-                .find(|a| a.get_info().device_type != wgpu::DeviceType::Cpu)
-        });
-
-    let selected = if let Some(a) = hw {
-        a.clone()
-    } else {
-        let sw = adapters
-            .first()
-            .cloned()
-            .ok_or_else(|| "no wgpu adapter found".to_string())?;
-        let info = sw.get_info();
+    let usable_infos: Vec<wgpu::AdapterInfo> = usable.iter().map(|&i| infos[i].clone()).collect();
+    let index = usable[clip_llm::gpu::choose(&usable_infos, pref)
+        .ok_or_else(|| "no wgpu adapter can present to the overlay surface".to_string())?];
+    let info = &infos[index];
+    if info.device_type == wgpu::DeviceType::Cpu {
         warn!(
             "no hardware GPU — falling back to software adapter: {} ({:?})",
             info.name, info.backend
         );
-        sw
-    };
-
-    let info = selected.get_info();
+    }
     info!(
-        "wgpu selected: {} ({:?}, {:?})",
+        "wgpu selected: {} ({:?}, {:?}) for [ui].gpu = {pref:?}",
         info.name, info.device_type, info.backend
     );
-    Ok(selected)
+    Ok(adapters[index].clone())
 }
 
 /// Show a user-visible alert when the global hotkey cannot be registered — the
@@ -307,11 +303,16 @@ fn build_native_options() -> eframe::NativeOptions {
         .with_transparent(true)
         .with_taskbar(false);
 
+    let gpu = clip_llm::config::get().ui_gpu();
     eframe::NativeOptions {
         viewport,
         wgpu_options: egui_wgpu::WgpuConfiguration {
             wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew {
-                native_adapter_selector: Some(Arc::new(select_wgpu_adapter)),
+                native_adapter_selector: Some(Arc::new(
+                    move |adapters: &[wgpu::Adapter], surface: Option<&wgpu::Surface<'_>>| {
+                        select_wgpu_adapter(adapters, surface, &gpu)
+                    },
+                )),
                 ..Default::default()
             }),
             ..Default::default()

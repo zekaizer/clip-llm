@@ -99,6 +99,9 @@ double_tap_timeout_ms = 350     # single/double-tap detection window (lower = sn
 [ui]
 single_tap_pinned = false
 double_tap_pinned = false
+# GPU the overlay renders with: "high-performance" (default) | "low-power" |
+# text matched against adapter names (the "wgpu adapter" lines in the log list them).
+# gpu = "high-performance"
 # Tab-bar order; the first entry is the mode selected at startup. Reorders
 # only — modes left out are appended in built-in order, never hidden.
 # tabs = ["translate", "rephrase", "summarize", "explain", "transcribe"]
