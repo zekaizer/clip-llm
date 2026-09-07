@@ -138,7 +138,10 @@ file holds these kinds of settings:
   close; the first time it opens in the middle of the display). `zoom = 1.0`
   scales the whole UI (0.5–3.0); Cmd/Ctrl +/−/0 change it at runtime and the
   value is written back. `theme = "dark"` (default) | `"light"` | `"system"`
-  picks the palette (`system` follows the OS appearance).
+  picks the palette (`system` follows the OS appearance). `gpu =
+  "high-performance"` (default) | `"low-power"` | text matched against an
+  adapter name picks the GPU the overlay renders with (the `wgpu adapter`
+  lines in the log list the candidates).
 - **per-mode thinking** — `[translate|rephrase|summarize|explain|transcribe].thinking =
   "think" | "no_think"` overrides that mode's default thinking (built-ins:
   translate/rephrase/transcribe = `no_think`, summarize/explain = `think`); applies only

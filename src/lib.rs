@@ -6,6 +6,7 @@ pub mod clipboard;
 pub mod config;
 pub mod coordinator;
 pub mod files;
+pub mod gpu;
 pub use clipboard::ClipboardContent;
 #[cfg(feature = "diagnostics")]
 pub mod diagnostics;
