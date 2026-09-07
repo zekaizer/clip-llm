@@ -101,6 +101,7 @@ single_tap_pinned = false
 double_tap_pinned = false
 # GPU the overlay renders with: "high-performance" (default) | "low-power" |
 # text matched against adapter names (the "wgpu adapter" lines in the log list them).
+# Adapters that cannot compose alpha (black panel) are skipped while another can.
 # gpu = "high-performance"
 # Tab-bar order; the first entry is the mode selected at startup. Reorders
 # only — modes left out are appended in built-in order, never hidden.

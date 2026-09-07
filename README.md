@@ -141,7 +141,9 @@ file holds these kinds of settings:
   picks the palette (`system` follows the OS appearance). `gpu =
   "high-performance"` (default) | `"low-power"` | text matched against an
   adapter name picks the GPU the overlay renders with (the `wgpu adapter`
-  lines in the log list the candidates).
+  lines in the log list the candidates); an adapter whose surface cannot
+  compose alpha is skipped while another can, since it would draw the
+  overlay on a black panel.
 - **per-mode thinking** — `[translate|rephrase|summarize|explain|transcribe].thinking =
   "think" | "no_think"` overrides that mode's default thinking (built-ins:
   translate/rephrase/transcribe = `no_think`, summarize/explain = `think`); applies only

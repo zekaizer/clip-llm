@@ -6,7 +6,7 @@
 //! `main.rs` maps the live adapters through [`choose`].
 
 use tracing::warn;
-use wgpu::{AdapterInfo, Backend, DeviceType};
+use wgpu::{AdapterInfo, DeviceType};
 
 /// `[ui].gpu` — which adapter the overlay renders with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,16 +37,23 @@ impl GpuPreference {
 
 /// Index into `infos` of the adapter to use; `None` when `infos` is empty.
 ///
+/// `composes_alpha[i]` says whether adapter `i`'s surface offers a
+/// transparent composite-alpha mode (missing entries count as capable).
 /// Hardware GPUs rank above `Other`/virtual adapters, and software (`Cpu`)
-/// adapters come last so they are only ever a fallback; among equals the
-/// backend decides (see [`backend_rank`]). A name filter with no match falls
-/// back to the high-performance order with a warning.
-pub fn choose(infos: &[AdapterInfo], pref: &GpuPreference) -> Option<usize> {
+/// adapters come last so they are only ever a fallback; enumeration order
+/// breaks ties. A name filter with no match falls back to the
+/// high-performance order with a warning.
+pub fn choose(
+    infos: &[AdapterInfo],
+    composes_alpha: &[bool],
+    pref: &GpuPreference,
+) -> Option<usize> {
     if infos.is_empty() {
         return None;
     }
+    let alpha = |i: usize| composes_alpha.get(i).copied().unwrap_or(true);
     let all = || (0..infos.len()).collect::<Vec<usize>>();
-    let (rank, candidates): (fn(DeviceType) -> u8, Vec<usize>) = match pref {
+    let (rank, mut candidates): (fn(DeviceType) -> u8, Vec<usize>) = match pref {
         GpuPreference::HighPerformance => (discrete_first, all()),
         GpuPreference::LowPower => (integrated_first, all()),
         GpuPreference::Name(text) => {
@@ -62,24 +69,18 @@ pub fn choose(infos: &[AdapterInfo], pref: &GpuPreference) -> Option<usize> {
             }
         }
     };
+    // The overlay is transparent: an adapter whose surface cannot compose
+    // alpha renders it on a black panel, so such adapters are skipped while
+    // any candidate can.
+    if candidates.iter().any(|&i| alpha(i)) {
+        candidates.retain(|&i| alpha(i));
+    } else {
+        warn!("no candidate wgpu adapter composes alpha; the overlay background may render opaque");
+    }
     // `min_by_key` keeps the first of equal keys - enumeration order breaks ties.
     candidates
         .into_iter()
-        .min_by_key(|&i| (rank(infos[i].device_type), backend_rank(infos[i].backend)))
-}
-
-/// Tie-break among adapters of the same device type - a GPU is listed once
-/// per backend. DX12 leads on Windows because the transparent overlay only
-/// composes through it: DWM honors the alpha of a DXGI flip swapchain, while
-/// Vulkan swapchains there present opaque.
-fn backend_rank(backend: Backend) -> u8 {
-    match backend {
-        Backend::Dx12 => 0,
-        Backend::Metal => 1,
-        Backend::Vulkan => 2,
-        Backend::Gl => 3,
-        Backend::Noop | Backend::BrowserWebGpu => 4,
-    }
+        .min_by_key(|&i| rank(infos[i].device_type))
 }
 
 /// High-performance order; `Other` may be a real GPU behind an API without
@@ -105,6 +106,12 @@ fn integrated_first(device_type: DeviceType) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wgpu::Backend;
+
+    /// Every adapter composes alpha.
+    fn all(n: usize) -> Vec<bool> {
+        vec![true; n]
+    }
 
     fn info(name: &str, device_type: DeviceType, backend: Backend) -> AdapterInfo {
         AdapterInfo {
@@ -150,16 +157,22 @@ mod tests {
             info("dgpu", DeviceType::DiscreteGpu, Backend::Vulkan),
             info("warp", DeviceType::Cpu, Backend::Dx12),
         ];
-        assert_eq!(choose(&infos, &GpuPreference::HighPerformance), Some(1));
         assert_eq!(
-            choose(&infos[..1], &GpuPreference::HighPerformance),
+            choose(&infos, &all(infos.len()), &GpuPreference::HighPerformance),
+            Some(1)
+        );
+        assert_eq!(
+            choose(&infos[..1], &all(1), &GpuPreference::HighPerformance),
             Some(0)
         );
         let no_gpu = [
             info("warp", DeviceType::Cpu, Backend::Dx12),
             info("gl", DeviceType::Other, Backend::Gl),
         ];
-        assert_eq!(choose(&no_gpu, &GpuPreference::HighPerformance), Some(1));
+        assert_eq!(
+            choose(&no_gpu, &all(2), &GpuPreference::HighPerformance),
+            Some(1)
+        );
     }
 
     #[test]
@@ -168,12 +181,15 @@ mod tests {
             info("dgpu", DeviceType::DiscreteGpu, Backend::Vulkan),
             info("igpu", DeviceType::IntegratedGpu, Backend::Vulkan),
         ];
-        assert_eq!(choose(&infos, &GpuPreference::LowPower), Some(1));
+        assert_eq!(
+            choose(&infos, &all(infos.len()), &GpuPreference::LowPower),
+            Some(1)
+        );
         let no_igpu = [
             info("warp", DeviceType::Cpu, Backend::Dx12),
             info("dgpu", DeviceType::DiscreteGpu, Backend::Vulkan),
         ];
-        assert_eq!(choose(&no_igpu, &GpuPreference::LowPower), Some(1));
+        assert_eq!(choose(&no_igpu, &all(2), &GpuPreference::LowPower), Some(1));
     }
 
     #[test]
@@ -191,12 +207,27 @@ mod tests {
             ),
         ];
         assert_eq!(
-            choose(&infos, &GpuPreference::Name("intel".into())),
+            choose(
+                &infos,
+                &all(infos.len()),
+                &GpuPreference::Name("intel".into())
+            ),
             Some(1)
         );
-        assert_eq!(choose(&infos, &GpuPreference::Name("UHD".into())), Some(1));
         assert_eq!(
-            choose(&infos, &GpuPreference::Name("geforce".into())),
+            choose(
+                &infos,
+                &all(infos.len()),
+                &GpuPreference::Name("UHD".into())
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            choose(
+                &infos,
+                &all(infos.len()),
+                &GpuPreference::Name("geforce".into())
+            ),
             Some(0)
         );
     }
@@ -208,40 +239,64 @@ mod tests {
             info("dgpu", DeviceType::DiscreteGpu, Backend::Vulkan),
         ];
         assert_eq!(
-            choose(&infos, &GpuPreference::Name("radeon".into())),
+            choose(
+                &infos,
+                &all(infos.len()),
+                &GpuPreference::Name("radeon".into())
+            ),
             Some(1)
         );
     }
 
     #[test]
-    fn same_gpu_on_several_backends_prefers_dx12_then_metal_then_vulkan() {
-        // Windows lists a GPU under Vulkan first; the transparent overlay only
-        // composes correctly through DX12, so the backend breaks the tie.
+    fn opaque_only_adapters_are_skipped_when_another_composes_alpha() {
+        // Windows lists a GPU once per backend; NVIDIA's Vulkan surface is
+        // Opaque only while the DX12 DirectComposition surface composes alpha.
         let infos = [
             info("dgpu", DeviceType::DiscreteGpu, Backend::Vulkan),
             info("igpu", DeviceType::IntegratedGpu, Backend::Vulkan),
             info("dgpu", DeviceType::DiscreteGpu, Backend::Dx12),
             info("igpu", DeviceType::IntegratedGpu, Backend::Dx12),
-            info("dgpu", DeviceType::DiscreteGpu, Backend::Gl),
         ];
-        assert_eq!(choose(&infos, &GpuPreference::HighPerformance), Some(2));
-        assert_eq!(choose(&infos, &GpuPreference::LowPower), Some(3));
-        assert_eq!(choose(&infos, &GpuPreference::Name("igpu".into())), Some(3));
-        // The device preference still outranks the backend.
-        let dgpu_only_on_vulkan = [
-            info("igpu", DeviceType::IntegratedGpu, Backend::Dx12),
+        let alpha = [false, true, true, true];
+        assert_eq!(
+            choose(&infos, &alpha, &GpuPreference::HighPerformance),
+            Some(2)
+        );
+        assert_eq!(choose(&infos, &alpha, &GpuPreference::LowPower), Some(1));
+        assert_eq!(
+            choose(&infos, &alpha, &GpuPreference::Name("dgpu".into())),
+            Some(2)
+        );
+        // A black panel beats no panel only when nothing composes alpha:
+        // then enumeration order stands.
+        let none = [false, false, false, false];
+        assert_eq!(
+            choose(&infos, &none, &GpuPreference::HighPerformance),
+            Some(0)
+        );
+        // An explicit name is honored even when only its opaque adapter matches.
+        let only_dgpu_vulkan = [
             info("dgpu", DeviceType::DiscreteGpu, Backend::Vulkan),
+            info("igpu", DeviceType::IntegratedGpu, Backend::Vulkan),
         ];
         assert_eq!(
-            choose(&dgpu_only_on_vulkan, &GpuPreference::HighPerformance),
-            Some(1)
+            choose(
+                &only_dgpu_vulkan,
+                &[false, true],
+                &GpuPreference::Name("dgpu".into())
+            ),
+            Some(0)
         );
     }
 
     #[test]
     fn software_adapter_is_the_last_resort_only() {
         let only_cpu = [info("warp", DeviceType::Cpu, Backend::Dx12)];
-        assert_eq!(choose(&only_cpu, &GpuPreference::LowPower), Some(0));
-        assert_eq!(choose(&[], &GpuPreference::HighPerformance), None);
+        assert_eq!(
+            choose(&only_cpu, &all(1), &GpuPreference::LowPower),
+            Some(0)
+        );
+        assert_eq!(choose(&[], &[], &GpuPreference::HighPerformance), None);
     }
 }
