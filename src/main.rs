@@ -57,23 +57,37 @@ fn configure_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// Select the wgpu adapter per `[ui].gpu`; the software adapter (WARP on
-/// Windows) is used only when no hardware GPU exists.
+/// Select the wgpu adapter per `[ui].gpu` among those that can present to
+/// the overlay surface; the software adapter (WARP on Windows) is used only
+/// when no hardware GPU exists.
 fn select_wgpu_adapter(
     adapters: &[wgpu::Adapter],
-    _surface: Option<&wgpu::Surface<'_>>,
+    surface: Option<&wgpu::Surface<'_>>,
     pref: &GpuPreference,
 ) -> Result<wgpu::Adapter, String> {
     let infos: Vec<wgpu::AdapterInfo> = adapters.iter().map(wgpu::Adapter::get_info).collect();
+    // An adapter that cannot present to the surface fails at configure time
+    // whatever the preference says, so it never enters the ranking.
+    let usable: Vec<usize> = (0..adapters.len())
+        .filter(|&i| surface.is_none_or(|s| adapters[i].is_surface_supported(s)))
+        .collect();
     for (i, info) in infos.iter().enumerate() {
+        // Alpha modes as the backend reports them - DX12 on an HWND reports
+        // Opaque only yet composes alpha through DWM.
+        let alpha_modes = surface.map(|s| s.get_capabilities(&adapters[i]).alpha_modes);
         info!(
-            "wgpu adapter[{i}]: {} ({:?}, {:?})",
-            info.name, info.device_type, info.backend
+            "wgpu adapter[{i}]: {} ({:?}, {:?}) surface {}, alpha modes {:?}",
+            info.name,
+            info.device_type,
+            info.backend,
+            if usable.contains(&i) { "ok" } else { "unsupported" },
+            alpha_modes
         );
     }
 
-    let index = clip_llm::gpu::choose(&infos, pref)
-        .ok_or_else(|| "no wgpu adapter found".to_string())?;
+    let usable_infos: Vec<wgpu::AdapterInfo> = usable.iter().map(|&i| infos[i].clone()).collect();
+    let index = usable[clip_llm::gpu::choose(&usable_infos, pref)
+        .ok_or_else(|| "no wgpu adapter can present to the overlay surface".to_string())?];
     let info = &infos[index];
     if info.device_type == wgpu::DeviceType::Cpu {
         warn!(
