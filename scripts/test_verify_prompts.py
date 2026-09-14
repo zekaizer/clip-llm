@@ -274,6 +274,19 @@ class LangDirectionVectors(unittest.TestCase):
         other = vp.build_system({"mode": "translate", "input": "배포"}, {"languages": {"primary": "Japanese"}}, defaults)
         self.assertIn("Determine the input language", other)
 
+    def test_build_system_states_a_korean_rephrase_input(self):
+        defaults = vp.load_defaults()
+        case = {"mode": "rephrase", "style": "correct", "length": "same"}
+        ko = vp.build_system({**case, "input": "배포 완료했습니다."}, {}, defaults)
+        self.assertIn("The input is written in Korean. Write the output in Korean", ko)
+        self.assertIn("never translate it into English", ko)
+        self.assertNotIn("Auto-detect", ko)
+        en = vp.build_system({**case, "input": "Deploy it."}, {}, defaults)
+        self.assertIn("Auto-detect the input language", en)
+        self.assertEqual(en, vp.build_system(case, {}, defaults))
+        custom = vp.build_system({**case, "input": "배포"}, {"rephrase": {"base": "B {style}"}, "prompt": {"preamble": ""}}, defaults)
+        self.assertEqual(custom, "B " + defaults["style"]["correct"])
+
     def test_build_system_uses_the_dictionary_prompt_for_lookups(self):
         defaults = vp.load_defaults()
         en = vp.build_system({"mode": "translate", "input": "throughput"}, {}, defaults)

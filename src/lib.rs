@@ -455,8 +455,9 @@ impl ProcessMode {
     ///
     /// Medium-agnostic: each mode's prompt handles text, image(s), or both, so the
     /// caller no longer distinguishes image-only input here. `text` is the
-    /// input's text, from which Translate decides its direction (ADR-0002);
-    /// without it the prompt keeps the model-side rule.
+    /// input's text, from which Translate decides its direction (ADR-0002)
+    /// and Rephrase states a Korean input's language; without it both prompts
+    /// keep the model-side rule.
     pub fn system_prompt_for(self, params: RephraseParams, text: Option<&str>) -> String {
         let config = crate::config::get();
         let primary = config.primary_lang();
@@ -466,7 +467,9 @@ impl ProcessMode {
                 config.dictionary_prompt_for(config.translation_direction(text))
             }
             Self::Translate => config.translate_prompt_for(config.translation_direction(text)),
-            Self::Rephrase => config.rephrase_prompt(params.style, params.length),
+            Self::Rephrase => {
+                config.rephrase_prompt(params.style, params.length, config.translation_direction(text))
+            }
             Self::Summarize => {
                 crate::config::substitute(config.summarize_prompt(), primary, secondary)
             }
@@ -486,8 +489,8 @@ impl ProcessMode {
         }
     }
 
-    /// The system prompt without an input to decide the translation direction
-    /// from: Translate keeps the model-side rule.
+    /// The system prompt without an input to decide the language from:
+    /// Translate and Rephrase keep the model-side rule.
     pub fn system_prompt(self, params: RephraseParams) -> String {
         self.system_prompt_for(params, None)
     }

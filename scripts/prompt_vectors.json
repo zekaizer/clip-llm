@@ -699,6 +699,43 @@
     }
   },
   {
+    "id": "R-012",
+    "mode": "rephrase",
+    "input": "이 함수는 리턴값을 체크 안해서 에러가 무시되고있음.",
+    "rationale": "Short Korean sentence under the default style/length — the correction must stay Korean (gemma-4-e2b rewrote it in English 5/5 under the auto-detect rule).",
+    "style": "correct",
+    "length": "same",
+    "checks": {
+      "output_lang": "ko",
+      "must_not_contain": [
+        "I cannot",
+        "As an AI",
+        "죄송"
+      ]
+    }
+  },
+  {
+    "id": "R-013",
+    "mode": "rephrase",
+    "input": "PR #412에서 WorkerCommand::SelectModel 처리 시 ModelPool의 capability probe가 re-run 되지않고 stale한 vision flag를 그대로 씀. fallback path에서 reqwest timeout도 안걸려있음.",
+    "rationale": "Korean prose dense with English identifiers and terms — the correction must stay Korean and keep the identifiers (gemma-4-e2b rewrote it in English 5/5 under the auto-detect rule).",
+    "style": "correct",
+    "length": "same",
+    "checks": {
+      "output_lang": "ko",
+      "must_preserve": [
+        "WorkerCommand::SelectModel",
+        "ModelPool",
+        "reqwest"
+      ],
+      "must_not_contain": [
+        "I cannot",
+        "As an AI",
+        "죄송"
+      ]
+    }
+  },
+  {
     "id": "S-001",
     "mode": "summarize",
     "input": "Redis is an in-memory data structure store used as a database, cache, and message broker.",

@@ -130,6 +130,8 @@ def load_defaults(path: Path = CONFIG_RS) -> dict:
         "explain": rust_str_const(src, "DEFAULT_EXPLAIN_PROMPT"),
         "transcribe": rust_str_const(src, "DEFAULT_TRANSCRIBE_PROMPT"),
         "rephrase_base": rust_str_const(src, "DEFAULT_REPHRASE_BASE"),
+        "rephrase_language_primary": rust_str_const(src, "DEFAULT_REPHRASE_LANGUAGE_PRIMARY"),
+        "rephrase_language_detect": rust_str_const(src, "DEFAULT_REPHRASE_LANGUAGE_DETECT"),
         "style": {s: rust_str_const(src, "DEFAULT_REPHRASE_STYLE_" + s.upper()) for s in styles},
         "length": {l: rust_str_const(src, "DEFAULT_REPHRASE_LENGTH_" + l.upper()) for l in lengths},
     }
@@ -164,7 +166,8 @@ def collapse_spaces(s: str) -> str:
 def build_system(case: dict, cfg: dict, defaults: dict) -> str:
     """The system prompt the app sends for ``case`` under ``cfg`` (a parsed
     config.toml): preamble + mode prompt, overrides applied, languages substituted,
-    the Translate direction decided from the case input like ``lang.rs`` does."""
+    the Translate direction and the Rephrase language decided from the case
+    input like ``lang.rs`` does."""
     langs = cfg.get("languages", {})
     primary = langs.get("primary", "Korean")
     secondary = langs.get("secondary", "English")
@@ -191,7 +194,13 @@ def build_system(case: dict, cfg: dict, defaults: dict) -> str:
         length_text = rc.get("length", {}).get(length)
         if length_text is None:
             length_text = defaults["length"][length]
-        body = collapse_spaces(substitute_tokens(base, [("{style}", style_text), ("{length}", length_text)]))
+        if translation_direction(case.get("input"), primary) == "to_secondary":
+            language = substitute_tokens(defaults["rephrase_language_primary"], lang_vars)
+        else:
+            language = defaults["rephrase_language_detect"]
+        body = collapse_spaces(substitute_tokens(
+            base, [("{style}", style_text), ("{length}", length_text), ("{language}", language)]
+        ))
     else:
         raise ValueError(f"unknown mode {mode}")
     preamble = cfg.get("prompt", {}).get("preamble")

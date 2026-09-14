@@ -11,7 +11,8 @@
 # Placeholders (substituted at runtime):
 #   {primary_lang}, {secondary_lang}  -> in [translate]
 #   {primary_lang}                    -> in [summarize] and [explain] (both output primary-language only)
-#   {style}, {length}                 -> only in [rephrase].base
+#   {style}, {length}, {language}     -> only in [rephrase].base ({language}: a sentence stating a
+#                                        Korean input's language, else asking the model to detect it)
 # Any other {token} is passed through to the model unchanged.
 
 # Connection settings. Each mirrors a CLIP_LLM_* environment variable; when both
