@@ -152,7 +152,9 @@ file holds these kinds of settings:
   - `{primary_lang}` / `{secondary_lang}` — in the `[translate]` prompt
   - `{primary_lang}` — in the `[summarize]` and `[explain]` prompts (both are primary-language only)
   - none in `[transcribe]` — it transcribes, so the output language is whatever the image shows
-  - `{style}` / `{length}` — only in `[rephrase].base`
+  - `{style}` / `{length}` / `{language}` — only in `[rephrase].base`; `{language}` states
+    a Korean input's language (detected like the Translate direction), otherwise asks the
+    model to keep the input language
 
 See [config.example.toml](config.example.toml) for the full schema and examples.
 
