@@ -388,7 +388,7 @@ dependencies = [
 
 [[package]]
 name = "clip-llm"
-version = "0.21.3"
+version = "0.22.0"
 dependencies = [
  "arboard",
  "base64",
