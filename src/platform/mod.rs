@@ -10,6 +10,14 @@ pub trait Platform {
     /// ignores it — `SendInput` cannot target a process.
     fn simulate_copy(&self, target: Option<i32>) -> Result<(), crate::PlatformError>;
 
+    /// Whether [`Platform::simulate_copy`] cannot reach the foreground window
+    /// because its process runs at a higher integrity level than this one.
+    /// Windows only: UIPI drops the input while `SendInput` still reports
+    /// success. `false` when either level cannot be determined.
+    fn copy_target_elevated(&self) -> bool {
+        false
+    }
+
     /// Process id of the frontmost application, recorded at capture-trigger
     /// time and later passed to [`Platform::simulate_copy`]. Returns `None`
     /// on platforms without per-process key-event posting (Windows).

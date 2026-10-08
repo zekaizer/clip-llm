@@ -2134,6 +2134,10 @@ fn friendly_clipboard_error(e: &crate::ClipboardError) -> String {
             "Could not capture selected text. Try selecting it again and double-tapping.".to_string()
         }
         EmptyCopy => "The selection contains no usable text or image.".to_string(),
+        ElevatedTarget => {
+            "This window runs as administrator, so its selection can't be captured. Copy it yourself, then single-tap."
+                .to_string()
+        }
         // A cancelled/superseded capture is gated out before display; this arm
         // exists only for exhaustiveness.
         Cancelled => "Capture cancelled.".to_string(),
@@ -2855,6 +2859,12 @@ mod tests {
         assert_eq!(friendly_clipboard_error(&e), "big.log is too large to send (limit 1 MiB).");
         let e = crate::ClipboardError::FileReadFailed { name: "x.txt".into(), reason: "eperm".into() };
         assert_eq!(friendly_clipboard_error(&e), "Could not read x.txt.");
+    }
+
+    #[test]
+    fn friendly_elevated_target_error_names_the_cause_and_the_way_out() {
+        let msg = friendly_clipboard_error(&crate::ClipboardError::ElevatedTarget);
+        assert!(msg.contains("administrator") && msg.contains("single-tap"), "{msg}");
     }
 
     // --- format_retry_label: Processing label during an automatic retry ---

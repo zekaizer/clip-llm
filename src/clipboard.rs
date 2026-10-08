@@ -293,6 +293,10 @@ impl ClipboardManager {
                 }
             }
         }
+        if platform.copy_target_elevated() {
+            warn!("foreground window runs elevated; copy not sent");
+            return Err(ClipboardError::ElevatedTarget);
+        }
         let baseline = platform.clipboard_change_count();
         platform.simulate_copy(target)?;
 
@@ -427,16 +431,26 @@ mod tests {
         copy_text: Option<String>,
         /// A second write this long after the first, as multi-step sources do.
         second_write: Option<(Duration, String)>,
+        elevated: bool,
+        /// Number of simulate_copy calls.
+        copies: std::sync::atomic::AtomicUsize,
     }
 
     impl Default for MockPlatform {
         fn default() -> Self {
-            Self { copy_result: Ok(()), copy_text: None, second_write: None }
+            Self {
+                copy_result: Ok(()),
+                copy_text: None,
+                second_write: None,
+                elevated: false,
+                copies: std::sync::atomic::AtomicUsize::new(0),
+            }
         }
     }
 
     impl Platform for MockPlatform {
         fn simulate_copy(&self, _target: Option<i32>) -> Result<(), PlatformError> {
+            self.copies.fetch_add(1, Ordering::SeqCst);
             self.copy_result
                 .as_ref()
                 .map_err(|e| PlatformError::CopyFailed(e.to_string()))?;
@@ -457,6 +471,10 @@ mod tests {
         // the real platform counter to observe those writes.
         fn clipboard_change_count(&self) -> u64 {
             crate::platform::NativePlatform.clipboard_change_count()
+        }
+
+        fn copy_target_elevated(&self) -> bool {
+            self.elevated
         }
 
         fn frontmost_app_pid(&self) -> Option<i32> {
@@ -904,6 +922,23 @@ mod tests {
         };
         let content = mgr.copy_and_read(&mock, &AtomicBool::new(false), None).unwrap();
         assert_eq!(content.text.as_deref(), Some("second write"));
+    }
+
+    #[test]
+    fn copy_and_read_refuses_an_elevated_target_without_sending_the_copy() {
+        let _lock = lock_clipboard();
+        let mut mgr = ClipboardManager::new().unwrap();
+        let mock = MockPlatform {
+            copy_text: Some("would be copied".into()),
+            elevated: true,
+            ..MockPlatform::default()
+        };
+
+        mgr.write_text("precious content").unwrap();
+        let result = mgr.copy_and_read(&mock, &AtomicBool::new(false), None);
+        assert!(matches!(result, Err(ClipboardError::ElevatedTarget)), "{result:?}");
+        assert_eq!(mock.copies.load(Ordering::SeqCst), 0);
+        assert_eq!(mgr.read_clipboard().unwrap(), "precious content");
     }
 
     // -- copy_and_read modifier-wait integration tests --

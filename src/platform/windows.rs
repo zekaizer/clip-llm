@@ -211,6 +211,18 @@ impl Platform for WindowsPlatform {
         Ok(())
     }
 
+    fn copy_target_elevated(&self) -> bool {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetForegroundWindow, GetWindowThreadProcessId,
+        };
+        let mut pid = 0u32;
+        let hwnd = unsafe { GetForegroundWindow() };
+        if hwnd.is_null() || unsafe { GetWindowThreadProcessId(hwnd, &mut pid) } == 0 {
+            return false;
+        }
+        input_blocked(integrity_rid(pid), integrity_rid(std::process::id()))
+    }
+
     /// No per-process key injection on Windows; see `simulate_copy`.
     fn frontmost_app_pid(&self) -> Option<i32> {
         None
@@ -343,6 +355,55 @@ impl Platform for WindowsPlatform {
     fn set_launch_at_login(&self, enabled: bool) -> Result<(), PlatformError> {
         set_launch_at_login(enabled)
     }
+}
+
+/// Integrity level of a process (`SECURITY_MANDATORY_*_RID`), `None` when
+/// the process or its token cannot be queried.
+fn integrity_rid(pid: u32) -> Option<u32> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Security::{
+        GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
+        TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return None;
+        }
+        let mut token = std::ptr::null_mut();
+        let opened = OpenProcessToken(process, TOKEN_QUERY, &mut token);
+        CloseHandle(process);
+        if opened == 0 {
+            return None;
+        }
+
+        let mut needed = 0u32;
+        GetTokenInformation(token, TokenIntegrityLevel, std::ptr::null_mut(), 0, &mut needed);
+        // u64 storage - TOKEN_MANDATORY_LABEL holds a pointer and needs its alignment.
+        let mut buf = vec![0u64; (needed as usize).div_ceil(8)];
+        let mut rid = None;
+        if needed > 0
+            && GetTokenInformation(token, TokenIntegrityLevel, buf.as_mut_ptr().cast(), needed, &mut needed) != 0
+        {
+            let sid = (*buf.as_ptr().cast::<TOKEN_MANDATORY_LABEL>()).Label.Sid;
+            let count = *GetSidSubAuthorityCount(sid);
+            if count > 0 {
+                rid = Some(*GetSidSubAuthority(sid, u32::from(count) - 1));
+            }
+        }
+        CloseHandle(token);
+        rid
+    }
+}
+
+/// UIPI drops input sent to a higher integrity level. An unknown level is
+/// not treated as blocked - the copy is attempted and times out as before.
+fn input_blocked(target: Option<u32>, own: Option<u32>) -> bool {
+    matches!((target, own), (Some(target), Some(own)) if target > own)
 }
 
 /// Cached handle to the clip-llm overlay window, stored as a pointer-sized
@@ -775,7 +836,25 @@ fn make_key_input(vk: u16, flags: u32) -> INPUT {
 
 #[cfg(test)]
 mod tests {
-    use super::to_wide_null;
+    use super::{input_blocked, integrity_rid, to_wide_null};
+
+    const MEDIUM: u32 = 0x2000;
+    const HIGH: u32 = 0x3000;
+
+    #[test]
+    fn input_is_blocked_only_toward_a_higher_integrity_level() {
+        assert!(input_blocked(Some(HIGH), Some(MEDIUM)));
+        assert!(!input_blocked(Some(MEDIUM), Some(MEDIUM)));
+        assert!(!input_blocked(Some(MEDIUM), Some(HIGH)));
+        assert!(!input_blocked(None, Some(MEDIUM)));
+        assert!(!input_blocked(Some(HIGH), None));
+    }
+
+    #[test]
+    fn integrity_rid_reads_the_current_process() {
+        let rid = integrity_rid(std::process::id()).expect("own token is always readable");
+        assert!((0x1000..=0x4000).contains(&rid), "rid = {rid:#x}");
+    }
 
     #[test]
     fn to_wide_null_appends_terminator() {
