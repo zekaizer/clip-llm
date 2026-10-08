@@ -264,6 +264,8 @@ impl ClipboardManager {
     /// Simulate copy via platform, then poll the clipboard change counter
     /// until the copy lands and settles. The clipboard is never cleared, so a failed
     /// capture leaves the user's existing content untouched (#48, #57).
+    /// When no usable copy arrives, the platform's own selection read
+    /// ([`Platform::selected_text`]) is used instead, as text only.
     /// `target` is the frontmost-app pid recorded at trigger time, keeping the
     /// simulated copy aimed at the source app even if focus moved since (#55).
     /// Returns both text and images captured by the copy simulation.
@@ -300,6 +302,30 @@ impl ClipboardManager {
         let baseline = platform.clipboard_change_count();
         platform.simulate_copy(target)?;
 
+        match self.await_copy(platform, cancel, baseline) {
+            // Some controls hold a selection the copy never delivers.
+            Err(e @ (ClipboardError::NoTextAfterCopy | ClipboardError::EmptyCopy)) => {
+                match platform.selected_text().filter(|t| !t.trim().is_empty()) {
+                    Some(text) => {
+                        info!("selection read without the clipboard ({} chars) after: {e}", text.len());
+                        Ok(ClipboardContent::text_only(text))
+                    }
+                    None => Err(e),
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// Poll the change counter from `baseline` until a copy lands and settles,
+    /// then read it. `NoTextAfterCopy` when nothing lands before the deadline,
+    /// `EmptyCopy` when what landed holds no usable text or image.
+    fn await_copy(
+        &mut self,
+        platform: &dyn Platform,
+        cancel: &AtomicBool,
+        baseline: u64,
+    ) -> Result<ClipboardContent, ClipboardError> {
         let start = Instant::now();
         let mut watch = CopyWatch::new(baseline, start);
         loop {
@@ -437,6 +463,7 @@ mod tests {
         second_write: Option<(Duration, String)>,
         elevated: bool,
         line_copy: bool,
+        selected_text: Option<String>,
         /// Number of simulate_copy calls.
         copies: std::sync::atomic::AtomicUsize,
     }
@@ -449,6 +476,7 @@ mod tests {
                 second_write: None,
                 elevated: false,
                 line_copy: false,
+                selected_text: None,
                 copies: std::sync::atomic::AtomicUsize::new(0),
             }
         }
@@ -485,6 +513,10 @@ mod tests {
 
         fn clipboard_is_line_copy(&self) -> bool {
             self.line_copy
+        }
+
+        fn selected_text(&self) -> Option<String> {
+            self.selected_text.clone()
         }
 
         fn frontmost_app_pid(&self) -> Option<i32> {
@@ -963,6 +995,65 @@ mod tests {
 
         let result = mgr.copy_and_read(&mock, &AtomicBool::new(false), None);
         assert!(matches!(result, Err(ClipboardError::NothingSelected)), "{result:?}");
+    }
+
+    // -- copy_and_read: selection read without the clipboard --
+
+    #[test]
+    fn copy_and_read_falls_back_to_the_platform_selection_when_no_copy_lands() {
+        let _lock = lock_clipboard();
+        let mut mgr = ClipboardManager::new().unwrap();
+        let mock = MockPlatform {
+            selected_text: Some("selection the copy missed".into()),
+            ..MockPlatform::default()
+        };
+
+        mgr.write_text("precious content").unwrap();
+        let content = mgr.copy_and_read(&mock, &AtomicBool::new(false), None).unwrap();
+        assert_eq!(content.text.as_deref(), Some("selection the copy missed"));
+        assert!(content.images.is_empty() && content.files.is_empty());
+        assert_eq!(mgr.read_clipboard().unwrap(), "precious content");
+    }
+
+    #[test]
+    fn copy_and_read_falls_back_when_the_copy_is_blank() {
+        let _lock = lock_clipboard();
+        let mut mgr = ClipboardManager::new().unwrap();
+        let mock = MockPlatform {
+            copy_text: Some("  \n ".into()),
+            selected_text: Some("real selection".into()),
+            ..MockPlatform::default()
+        };
+
+        let content = mgr.copy_and_read(&mock, &AtomicBool::new(false), None).unwrap();
+        assert_eq!(content.text.as_deref(), Some("real selection"));
+    }
+
+    #[test]
+    fn copy_and_read_prefers_the_landed_copy_over_the_platform_selection() {
+        let _lock = lock_clipboard();
+        let mut mgr = ClipboardManager::new().unwrap();
+        let mock = MockPlatform {
+            copy_text: Some("copied text".into()),
+            selected_text: Some("automation text".into()),
+            ..MockPlatform::default()
+        };
+
+        let content = mgr.copy_and_read(&mock, &AtomicBool::new(false), None).unwrap();
+        assert_eq!(content.text.as_deref(), Some("copied text"));
+    }
+
+    #[test]
+    fn copy_and_read_ignores_a_blank_platform_selection() {
+        let _lock = lock_clipboard();
+        let mut mgr = ClipboardManager::new().unwrap();
+        let mock = MockPlatform {
+            selected_text: Some(" \n".into()),
+            ..MockPlatform::default()
+        };
+
+        let result = mgr.copy_and_read(&mock, &AtomicBool::new(false), None);
+        assert!(matches!(result, Err(ClipboardError::NoTextAfterCopy)), "{result:?}");
     }
 
     // -- copy_and_read modifier-wait integration tests --

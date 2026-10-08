@@ -25,6 +25,14 @@ pub trait Platform {
         false
     }
 
+    /// The focused control's selected text, read without the clipboard
+    /// (Windows: UI Automation, ADR-0003). `None` when the control does not
+    /// expose a selection. Blocking and bounded - call off the UI thread.
+    /// An empty selection is not evidence that nothing is selected.
+    fn selected_text(&self) -> Option<String> {
+        None
+    }
+
     /// Process id of the frontmost application, recorded at capture-trigger
     /// time and later passed to [`Platform::simulate_copy`]. Returns `None`
     /// on platforms without per-process key-event posting (Windows).
@@ -120,6 +128,8 @@ pub(crate) mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::MacOsPlatform as NativePlatform;
 
+#[cfg(target_os = "windows")]
+mod uia;
 #[cfg(target_os = "windows")]
 pub(crate) mod windows;
 #[cfg(target_os = "windows")]

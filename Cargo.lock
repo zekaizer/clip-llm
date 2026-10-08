@@ -414,6 +414,7 @@ dependencies = [
  "tray-icon",
  "wgpu",
  "wgpu-types",
+ "windows",
  "windows-sys 0.61.2",
  "winit",
  "winresource",

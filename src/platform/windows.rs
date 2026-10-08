@@ -211,6 +211,10 @@ impl Platform for WindowsPlatform {
         Ok(())
     }
 
+    fn selected_text(&self) -> Option<String> {
+        super::uia::selected_text()
+    }
+
     fn clipboard_is_line_copy(&self) -> bool {
         use clipboard_win::{is_format_avail, raw, register_format, Clipboard};
 
