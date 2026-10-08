@@ -170,9 +170,10 @@ struct CopyWatch {
     deadline: Instant,
     /// When the counter last moved; `None` until a copy lands.
     changed_at: Option<Instant>,
-    /// When `Read` was last returned for the current counter value.
+    /// When the last read for the current counter value was asked for, or
+    /// ended once `read_finished` reported it.
     read_at: Option<Instant>,
-    /// The one read allowed at the deadline has been issued.
+    /// The read at the deadline has been issued.
     final_read: bool,
 }
 
@@ -192,6 +193,13 @@ impl CopyWatch {
         self.changed_at.is_some()
     }
 
+    /// Report when the read asked for by `Read` came back empty, so retries
+    /// are spaced from its end and a read that ran past the deadline is not
+    /// repeated.
+    fn read_finished(&mut self, now: Instant) {
+        self.read_at = Some(now);
+    }
+
     fn poll(&mut self, count: u64, now: Instant) -> WatchStep {
         if count != self.last_count {
             self.last_count = count;
@@ -199,8 +207,11 @@ impl CopyWatch {
             self.read_at = None;
         }
         if now >= self.deadline {
-            // Bounded: a counter that keeps moving gets one read, not a loop.
-            if self.changed_at.is_some() && self.read_at.is_none() && !self.final_read {
+            // One last read for a landed copy, unless the previous read itself
+            // ran past the deadline. Only one: a counter that keeps moving
+            // cannot extend the wait.
+            let read_before_deadline = self.read_at.is_none_or(|at| at < self.deadline);
+            if self.changed_at.is_some() && read_before_deadline && !self.final_read {
                 self.final_read = true;
                 self.read_at = Some(now);
                 return WatchStep::Read;
@@ -361,6 +372,7 @@ impl ClipboardManager {
                         );
                         return Ok(content);
                     }
+                    watch.read_finished(Instant::now());
                 }
                 WatchStep::TimedOut => {
                     let elapsed = start.elapsed().as_millis();
@@ -952,6 +964,43 @@ mod tests {
             watch.poll(9, t0 + Duration::from_millis(CLIPBOARD_POLL_TIMEOUT_MS + 30)),
             WatchStep::TimedOut
         );
+    }
+
+    #[test]
+    fn copy_watch_gives_a_copy_that_stayed_empty_a_last_read_at_the_deadline() {
+        let t0 = Instant::now();
+        let mut watch = CopyWatch::new(7, t0);
+        let (reads, last) = drive(&mut watch, t0, 8, 10, CLIPBOARD_POLL_TIMEOUT_MS + 20);
+        assert_eq!(reads.last(), Some(&CLIPBOARD_POLL_TIMEOUT_MS), "{reads:?}");
+        assert_eq!(last, WatchStep::TimedOut);
+    }
+
+    #[test]
+    fn copy_watch_spaces_retries_from_the_end_of_a_slow_read() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut watch = CopyWatch::new(7, t0);
+        assert_eq!(watch.poll(8, at(10)), WatchStep::Wait);
+        assert_eq!(watch.poll(8, at(10 + CLIPBOARD_SETTLE_MS)), WatchStep::Read);
+        // The read took 30 ms; the retry interval starts when it ended.
+        let ended = 10 + CLIPBOARD_SETTLE_MS + 30;
+        watch.read_finished(at(ended));
+        assert_eq!(watch.poll(8, at(ended + CLIPBOARD_EMPTY_RETRY_MS - 2)), WatchStep::Wait);
+        assert_eq!(watch.poll(8, at(ended + CLIPBOARD_EMPTY_RETRY_MS)), WatchStep::Read);
+    }
+
+    #[test]
+    fn copy_watch_does_not_repeat_a_read_that_ran_past_the_deadline() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut watch = CopyWatch::new(7, t0);
+        assert_eq!(watch.poll(8, at(10)), WatchStep::Wait);
+        assert_eq!(watch.poll(8, at(10 + CLIPBOARD_SETTLE_MS)), WatchStep::Read);
+        // Fetching a rich copy's images can outlast the whole wait.
+        let ended = CLIPBOARD_POLL_TIMEOUT_MS + 100;
+        watch.read_finished(at(ended));
+        assert_eq!(watch.poll(8, at(ended + 2)), WatchStep::TimedOut);
+        assert!(watch.landed());
     }
 
     #[test]
