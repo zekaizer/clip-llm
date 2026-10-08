@@ -14,7 +14,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
 use super::Platform;
 use crate::PlatformError;
 
-/// Delay between key events (ms).
+/// Delay after the injected paste chord (ms).
 const KEY_EVENT_DELAY_MS: u64 = 50;
 /// Delay for OS focus transfer after SW_HIDE (ms).
 const FOCUS_TRANSFER_DELAY_MS: u64 = 100;
@@ -208,7 +208,6 @@ impl Platform for WindowsPlatform {
             )));
         }
 
-        thread::sleep(Duration::from_millis(KEY_EVENT_DELAY_MS));
         Ok(())
     }
 
