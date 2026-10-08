@@ -341,6 +341,7 @@ impl ClipboardManager {
             match watch.poll(platform.clipboard_change_count(), Instant::now()) {
                 WatchStep::Wait => {}
                 WatchStep::Read => {
+                    debug!("reading the copy at {}ms", start.elapsed().as_millis());
                     if platform.clipboard_is_line_copy() {
                         warn!("copy holds the caret line, not a selection");
                         return Err(ClipboardError::NothingSelected);
