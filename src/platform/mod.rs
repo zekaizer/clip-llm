@@ -18,6 +18,13 @@ pub trait Platform {
         false
     }
 
+    /// Whether the clipboard holds an editor's no-selection fallback: the
+    /// caret line, copied because nothing was selected. Read from markers the
+    /// editor leaves next to the text (Windows only); `false` when unknown.
+    fn clipboard_is_line_copy(&self) -> bool {
+        false
+    }
+
     /// Process id of the frontmost application, recorded at capture-trigger
     /// time and later passed to [`Platform::simulate_copy`]. Returns `None`
     /// on platforms without per-process key-event posting (Windows).

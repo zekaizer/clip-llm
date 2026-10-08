@@ -572,6 +572,11 @@ pub enum ClipboardError {
     #[error("copy delivered no usable content")]
     EmptyCopy,
 
+    /// The copy landed, but the source marked it as its no-selection
+    /// fallback (an editor copying the caret line).
+    #[error("nothing was selected; the editor copied the current line")]
+    NothingSelected,
+
     /// The foreground window runs at a higher integrity level than this
     /// process, so an injected copy cannot reach it (Windows UIPI).
     #[error("copy target runs elevated; injected input cannot reach it")]

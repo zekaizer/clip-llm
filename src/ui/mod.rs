@@ -2134,6 +2134,7 @@ fn friendly_clipboard_error(e: &crate::ClipboardError) -> String {
             "Could not capture selected text. Try selecting it again and double-tapping.".to_string()
         }
         EmptyCopy => "The selection contains no usable text or image.".to_string(),
+        NothingSelected => "Nothing is selected. Select some text, then double-tap.".to_string(),
         ElevatedTarget => {
             "This window runs as administrator, so its selection can't be captured. Copy it yourself, then single-tap."
                 .to_string()
@@ -2859,6 +2860,12 @@ mod tests {
         assert_eq!(friendly_clipboard_error(&e), "big.log is too large to send (limit 1 MiB).");
         let e = crate::ClipboardError::FileReadFailed { name: "x.txt".into(), reason: "eperm".into() };
         assert_eq!(friendly_clipboard_error(&e), "Could not read x.txt.");
+    }
+
+    #[test]
+    fn friendly_nothing_selected_error_asks_for_a_selection() {
+        let msg = friendly_clipboard_error(&crate::ClipboardError::NothingSelected);
+        assert!(msg.starts_with("Nothing is selected"), "{msg}");
     }
 
     #[test]

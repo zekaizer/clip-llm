@@ -315,6 +315,10 @@ impl ClipboardManager {
             match watch.poll(platform.clipboard_change_count(), Instant::now()) {
                 WatchStep::Wait => {}
                 WatchStep::Read => {
+                    if platform.clipboard_is_line_copy() {
+                        warn!("copy holds the caret line, not a selection");
+                        return Err(ClipboardError::NothingSelected);
+                    }
                     // Files first — see read_content.
                     if let Some(paths) = self.file_list() {
                         return crate::files::ingest_files(&paths);
@@ -432,6 +436,7 @@ mod tests {
         /// A second write this long after the first, as multi-step sources do.
         second_write: Option<(Duration, String)>,
         elevated: bool,
+        line_copy: bool,
         /// Number of simulate_copy calls.
         copies: std::sync::atomic::AtomicUsize,
     }
@@ -443,6 +448,7 @@ mod tests {
                 copy_text: None,
                 second_write: None,
                 elevated: false,
+                line_copy: false,
                 copies: std::sync::atomic::AtomicUsize::new(0),
             }
         }
@@ -475,6 +481,10 @@ mod tests {
 
         fn copy_target_elevated(&self) -> bool {
             self.elevated
+        }
+
+        fn clipboard_is_line_copy(&self) -> bool {
+            self.line_copy
         }
 
         fn frontmost_app_pid(&self) -> Option<i32> {
@@ -939,6 +949,20 @@ mod tests {
         assert!(matches!(result, Err(ClipboardError::ElevatedTarget)), "{result:?}");
         assert_eq!(mock.copies.load(Ordering::SeqCst), 0);
         assert_eq!(mgr.read_clipboard().unwrap(), "precious content");
+    }
+
+    #[test]
+    fn copy_and_read_rejects_an_editor_line_copy_as_nothing_selected() {
+        let _lock = lock_clipboard();
+        let mut mgr = ClipboardManager::new().unwrap();
+        let mock = MockPlatform {
+            copy_text: Some("the caret line\n".into()),
+            line_copy: true,
+            ..MockPlatform::default()
+        };
+
+        let result = mgr.copy_and_read(&mock, &AtomicBool::new(false), None);
+        assert!(matches!(result, Err(ClipboardError::NothingSelected)), "{result:?}");
     }
 
     // -- copy_and_read modifier-wait integration tests --
