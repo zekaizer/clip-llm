@@ -273,8 +273,9 @@ impl ClipboardManager {
     }
 
     /// Simulate copy via platform, then poll the clipboard change counter
-    /// until the copy lands and settles. The clipboard is never cleared, so a failed
-    /// capture leaves the user's existing content untouched (#48, #57).
+    /// until the copy lands and settles. The clipboard is never cleared here, so a
+    /// capture whose copy never lands leaves the user's content untouched (#48,
+    /// #57); a rejected line copy has already replaced it in the source app.
     /// When no usable copy arrives, the platform's own selection read
     /// ([`Platform::selected_text`]) is used instead, as text only.
     /// `target` is the frontmost-app pid recorded at trigger time, keeping the
