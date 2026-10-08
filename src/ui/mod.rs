@@ -3109,12 +3109,14 @@ mod tests {
         app.placement = PanelPlacement::Remembered;
         app.remembered_pos = None;
         let centered = app.calculate_target_position(win);
-        app.remembered_pos = Some(egui::pos2(300.0, 400.0));
-        // No display bounds in tests (mock platform), so the anchor passes through.
-        assert_eq!(app.calculate_target_position(win), Some(egui::pos2(300.0, 400.0)));
         assert_ne!(centered, Some(egui::pos2(300.0, 400.0)), "without a stored position it centers");
 
-        // Inside the mock display's work area, so no clamping applies.
+        // No spawn point, so no display bounds: the anchor passes through
+        // whatever screen the suite runs on (clamping has its own tests).
+        app.spawn_position = None;
+        app.remembered_pos = Some(egui::pos2(300.0, 400.0));
+        assert_eq!(app.calculate_target_position(win), Some(egui::pos2(300.0, 400.0)));
+
         app.resize_anchor = Some(egui::pos2(60.0, 80.0));
         assert_eq!(app.calculate_target_position(win), Some(egui::pos2(60.0, 80.0)));
     }
