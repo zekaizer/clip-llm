@@ -56,7 +56,7 @@ The project follows a 7-phase incremental plan defined in [docs/REQUIREMENTS.md]
 - `src/lib.rs` — library crate: type definitions (`ProcessMode`, errors), re-exports
 - `src/coordinator.rs` — hotkey event → tap detection → `TapEvent` dispatch (dedicated thread)
 - `src/hotkey.rs` — `HotkeyDetector` state machine, `TapAction`, `TapEvent`
-- `src/clipboard.rs` — `ClipboardManager` (read/write, copy simulation + poll)
+- `src/clipboard.rs` — `ClipboardManager` (read/write, selection capture: copy simulation, `CopyWatch` settle logic, fallbacks)
 - `src/files.rs` — file-list clipboard ingestion (`ingest_files`: UTF-8 text + image files → `ClipboardContent`)
 - `src/images/` — everything an image goes through before a request: `ImageAttachment` (bytes + MIME + source/sent size + origin), `cap_for_request` (4 images / 8 MiB); `decode.rs` (PNG/JPEG/GIF/WebP/BMP → RGBA, pixel budget from the header), `encode.rs` (margin trim → 1568px → PNG, JPEG fallback over 1.5 MB), `filter.rs` (meaningfulness: markup prefilter + pixel checks + `select_top`), `html.rs` (`<img>` refs from `public.html` / CF_HTML), `fetch.rs` (`data:` / `file:` / `http(s)` bytes, bounded), `markup.rs` (the pipeline over an injected fetcher). Only markup images are filtered; clipboard/file images are deliberate
 - `src/lang.rs` — input-language cues for Translate: `prose_is_korean` (direction, ADR-0002) and `is_lookup` (dictionary entry); fixture `scripts/lang_direction_vectors.json` shared with the harness
@@ -73,6 +73,7 @@ The project follows a 7-phase incremental plan defined in [docs/REQUIREMENTS.md]
 - `src/ui/widgets.rs` — shared components (pills, docked buttons, status row, scroll text)
 - UI policy (geometry, slots, tokens, interaction, verification checklist): [docs/UI-GUIDELINES.md](docs/UI-GUIDELINES.md)
 - `src/platform/` — platform abstraction trait + `cfg(target_os)` implementations (macOS/Windows)
+- `src/platform/uia.rs` — Windows: selection read through UI Automation (`windows` crate, ADR-0003); fallback only
 - `src/diagnostics.rs` — scenario runner for automated visual testing (`--features diagnostics`)
 
 ### Phases
@@ -105,6 +106,8 @@ The project follows a 7-phase incremental plan defined in [docs/REQUIREMENTS.md]
 | `base64` | Image base64 encoding for vision API |
 | `core-graphics` | macOS: event simulation, display info |
 | `windows-sys` | Windows: Win32 API bindings |
+| `windows` | Windows: COM (UI Automation) only, pinned to the version `wgpu` resolves |
+| `clipboard-win` | Windows: raw clipboard formats `arboard` does not expose |
 
 ## Event-Driven Architecture
 
@@ -121,6 +124,20 @@ The UI uses an **event-driven** repaint model to minimize idle CPU/GPU usage:
 - **Hidden/Result/Error states**: No periodic `request_repaint_after()` — eframe sleeps until an external event arrives (hotkey, worker response, tray menu).
 - **Processing state**: `request_repaint()` every frame for spinner animation and SSE streaming updates.
 - **Important**: Avoid calling `send_viewport_cmd()` in loops — it internally triggers `request_repaint()`, overriding any throttle.
+
+## Selection Capture (double-tap)
+
+`ClipboardManager::copy_and_read`, on the capture thread:
+
+1. Wait for the hotkey modifiers to release.
+2. Refuse an elevated foreground window (`ElevatedTarget`): UIPI drops the injected copy while `SendInput` reports success.
+3. Simulate the copy; `CopyWatch` samples the change counter every 2 ms and reads once it has been quiet for 30 ms (sources write in several steps; Firefox writes two sessions 5-28 ms apart). A copy typically lands in 5-25 ms.
+4. Reject an editor's no-selection line copy (`NothingSelected`): `MSDEVLineSelect` (Scintilla, Visual Studio) or `"isFromEmptySelection":true` in Chromium web custom data (Monaco / VS Code).
+5. On `NoTextAfterCopy` / `EmptyCopy`, use `Platform::selected_text` (UI Automation) when it returns non-blank text. The lookup never reads a password field (it would yield mask characters), walks ancestors only as far as the enclosing document, and gives up on any property it cannot read.
+
+UI Automation stays a fallback: VS Code, Firefox and the Edge PDF viewer report an empty selection while text is selected, Scintilla and Explorer expose no TextPattern, and its text has no table structure or images (measured 2026-10-08 on Windows 11 24H2). Steps 2, 4 and 5 are Windows-only; the trait defaults are no-ops on macOS.
+
+Known gaps: VS Code with several empty cursors copies each caret line with `isFromEmptySelection` false, indistinguishable from a real multi-cursor selection; a window elevated under another account cannot be queried and still times out; the first UI Automation lookup against a browser with no accessibility tree yet can miss.
 
 ## Known Issues / Improvement Needed
 

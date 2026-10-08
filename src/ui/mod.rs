@@ -2134,6 +2134,11 @@ fn friendly_clipboard_error(e: &crate::ClipboardError) -> String {
             "Could not capture selected text. Try selecting it again and double-tapping.".to_string()
         }
         EmptyCopy => "The selection contains no usable text or image.".to_string(),
+        NothingSelected => "Nothing is selected. Select some text, then double-tap.".to_string(),
+        ElevatedTarget => {
+            "This window runs as administrator, so its selection can't be captured. Copy it yourself, then single-tap."
+                .to_string()
+        }
         // A cancelled/superseded capture is gated out before display; this arm
         // exists only for exhaustiveness.
         Cancelled => "Capture cancelled.".to_string(),
@@ -2857,6 +2862,18 @@ mod tests {
         assert_eq!(friendly_clipboard_error(&e), "Could not read x.txt.");
     }
 
+    #[test]
+    fn friendly_nothing_selected_error_asks_for_a_selection() {
+        let msg = friendly_clipboard_error(&crate::ClipboardError::NothingSelected);
+        assert!(msg.starts_with("Nothing is selected"), "{msg}");
+    }
+
+    #[test]
+    fn friendly_elevated_target_error_names_the_cause_and_the_way_out() {
+        let msg = friendly_clipboard_error(&crate::ClipboardError::ElevatedTarget);
+        assert!(msg.contains("administrator") && msg.contains("single-tap"), "{msg}");
+    }
+
     // --- format_retry_label: Processing label during an automatic retry ---
 
     #[test]
@@ -3092,12 +3109,14 @@ mod tests {
         app.placement = PanelPlacement::Remembered;
         app.remembered_pos = None;
         let centered = app.calculate_target_position(win);
-        app.remembered_pos = Some(egui::pos2(300.0, 400.0));
-        // No display bounds in tests (mock platform), so the anchor passes through.
-        assert_eq!(app.calculate_target_position(win), Some(egui::pos2(300.0, 400.0)));
         assert_ne!(centered, Some(egui::pos2(300.0, 400.0)), "without a stored position it centers");
 
-        // Inside the mock display's work area, so no clamping applies.
+        // No spawn point, so no display bounds: the anchor passes through
+        // whatever screen the suite runs on (clamping has its own tests).
+        app.spawn_position = None;
+        app.remembered_pos = Some(egui::pos2(300.0, 400.0));
+        assert_eq!(app.calculate_target_position(win), Some(egui::pos2(300.0, 400.0)));
+
         app.resize_anchor = Some(egui::pos2(60.0, 80.0));
         assert_eq!(app.calculate_target_position(win), Some(egui::pos2(60.0, 80.0)));
     }

@@ -168,7 +168,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("img one.bin");
         std::fs::write(&path, [1u8, 2, 3]).unwrap();
-        let url = format!("file://{}", path.display().to_string().replace(' ', "%20"));
+        // file:///C:/dir/x on Windows, file:///dir/x elsewhere.
+        let slashed = path.display().to_string().replace('\\', "/").replace(' ', "%20");
+        let url = format!("file:///{}", slashed.trim_start_matches('/'));
         assert_eq!(fetch_source(&url), Some(vec![1, 2, 3]));
         assert_eq!(fetch_source("file:///definitely/missing/x.png"), None);
         assert_eq!(fetch_source("ftp://h/a.png"), None);

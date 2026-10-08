@@ -12,8 +12,15 @@ use crate::images::{ImageAttachment, ImageOrigin};
 use crate::platform::{ModifierState, Platform};
 use crate::ClipboardError;
 
-const CLIPBOARD_POLL_INTERVAL_MS: u64 = 50;
+/// Resolution of the change-counter poll while a simulated copy is pending.
+const CLIPBOARD_POLL_INTERVAL_MS: u64 = 2;
 const CLIPBOARD_POLL_TIMEOUT_MS: u64 = 500;
+/// Quiet period after the last counter change before the content is read -
+/// sources write in several steps (Firefox: two sessions 5-28 ms apart).
+const CLIPBOARD_SETTLE_MS: u64 = 30;
+/// Re-read interval after a landed copy read back empty - the counter can
+/// bump before the data is readable and need not bump again.
+const CLIPBOARD_EMPTY_RETRY_MS: u64 = 50;
 
 /// Hard cap on how long `copy_and_read` waits for the user's Ctrl+Shift
 /// hotkey modifiers to release before simulating the copy chord. Bounds the
@@ -147,6 +154,85 @@ where
     }
 }
 
+/// Next action for the loop waiting on a simulated copy.
+#[derive(Debug, PartialEq, Eq)]
+enum WatchStep {
+    Wait,
+    /// Read the clipboard now; keep polling if it comes back empty.
+    Read,
+    TimedOut,
+}
+
+/// Decides when a simulated copy is ready to read, from change-counter
+/// samples alone. The caller supplies the counter and the clock.
+struct CopyWatch {
+    last_count: u64,
+    deadline: Instant,
+    /// When the counter last moved; `None` until a copy lands.
+    changed_at: Option<Instant>,
+    /// When the last read for the current counter value was asked for, or
+    /// ended once `read_finished` reported it.
+    read_at: Option<Instant>,
+    /// The read at the deadline has been issued.
+    final_read: bool,
+}
+
+impl CopyWatch {
+    fn new(baseline: u64, now: Instant) -> Self {
+        Self {
+            last_count: baseline,
+            deadline: now + Duration::from_millis(CLIPBOARD_POLL_TIMEOUT_MS),
+            changed_at: None,
+            read_at: None,
+            final_read: false,
+        }
+    }
+
+    /// Whether the counter has moved off the baseline.
+    fn landed(&self) -> bool {
+        self.changed_at.is_some()
+    }
+
+    /// Report when the read asked for by `Read` came back empty, so retries
+    /// are spaced from its end and a read that ran past the deadline is not
+    /// repeated.
+    fn read_finished(&mut self, now: Instant) {
+        self.read_at = Some(now);
+    }
+
+    fn poll(&mut self, count: u64, now: Instant) -> WatchStep {
+        if count != self.last_count {
+            self.last_count = count;
+            self.changed_at = Some(now);
+            self.read_at = None;
+        }
+        if now >= self.deadline {
+            // One last read for a landed copy, unless the previous read itself
+            // ran past the deadline. Only one: a counter that keeps moving
+            // cannot extend the wait.
+            let read_before_deadline = self.read_at.is_none_or(|at| at < self.deadline);
+            if self.changed_at.is_some() && read_before_deadline && !self.final_read {
+                self.final_read = true;
+                self.read_at = Some(now);
+                return WatchStep::Read;
+            }
+            return WatchStep::TimedOut;
+        }
+        let Some(changed_at) = self.changed_at else {
+            return WatchStep::Wait;
+        };
+        let due = match self.read_at {
+            None => changed_at + Duration::from_millis(CLIPBOARD_SETTLE_MS),
+            Some(read_at) => read_at + Duration::from_millis(CLIPBOARD_EMPTY_RETRY_MS),
+        };
+        if now < due {
+            return WatchStep::Wait;
+        }
+        self.read_at = Some(now);
+        WatchStep::Read
+    }
+}
+
 pub struct ClipboardManager {
     board: Clipboard,
     /// Live Ctrl+Shift hold state, consulted by `copy_and_read` to wait for an
@@ -187,8 +273,11 @@ impl ClipboardManager {
     }
 
     /// Simulate copy via platform, then poll the clipboard change counter
-    /// until the copy lands. The clipboard is never cleared, so a failed
-    /// capture leaves the user's existing content untouched (#48, #57).
+    /// until the copy lands and settles. The clipboard is never cleared here, so a
+    /// capture whose copy never lands leaves the user's content untouched (#48,
+    /// #57); a rejected line copy has already replaced it in the source app.
+    /// When no usable copy arrives, the platform's own selection read
+    /// ([`Platform::selected_text`]) is used instead, as text only.
     /// `target` is the frontmost-app pid recorded at trigger time, keeping the
     /// simulated copy aimed at the source app even if focus moved since (#55).
     /// Returns both text and images captured by the copy simulation.
@@ -218,16 +307,41 @@ impl ClipboardManager {
                 }
             }
         }
+        if platform.copy_target_elevated() {
+            warn!("foreground window runs elevated; copy not sent");
+            return Err(ClipboardError::ElevatedTarget);
+        }
         let baseline = platform.clipboard_change_count();
         platform.simulate_copy(target)?;
 
-        let start = Instant::now();
-        let deadline = start + Duration::from_millis(CLIPBOARD_POLL_TIMEOUT_MS);
-        let interval = Duration::from_millis(CLIPBOARD_POLL_INTERVAL_MS);
-        let mut copy_landed = false;
+        match self.await_copy(platform, cancel, baseline) {
+            // Some controls hold a selection the copy never delivers.
+            Err(e @ (ClipboardError::NoTextAfterCopy | ClipboardError::EmptyCopy)) => {
+                match platform.selected_text().filter(|t| !t.trim().is_empty()) {
+                    Some(text) => {
+                        info!("selection read without the clipboard ({} chars) after: {e}", text.len());
+                        Ok(ClipboardContent::text_only(text))
+                    }
+                    None => Err(e),
+                }
+            }
+            other => other,
+        }
+    }
 
+    /// Poll the change counter from `baseline` until a copy lands and settles,
+    /// then read it. `NoTextAfterCopy` when nothing lands before the deadline,
+    /// `EmptyCopy` when what landed holds no usable text or image.
+    fn await_copy(
+        &mut self,
+        platform: &dyn Platform,
+        cancel: &AtomicBool,
+        baseline: u64,
+    ) -> Result<ClipboardContent, ClipboardError> {
+        let start = Instant::now();
+        let mut watch = CopyWatch::new(baseline, start);
         loop {
-            thread::sleep(interval);
+            thread::sleep(Duration::from_millis(CLIPBOARD_POLL_INTERVAL_MS));
 
             // Stop polling promptly once superseded so overlapping captures don't
             // keep issuing clipboard reads in parallel.
@@ -236,39 +350,40 @@ impl ClipboardManager {
                 return Err(ClipboardError::Cancelled);
             }
 
-            // The counter bumps when the source app takes clipboard ownership,
-            // which can precede the actual data write (e.g. Windows
-            // EmptyClipboard before SetClipboardData) — so keep polling for
-            // content until the deadline instead of failing on an empty read.
-            if platform.clipboard_change_count() != baseline {
-                copy_landed = true;
-                // Files first — see read_content.
-                if let Some(paths) = self.file_list() {
-                    return crate::files::ingest_files(&paths);
+            match watch.poll(platform.clipboard_change_count(), Instant::now()) {
+                WatchStep::Wait => {}
+                WatchStep::Read => {
+                    debug!("reading the copy at {}ms", start.elapsed().as_millis());
+                    if platform.clipboard_is_line_copy() {
+                        warn!("copy holds the caret line, not a selection");
+                        return Err(ClipboardError::NothingSelected);
+                    }
+                    // Files first — see read_content.
+                    if let Some(paths) = self.file_list() {
+                        return crate::files::ingest_files(&paths);
+                    }
+                    let (text, images) = self.read_flavors()?;
+                    if text.is_some() || !images.is_empty() {
+                        let content = ClipboardContent { text, images, files: vec![] };
+                        info!(
+                            "clipboard content arrived in {}ms (text={}, images={})",
+                            start.elapsed().as_millis(),
+                            content.text.as_ref().map_or(0, |t| t.len()),
+                            content.images.len()
+                        );
+                        return Ok(content);
+                    }
+                    watch.read_finished(Instant::now());
                 }
-                let (text, images) = self.read_flavors()?;
-
-                if text.is_some() || !images.is_empty() {
-                    let content = ClipboardContent { text, images, files: vec![] };
+                WatchStep::TimedOut => {
                     let elapsed = start.elapsed().as_millis();
-                    info!(
-                        "clipboard content arrived in {}ms (text={}, images={})",
-                        elapsed,
-                        content.text.as_ref().map_or(0, |t| t.len()),
-                        content.images.len()
-                    );
-                    return Ok(content);
+                    if watch.landed() {
+                        warn!("copy landed but carried no usable content ({elapsed}ms)");
+                        return Err(ClipboardError::EmptyCopy);
+                    }
+                    warn!("no copy detected within {elapsed}ms");
+                    return Err(ClipboardError::NoTextAfterCopy);
                 }
-            }
-
-            if Instant::now() >= deadline {
-                let elapsed = start.elapsed().as_millis();
-                if copy_landed {
-                    warn!("copy landed but carried no usable content ({elapsed}ms)");
-                    return Err(ClipboardError::EmptyCopy);
-                }
-                warn!("no copy detected within {elapsed}ms");
-                return Err(ClipboardError::NoTextAfterCopy);
             }
         }
     }
@@ -358,10 +473,36 @@ mod tests {
         copy_result: Result<(), PlatformError>,
         /// If set, simulate_copy writes this text to clipboard.
         copy_text: Option<String>,
+        /// A second write made during the n-th counter poll after the copy,
+        /// as multi-step sources do.
+        second_write: Option<(usize, String)>,
+        /// Counter polls since the last simulate_copy.
+        polls: std::sync::atomic::AtomicUsize,
+        elevated: bool,
+        line_copy: bool,
+        selected_text: Option<String>,
+        /// Number of simulate_copy calls.
+        copies: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Default for MockPlatform {
+        fn default() -> Self {
+            Self {
+                copy_result: Ok(()),
+                copy_text: None,
+                second_write: None,
+                polls: std::sync::atomic::AtomicUsize::new(0),
+                elevated: false,
+                line_copy: false,
+                selected_text: None,
+                copies: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
     }
 
     impl Platform for MockPlatform {
         fn simulate_copy(&self, _target: Option<i32>) -> Result<(), PlatformError> {
+            self.copies.fetch_add(1, Ordering::SeqCst);
             self.copy_result
                 .as_ref()
                 .map_err(|e| PlatformError::CopyFailed(e.to_string()))?;
@@ -369,13 +510,37 @@ mod tests {
                 let mut board = Clipboard::new().unwrap();
                 board.set_text(text).unwrap();
             }
+            self.polls.store(0, Ordering::SeqCst);
             Ok(())
         }
 
         // The mock writes through the real system clipboard, so delegate to
         // the real platform counter to observe those writes.
         fn clipboard_change_count(&self) -> u64 {
-            crate::platform::NativePlatform.clipboard_change_count()
+            // Sampled before the second write, which this poll then makes:
+            // the caller is told of the first write while the clipboard
+            // already holds the second.
+            let count = crate::platform::NativePlatform.clipboard_change_count();
+            let poll = self.polls.fetch_add(1, Ordering::SeqCst) + 1;
+            if let Some((at, text)) = &self.second_write
+                && self.copies.load(Ordering::SeqCst) > 0
+                && poll == *at
+            {
+                Clipboard::new().unwrap().set_text(text).unwrap();
+            }
+            count
+        }
+
+        fn copy_target_elevated(&self) -> bool {
+            self.elevated
+        }
+
+        fn clipboard_is_line_copy(&self) -> bool {
+            self.line_copy
+        }
+
+        fn selected_text(&self) -> Option<String> {
+            self.selected_text.clone()
         }
 
         fn frontmost_app_pid(&self) -> Option<i32> {
@@ -497,6 +662,7 @@ mod tests {
         let mock = MockPlatform {
             copy_result: Ok(()),
             copy_text: Some("  \n  ".into()),
+            ..MockPlatform::default()
         };
 
         // The copy lands (counter bumps) but carries only whitespace.
@@ -511,6 +677,7 @@ mod tests {
         let mock = MockPlatform {
             copy_result: Ok(()),
             copy_text: None, // nothing selected — no copy ever lands
+            ..MockPlatform::default()
         };
 
         // Regression test for #48: a failed capture must not destroy the
@@ -538,6 +705,7 @@ mod tests {
         let mock = MockPlatform {
             copy_result: Ok(()),
             copy_text: Some("selected text".into()),
+            ..MockPlatform::default()
         };
 
         // Pre-existing clipboard content should be replaced by copy simulation.
@@ -557,6 +725,7 @@ mod tests {
         let mock = MockPlatform {
             copy_result: Ok(()),
             copy_text: None,
+            ..MockPlatform::default()
         };
 
         let result = mgr.copy_and_read(&mock, &AtomicBool::new(false), None);
@@ -572,6 +741,7 @@ mod tests {
         let mock = MockPlatform {
             copy_result: Err(PlatformError::CopyFailed("test error".into())),
             copy_text: None,
+            ..MockPlatform::default()
         };
 
         let result = mgr.copy_and_read(&mock, &AtomicBool::new(false), None);
@@ -726,6 +896,230 @@ mod tests {
         assert!(matches!(result, Err(ClipboardError::Cancelled)));
     }
 
+    // -- CopyWatch tests --
+
+    /// Drive `watch` with `count` at `from..=to` ms in poll-interval steps and
+    /// return the offsets at which it asked for a read, plus the final step.
+    fn drive(watch: &mut CopyWatch, t0: Instant, count: u64, from: u64, to: u64) -> (Vec<u64>, WatchStep) {
+        let mut reads = vec![];
+        let mut last = WatchStep::Wait;
+        let mut t = from;
+        while t <= to {
+            last = watch.poll(count, t0 + Duration::from_millis(t));
+            match last {
+                WatchStep::Read => reads.push(t),
+                WatchStep::TimedOut => break,
+                WatchStep::Wait => {}
+            }
+            t += CLIPBOARD_POLL_INTERVAL_MS;
+        }
+        (reads, last)
+    }
+
+    #[test]
+    fn copy_watch_times_out_when_nothing_lands() {
+        let t0 = Instant::now();
+        let mut watch = CopyWatch::new(7, t0);
+        let (reads, last) = drive(&mut watch, t0, 7, 2, CLIPBOARD_POLL_TIMEOUT_MS - 2);
+        assert!(reads.is_empty());
+        assert_eq!(last, WatchStep::Wait);
+        assert_eq!(watch.poll(7, t0 + Duration::from_millis(CLIPBOARD_POLL_TIMEOUT_MS)), WatchStep::TimedOut);
+        assert!(!watch.landed());
+    }
+
+    #[test]
+    fn copy_watch_reads_once_the_counter_settles() {
+        let t0 = Instant::now();
+        let mut watch = CopyWatch::new(7, t0);
+        // Lands at 10 ms: no read before the settle period has passed.
+        let (reads, _) = drive(&mut watch, t0, 8, 10, 10 + CLIPBOARD_SETTLE_MS);
+        assert_eq!(reads, vec![10 + CLIPBOARD_SETTLE_MS]);
+        assert!(watch.landed());
+    }
+
+    #[test]
+    fn copy_watch_restarts_the_settle_on_a_second_write() {
+        let t0 = Instant::now();
+        let mut watch = CopyWatch::new(7, t0);
+        let (reads, _) = drive(&mut watch, t0, 8, 10, 24);
+        assert!(reads.is_empty());
+        // A second write 16 ms after the first pushes the read out.
+        let (reads, _) = drive(&mut watch, t0, 9, 26, 26 + CLIPBOARD_SETTLE_MS);
+        assert_eq!(reads, vec![26 + CLIPBOARD_SETTLE_MS]);
+    }
+
+    #[test]
+    fn copy_watch_retries_an_empty_read_without_a_counter_change() {
+        let t0 = Instant::now();
+        let mut watch = CopyWatch::new(7, t0);
+        let first = 10 + CLIPBOARD_SETTLE_MS;
+        let (reads, _) = drive(&mut watch, t0, 8, 10, first + 2 * CLIPBOARD_EMPTY_RETRY_MS);
+        assert_eq!(
+            reads,
+            vec![first, first + CLIPBOARD_EMPTY_RETRY_MS, first + 2 * CLIPBOARD_EMPTY_RETRY_MS]
+        );
+    }
+
+    #[test]
+    fn copy_watch_reads_a_late_copy_once_at_the_deadline() {
+        let t0 = Instant::now();
+        let mut watch = CopyWatch::new(7, t0);
+        let late = CLIPBOARD_POLL_TIMEOUT_MS - 10;
+        let (reads, last) = drive(&mut watch, t0, 8, late, CLIPBOARD_POLL_TIMEOUT_MS + 20);
+        // Settle would end past the deadline: one read at the deadline, then stop.
+        assert_eq!(reads, vec![CLIPBOARD_POLL_TIMEOUT_MS]);
+        assert_eq!(last, WatchStep::TimedOut);
+        assert!(watch.landed());
+        // A counter that keeps moving past the deadline gets no further reads.
+        assert_eq!(
+            watch.poll(9, t0 + Duration::from_millis(CLIPBOARD_POLL_TIMEOUT_MS + 30)),
+            WatchStep::TimedOut
+        );
+    }
+
+    #[test]
+    fn copy_watch_gives_a_copy_that_stayed_empty_a_last_read_at_the_deadline() {
+        let t0 = Instant::now();
+        let mut watch = CopyWatch::new(7, t0);
+        let (reads, last) = drive(&mut watch, t0, 8, 10, CLIPBOARD_POLL_TIMEOUT_MS + 20);
+        assert_eq!(reads.last(), Some(&CLIPBOARD_POLL_TIMEOUT_MS), "{reads:?}");
+        assert_eq!(last, WatchStep::TimedOut);
+    }
+
+    #[test]
+    fn copy_watch_spaces_retries_from_the_end_of_a_slow_read() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut watch = CopyWatch::new(7, t0);
+        assert_eq!(watch.poll(8, at(10)), WatchStep::Wait);
+        assert_eq!(watch.poll(8, at(10 + CLIPBOARD_SETTLE_MS)), WatchStep::Read);
+        // The read took 30 ms; the retry interval starts when it ended.
+        let ended = 10 + CLIPBOARD_SETTLE_MS + 30;
+        watch.read_finished(at(ended));
+        assert_eq!(watch.poll(8, at(ended + CLIPBOARD_EMPTY_RETRY_MS - 2)), WatchStep::Wait);
+        assert_eq!(watch.poll(8, at(ended + CLIPBOARD_EMPTY_RETRY_MS)), WatchStep::Read);
+    }
+
+    #[test]
+    fn copy_watch_does_not_repeat_a_read_that_ran_past_the_deadline() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut watch = CopyWatch::new(7, t0);
+        assert_eq!(watch.poll(8, at(10)), WatchStep::Wait);
+        assert_eq!(watch.poll(8, at(10 + CLIPBOARD_SETTLE_MS)), WatchStep::Read);
+        // Fetching a rich copy's images can outlast the whole wait.
+        let ended = CLIPBOARD_POLL_TIMEOUT_MS + 100;
+        watch.read_finished(at(ended));
+        assert_eq!(watch.poll(8, at(ended + 2)), WatchStep::TimedOut);
+        assert!(watch.landed());
+    }
+
+    #[test]
+    fn copy_and_read_takes_the_last_of_two_writes() {
+        let _lock = lock_clipboard();
+        let mut mgr = ClipboardManager::new().unwrap();
+        let mock = MockPlatform {
+            copy_text: Some("first write".into()),
+            // Written inside the first poll after the copy, so it is on the
+            // clipboard before any read - settled or at the deadline - with
+            // no wall-clock race.
+            second_write: Some((1, "second write".into())),
+            ..MockPlatform::default()
+        };
+        let content = mgr.copy_and_read(&mock, &AtomicBool::new(false), None).unwrap();
+        assert_eq!(content.text.as_deref(), Some("second write"));
+    }
+
+    #[test]
+    fn copy_and_read_refuses_an_elevated_target_without_sending_the_copy() {
+        let _lock = lock_clipboard();
+        let mut mgr = ClipboardManager::new().unwrap();
+        let mock = MockPlatform {
+            copy_text: Some("would be copied".into()),
+            elevated: true,
+            ..MockPlatform::default()
+        };
+
+        mgr.write_text("precious content").unwrap();
+        let result = mgr.copy_and_read(&mock, &AtomicBool::new(false), None);
+        assert!(matches!(result, Err(ClipboardError::ElevatedTarget)), "{result:?}");
+        assert_eq!(mock.copies.load(Ordering::SeqCst), 0);
+        assert_eq!(mgr.read_clipboard().unwrap(), "precious content");
+    }
+
+    #[test]
+    fn copy_and_read_rejects_an_editor_line_copy_as_nothing_selected() {
+        let _lock = lock_clipboard();
+        let mut mgr = ClipboardManager::new().unwrap();
+        let mock = MockPlatform {
+            copy_text: Some("the caret line\n".into()),
+            line_copy: true,
+            ..MockPlatform::default()
+        };
+
+        let result = mgr.copy_and_read(&mock, &AtomicBool::new(false), None);
+        assert!(matches!(result, Err(ClipboardError::NothingSelected)), "{result:?}");
+    }
+
+    // -- copy_and_read: selection read without the clipboard --
+
+    #[test]
+    fn copy_and_read_falls_back_to_the_platform_selection_when_no_copy_lands() {
+        let _lock = lock_clipboard();
+        let mut mgr = ClipboardManager::new().unwrap();
+        let mock = MockPlatform {
+            selected_text: Some("selection the copy missed".into()),
+            ..MockPlatform::default()
+        };
+
+        mgr.write_text("precious content").unwrap();
+        let content = mgr.copy_and_read(&mock, &AtomicBool::new(false), None).unwrap();
+        assert_eq!(content.text.as_deref(), Some("selection the copy missed"));
+        assert!(content.images.is_empty() && content.files.is_empty());
+        assert_eq!(mgr.read_clipboard().unwrap(), "precious content");
+    }
+
+    #[test]
+    fn copy_and_read_falls_back_when_the_copy_is_blank() {
+        let _lock = lock_clipboard();
+        let mut mgr = ClipboardManager::new().unwrap();
+        let mock = MockPlatform {
+            copy_text: Some("  \n ".into()),
+            selected_text: Some("real selection".into()),
+            ..MockPlatform::default()
+        };
+
+        let content = mgr.copy_and_read(&mock, &AtomicBool::new(false), None).unwrap();
+        assert_eq!(content.text.as_deref(), Some("real selection"));
+    }
+
+    #[test]
+    fn copy_and_read_prefers_the_landed_copy_over_the_platform_selection() {
+        let _lock = lock_clipboard();
+        let mut mgr = ClipboardManager::new().unwrap();
+        let mock = MockPlatform {
+            copy_text: Some("copied text".into()),
+            selected_text: Some("automation text".into()),
+            ..MockPlatform::default()
+        };
+
+        let content = mgr.copy_and_read(&mock, &AtomicBool::new(false), None).unwrap();
+        assert_eq!(content.text.as_deref(), Some("copied text"));
+    }
+
+    #[test]
+    fn copy_and_read_ignores_a_blank_platform_selection() {
+        let _lock = lock_clipboard();
+        let mut mgr = ClipboardManager::new().unwrap();
+        let mock = MockPlatform {
+            selected_text: Some(" \n".into()),
+            ..MockPlatform::default()
+        };
+
+        let result = mgr.copy_and_read(&mock, &AtomicBool::new(false), None);
+        assert!(matches!(result, Err(ClipboardError::NoTextAfterCopy)), "{result:?}");
+    }
+
     // -- copy_and_read modifier-wait integration tests --
 
     #[test]
@@ -735,6 +1129,7 @@ mod tests {
         let mock = MockPlatform {
             copy_result: Ok(()),
             copy_text: Some("fast selection".into()),
+            ..MockPlatform::default()
         };
 
         let modifier_state = ModifierState::default();
@@ -763,6 +1158,7 @@ mod tests {
         let mock = MockPlatform {
             copy_result: Ok(()),
             copy_text: Some("selection".into()),
+            ..MockPlatform::default()
         };
 
         // Attached but never marked active (simulates a watcher that failed

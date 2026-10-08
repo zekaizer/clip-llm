@@ -14,7 +14,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
 use super::Platform;
 use crate::PlatformError;
 
-/// Delay between key events (ms).
+/// Delay after the injected paste chord (ms).
 const KEY_EVENT_DELAY_MS: u64 = 50;
 /// Delay for OS focus transfer after SW_HIDE (ms).
 const FOCUS_TRANSFER_DELAY_MS: u64 = 100;
@@ -208,8 +208,47 @@ impl Platform for WindowsPlatform {
             )));
         }
 
-        thread::sleep(Duration::from_millis(KEY_EVENT_DELAY_MS));
         Ok(())
+    }
+
+    fn selected_text(&self) -> Option<String> {
+        super::uia::selected_text()
+    }
+
+    fn clipboard_is_line_copy(&self) -> bool {
+        use clipboard_win::{is_format_avail, raw, register_format};
+
+        if register_format(LINE_SELECT_FORMAT).is_some_and(|f| is_format_avail(f.get())) {
+            return true;
+        }
+        let Some(format) = register_format(WEB_CUSTOM_DATA_FORMAT) else {
+            return false;
+        };
+        if !is_format_avail(format.get()) {
+            return false;
+        }
+        let Some(_clipboard) = open_clipboard() else {
+            warn!("clipboard stayed busy; line-copy marker not checked");
+            return false;
+        };
+        let mut data = Vec::new();
+        raw::get_vec(format.get(), &mut data).is_ok() && web_custom_data_marks_empty_selection(&data)
+    }
+
+    fn copy_target_elevated(&self) -> bool {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetForegroundWindow, GetWindowThreadProcessId,
+        };
+        let mut pid = 0u32;
+        let hwnd = unsafe { GetForegroundWindow() };
+        if hwnd.is_null() || unsafe { GetWindowThreadProcessId(hwnd, &mut pid) } == 0 {
+            return false;
+        }
+        let target = integrity_rid(pid);
+        if target.is_none() {
+            debug!("foreground process integrity level unreadable; copy attempted");
+        }
+        input_blocked(target, integrity_rid(std::process::id()))
     }
 
     /// No per-process key injection on Windows; see `simulate_copy`.
@@ -344,6 +383,95 @@ impl Platform for WindowsPlatform {
     fn set_launch_at_login(&self, enabled: bool) -> Result<(), PlatformError> {
         set_launch_at_login(enabled)
     }
+}
+
+/// Format Scintilla and Visual Studio add when Ctrl+C with no selection
+/// copied the caret line.
+const LINE_SELECT_FORMAT: &str = "MSDEVLineSelect";
+/// Chromium's carrier for page-defined clipboard types (a pickle of UTF-16
+/// type/value pairs); Monaco editors put their copy metadata in it.
+const WEB_CUSTOM_DATA_FORMAT: &str = "Chromium Web Custom MIME Data Format";
+
+/// Attempts and spacing for opening a clipboard another process holds.
+const CLIPBOARD_OPEN_ATTEMPTS: u32 = 20;
+const CLIPBOARD_OPEN_RETRY_MS: u64 = 5;
+
+/// Call `attempt` until it succeeds, `delay` apart, at most `attempts` times.
+fn retry<T>(attempts: u32, delay: Duration, mut attempt: impl FnMut() -> Option<T>) -> Option<T> {
+    for n in 0..attempts {
+        if n > 0 {
+            thread::sleep(delay);
+        }
+        if let Some(value) = attempt() {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Open the clipboard, waiting out a holder for up to 100 ms - history and
+/// sync services open it right after a copy lands.
+fn open_clipboard() -> Option<clipboard_win::Clipboard> {
+    retry(CLIPBOARD_OPEN_ATTEMPTS, Duration::from_millis(CLIPBOARD_OPEN_RETRY_MS), || {
+        clipboard_win::Clipboard::new().ok()
+    })
+}
+
+/// Whether Chromium web custom data carries Monaco's marker for a copy made
+/// with an empty selection (VS Code: the caret line).
+fn web_custom_data_marks_empty_selection(data: &[u8]) -> bool {
+    const MARKER: &str = r#""isFromEmptySelection":true"#;
+    let marker: Vec<u8> = MARKER.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    data.windows(marker.len()).any(|window| window == marker)
+}
+
+/// Integrity level of a process (`SECURITY_MANDATORY_*_RID`), `None` when
+/// the process or its token cannot be queried.
+fn integrity_rid(pid: u32) -> Option<u32> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Security::{
+        GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
+        TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return None;
+        }
+        let mut token = std::ptr::null_mut();
+        let opened = OpenProcessToken(process, TOKEN_QUERY, &mut token);
+        CloseHandle(process);
+        if opened == 0 {
+            return None;
+        }
+
+        let mut needed = 0u32;
+        GetTokenInformation(token, TokenIntegrityLevel, std::ptr::null_mut(), 0, &mut needed);
+        // u64 storage - TOKEN_MANDATORY_LABEL holds a pointer and needs its alignment.
+        let mut buf = vec![0u64; (needed as usize).div_ceil(8)];
+        let mut rid = None;
+        if needed > 0
+            && GetTokenInformation(token, TokenIntegrityLevel, buf.as_mut_ptr().cast(), needed, &mut needed) != 0
+        {
+            let sid = (*buf.as_ptr().cast::<TOKEN_MANDATORY_LABEL>()).Label.Sid;
+            let count = *GetSidSubAuthorityCount(sid);
+            if count > 0 {
+                rid = Some(*GetSidSubAuthority(sid, u32::from(count) - 1));
+            }
+        }
+        CloseHandle(token);
+        rid
+    }
+}
+
+/// UIPI drops input sent to a higher integrity level. An unknown level is
+/// not treated as blocked - the copy is attempted and times out as before.
+fn input_blocked(target: Option<u32>, own: Option<u32>) -> bool {
+    matches!((target, own), (Some(target), Some(own)) if target > own)
 }
 
 /// Cached handle to the clip-llm overlay window, stored as a pointer-sized
@@ -776,7 +904,95 @@ fn make_key_input(vk: u16, flags: u32) -> INPUT {
 
 #[cfg(test)]
 mod tests {
-    use super::to_wide_null;
+    use super::{
+        input_blocked, integrity_rid, open_clipboard, retry, to_wide_null,
+        web_custom_data_marks_empty_selection,
+        WindowsPlatform, LINE_SELECT_FORMAT, WEB_CUSTOM_DATA_FORMAT,
+    };
+    use crate::platform::Platform;
+    use std::time::Duration;
+
+    // VS Code 1.10x copy metadata as captured from the clipboard (ids shortened).
+    const VSCODE_REAL_SELECTION: &str = r#"vscode-editor-data{"version":1,"id":"708a5473","isFromEmptySelection":false,"multicursorText":null,"mode":null}"#;
+    const VSCODE_EMPTY_SELECTION: &str = r#"vscode-editor-data{"version":1,"id":"0f5c5573","isFromEmptySelection":true,"multicursorText":null,"mode":null}"#;
+
+    fn utf16le(s: &str) -> Vec<u8> {
+        s.encode_utf16().flat_map(u16::to_le_bytes).collect()
+    }
+
+    /// Replace the clipboard with `text` plus extra registered formats.
+    fn put_clipboard(text: &str, extra: &[(&str, &[u8])]) {
+        let _clip = open_clipboard().expect("open clipboard");
+        clipboard_win::raw::set_string(text).expect("set text");
+        for (name, data) in extra {
+            let format = clipboard_win::register_format(name).expect("register format");
+            clipboard_win::raw::set_without_clear(format.get(), data).expect("set format");
+        }
+    }
+
+    #[test]
+    fn retry_stops_at_the_first_success() {
+        let mut calls = 0;
+        let result = retry(5, Duration::ZERO, || {
+            calls += 1;
+            (calls == 3).then_some("opened")
+        });
+        assert_eq!((result, calls), (Some("opened"), 3));
+    }
+
+    #[test]
+    fn retry_gives_up_after_the_attempt_limit() {
+        let mut calls = 0;
+        let result: Option<()> = retry(5, Duration::ZERO, || {
+            calls += 1;
+            None
+        });
+        assert_eq!((result, calls), (None, 5));
+    }
+
+    #[test]
+    fn web_custom_data_marker_is_found_only_for_an_empty_selection() {
+        assert!(web_custom_data_marks_empty_selection(&utf16le(VSCODE_EMPTY_SELECTION)));
+        assert!(!web_custom_data_marks_empty_selection(&utf16le(VSCODE_REAL_SELECTION)));
+        assert!(!web_custom_data_marks_empty_selection(&[]));
+        // The same text as UTF-8 is not the pickle's encoding.
+        assert!(!web_custom_data_marks_empty_selection(VSCODE_EMPTY_SELECTION.as_bytes()));
+    }
+
+    #[test]
+    fn line_copy_is_recognized_from_the_clipboard_markers() {
+        let _lock = crate::clipboard::test_support::lock_clipboard();
+
+        put_clipboard("plain selection", &[]);
+        assert!(!WindowsPlatform.clipboard_is_line_copy());
+
+        put_clipboard("caret line\n", &[(LINE_SELECT_FORMAT, &[1])]);
+        assert!(WindowsPlatform.clipboard_is_line_copy(), "Scintilla / Visual Studio marker");
+
+        put_clipboard("caret line\n", &[(WEB_CUSTOM_DATA_FORMAT, &utf16le(VSCODE_EMPTY_SELECTION))]);
+        assert!(WindowsPlatform.clipboard_is_line_copy(), "Monaco marker");
+
+        put_clipboard("real selection", &[(WEB_CUSTOM_DATA_FORMAT, &utf16le(VSCODE_REAL_SELECTION))]);
+        assert!(!WindowsPlatform.clipboard_is_line_copy());
+    }
+
+    const MEDIUM: u32 = 0x2000;
+    const HIGH: u32 = 0x3000;
+
+    #[test]
+    fn input_is_blocked_only_toward_a_higher_integrity_level() {
+        assert!(input_blocked(Some(HIGH), Some(MEDIUM)));
+        assert!(!input_blocked(Some(MEDIUM), Some(MEDIUM)));
+        assert!(!input_blocked(Some(MEDIUM), Some(HIGH)));
+        assert!(!input_blocked(None, Some(MEDIUM)));
+        assert!(!input_blocked(Some(HIGH), None));
+    }
+
+    #[test]
+    fn integrity_rid_reads_the_current_process() {
+        let rid = integrity_rid(std::process::id()).expect("own token is always readable");
+        assert!((0x1000..=0x4000).contains(&rid), "rid = {rid:#x}");
+    }
 
     #[test]
     fn to_wide_null_appends_terminator() {

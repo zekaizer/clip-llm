@@ -10,6 +10,29 @@ pub trait Platform {
     /// ignores it — `SendInput` cannot target a process.
     fn simulate_copy(&self, target: Option<i32>) -> Result<(), crate::PlatformError>;
 
+    /// Whether [`Platform::simulate_copy`] cannot reach the foreground window
+    /// because its process runs at a higher integrity level than this one.
+    /// Windows only: UIPI drops the input while `SendInput` still reports
+    /// success. `false` when either level cannot be determined.
+    fn copy_target_elevated(&self) -> bool {
+        false
+    }
+
+    /// Whether the clipboard holds an editor's no-selection fallback: the
+    /// caret line, copied because nothing was selected. Read from markers the
+    /// editor leaves next to the text (Windows only); `false` when unknown.
+    fn clipboard_is_line_copy(&self) -> bool {
+        false
+    }
+
+    /// The focused control's selected text, read without the clipboard
+    /// (Windows: UI Automation, ADR-0003). `None` when the control does not
+    /// expose a selection. Blocking and bounded - call off the UI thread.
+    /// An empty selection is not evidence that nothing is selected.
+    fn selected_text(&self) -> Option<String> {
+        None
+    }
+
     /// Process id of the frontmost application, recorded at capture-trigger
     /// time and later passed to [`Platform::simulate_copy`]. Returns `None`
     /// on platforms without per-process key-event posting (Windows).
@@ -105,6 +128,8 @@ pub(crate) mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::MacOsPlatform as NativePlatform;
 
+#[cfg(target_os = "windows")]
+mod uia;
 #[cfg(target_os = "windows")]
 pub(crate) mod windows;
 #[cfg(target_os = "windows")]
