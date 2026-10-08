@@ -216,7 +216,7 @@ impl Platform for WindowsPlatform {
     }
 
     fn clipboard_is_line_copy(&self) -> bool {
-        use clipboard_win::{is_format_avail, raw, register_format, Clipboard};
+        use clipboard_win::{is_format_avail, raw, register_format};
 
         if register_format(LINE_SELECT_FORMAT).is_some_and(|f| is_format_avail(f.get())) {
             return true;
@@ -227,7 +227,8 @@ impl Platform for WindowsPlatform {
         if !is_format_avail(format.get()) {
             return false;
         }
-        let Ok(_clipboard) = Clipboard::new_attempts(10) else {
+        let Some(_clipboard) = open_clipboard() else {
+            warn!("clipboard stayed busy; line-copy marker not checked");
             return false;
         };
         let mut data = Vec::new();
@@ -386,6 +387,31 @@ const LINE_SELECT_FORMAT: &str = "MSDEVLineSelect";
 /// Chromium's carrier for page-defined clipboard types (a pickle of UTF-16
 /// type/value pairs); Monaco editors put their copy metadata in it.
 const WEB_CUSTOM_DATA_FORMAT: &str = "Chromium Web Custom MIME Data Format";
+
+/// Attempts and spacing for opening a clipboard another process holds.
+const CLIPBOARD_OPEN_ATTEMPTS: u32 = 20;
+const CLIPBOARD_OPEN_RETRY_MS: u64 = 5;
+
+/// Call `attempt` until it succeeds, `delay` apart, at most `attempts` times.
+fn retry<T>(attempts: u32, delay: Duration, mut attempt: impl FnMut() -> Option<T>) -> Option<T> {
+    for n in 0..attempts {
+        if n > 0 {
+            thread::sleep(delay);
+        }
+        if let Some(value) = attempt() {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Open the clipboard, waiting out a holder for up to 100 ms - history and
+/// sync services open it right after a copy lands.
+fn open_clipboard() -> Option<clipboard_win::Clipboard> {
+    retry(CLIPBOARD_OPEN_ATTEMPTS, Duration::from_millis(CLIPBOARD_OPEN_RETRY_MS), || {
+        clipboard_win::Clipboard::new().ok()
+    })
+}
 
 /// Whether Chromium web custom data carries Monaco's marker for a copy made
 /// with an empty selection (VS Code: the caret line).
@@ -875,10 +901,12 @@ fn make_key_input(vk: u16, flags: u32) -> INPUT {
 #[cfg(test)]
 mod tests {
     use super::{
-        input_blocked, integrity_rid, to_wide_null, web_custom_data_marks_empty_selection,
+        input_blocked, integrity_rid, open_clipboard, retry, to_wide_null,
+        web_custom_data_marks_empty_selection,
         WindowsPlatform, LINE_SELECT_FORMAT, WEB_CUSTOM_DATA_FORMAT,
     };
     use crate::platform::Platform;
+    use std::time::Duration;
 
     // VS Code 1.10x copy metadata as captured from the clipboard (ids shortened).
     const VSCODE_REAL_SELECTION: &str = r#"vscode-editor-data{"version":1,"id":"708a5473","isFromEmptySelection":false,"multicursorText":null,"mode":null}"#;
@@ -890,12 +918,32 @@ mod tests {
 
     /// Replace the clipboard with `text` plus extra registered formats.
     fn put_clipboard(text: &str, extra: &[(&str, &[u8])]) {
-        let _clip = clipboard_win::Clipboard::new_attempts(10).expect("open clipboard");
+        let _clip = open_clipboard().expect("open clipboard");
         clipboard_win::raw::set_string(text).expect("set text");
         for (name, data) in extra {
             let format = clipboard_win::register_format(name).expect("register format");
             clipboard_win::raw::set_without_clear(format.get(), data).expect("set format");
         }
+    }
+
+    #[test]
+    fn retry_stops_at_the_first_success() {
+        let mut calls = 0;
+        let result = retry(5, Duration::ZERO, || {
+            calls += 1;
+            (calls == 3).then_some("opened")
+        });
+        assert_eq!((result, calls), (Some("opened"), 3));
+    }
+
+    #[test]
+    fn retry_gives_up_after_the_attempt_limit() {
+        let mut calls = 0;
+        let result: Option<()> = retry(5, Duration::ZERO, || {
+            calls += 1;
+            None
+        });
+        assert_eq!((result, calls), (None, 5));
     }
 
     #[test]
