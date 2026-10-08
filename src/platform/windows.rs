@@ -244,7 +244,11 @@ impl Platform for WindowsPlatform {
         if hwnd.is_null() || unsafe { GetWindowThreadProcessId(hwnd, &mut pid) } == 0 {
             return false;
         }
-        input_blocked(integrity_rid(pid), integrity_rid(std::process::id()))
+        let target = integrity_rid(pid);
+        if target.is_none() {
+            debug!("foreground process integrity level unreadable; copy attempted");
+        }
+        input_blocked(target, integrity_rid(std::process::id()))
     }
 
     /// No per-process key injection on Windows; see `simulate_copy`.
