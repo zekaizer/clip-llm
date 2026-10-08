@@ -472,8 +472,11 @@ mod tests {
         copy_result: Result<(), PlatformError>,
         /// If set, simulate_copy writes this text to clipboard.
         copy_text: Option<String>,
-        /// A second write this long after the first, as multi-step sources do.
-        second_write: Option<(Duration, String)>,
+        /// A second write made during the n-th counter poll after the copy,
+        /// as multi-step sources do.
+        second_write: Option<(usize, String)>,
+        /// Counter polls since the last simulate_copy.
+        polls: std::sync::atomic::AtomicUsize,
         elevated: bool,
         line_copy: bool,
         selected_text: Option<String>,
@@ -487,6 +490,7 @@ mod tests {
                 copy_result: Ok(()),
                 copy_text: None,
                 second_write: None,
+                polls: std::sync::atomic::AtomicUsize::new(0),
                 elevated: false,
                 line_copy: false,
                 selected_text: None,
@@ -505,19 +509,25 @@ mod tests {
                 let mut board = Clipboard::new().unwrap();
                 board.set_text(text).unwrap();
             }
-            if let Some((delay, text)) = self.second_write.clone() {
-                thread::spawn(move || {
-                    thread::sleep(delay);
-                    Clipboard::new().unwrap().set_text(text).unwrap();
-                });
-            }
+            self.polls.store(0, Ordering::SeqCst);
             Ok(())
         }
 
         // The mock writes through the real system clipboard, so delegate to
         // the real platform counter to observe those writes.
         fn clipboard_change_count(&self) -> u64 {
-            crate::platform::NativePlatform.clipboard_change_count()
+            // Sampled before the second write, which this poll then makes:
+            // the caller is told of the first write while the clipboard
+            // already holds the second.
+            let count = crate::platform::NativePlatform.clipboard_change_count();
+            let poll = self.polls.fetch_add(1, Ordering::SeqCst) + 1;
+            if let Some((at, text)) = &self.second_write
+                && self.copies.load(Ordering::SeqCst) > 0
+                && poll == *at
+            {
+                Clipboard::new().unwrap().set_text(text).unwrap();
+            }
+            count
         }
 
         fn copy_target_elevated(&self) -> bool {
@@ -1009,7 +1019,10 @@ mod tests {
         let mut mgr = ClipboardManager::new().unwrap();
         let mock = MockPlatform {
             copy_text: Some("first write".into()),
-            second_write: Some((Duration::from_millis(15), "second write".into())),
+            // Written inside the first poll after the copy, so it is on the
+            // clipboard before any read - settled or at the deadline - with
+            // no wall-clock race.
+            second_write: Some((1, "second write".into())),
             ..MockPlatform::default()
         };
         let content = mgr.copy_and_read(&mock, &AtomicBool::new(false), None).unwrap();
