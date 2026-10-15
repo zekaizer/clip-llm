@@ -149,6 +149,11 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 static TRAY_QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// "Restart" clicked; consumed by `poll_tray_events` on the main thread.
+static TRAY_RESTART_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// Set once a tray restart has closed the event loop; read by `main` after
+/// `run_native` returns to launch the next instance.
+static RELAUNCH_ON_EXIT: AtomicBool = AtomicBool::new(false);
 /// "Reload Config" clicked; consumed by `poll_tray_events` on the main thread,
 /// which owns the config swap and the worker notification.
 static TRAY_RELOAD_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -344,7 +349,8 @@ fn load_tray_icon() -> tray_icon::Icon {
     tray_icon::Icon::from_rgba(buf, info.width, info.height).expect("invalid RGBA icon data")
 }
 
-/// Initialize the system tray icon with a disabled version label and a Quit item.
+/// Initialize the system tray icon with a disabled version label and the
+/// Restart / Quit items.
 /// On macOS this is the only way to quit the app (Accessory policy = no Dock icon).
 /// The `TrayIcon` is intentionally leaked (process-lifetime resource).
 pub fn init_tray(ctx: &eframe::egui::Context, models: &[TrayModel], active: usize) {
@@ -373,6 +379,8 @@ pub fn init_tray(ctx: &eframe::egui::Context, models: &[TrayModel], active: usiz
     let launch_at_login_item =
         CheckMenuItem::new("Launch at Login", true, launch_at_login_enabled, None);
     let launch_at_login_id = launch_at_login_item.id().clone();
+    let restart_item = MenuItem::new("Restart", true, None);
+    let restart_id = restart_item.id().clone();
     let quit_item = MenuItem::new("Quit", true, None);
     let quit_id = quit_item.id().clone();
 
@@ -451,6 +459,7 @@ pub fn init_tray(ctx: &eframe::egui::Context, models: &[TrayModel], active: usiz
     menu.append(&PredefinedMenuItem::separator()).expect("failed to build tray menu");
     menu.append(&launch_at_login_item).expect("failed to build tray menu");
     menu.append(&PredefinedMenuItem::separator()).expect("failed to build tray menu");
+    menu.append(&restart_item).expect("failed to build tray menu");
     menu.append(&quit_item).expect("failed to build tray menu");
 
     let tray = TrayIconBuilder::new()
@@ -477,6 +486,11 @@ pub fn init_tray(ctx: &eframe::egui::Context, models: &[TrayModel], active: usiz
                     // Windows: a hidden window gets no WM_PAINT, so nudge it
                     // visible so update() runs and poll_tray_events() can act.
                     // Not needed on macOS.
+                    #[cfg(target_os = "windows")]
+                    windows::show_no_activate();
+                    ctx.request_repaint();
+                } else if event.id() == &restart_id {
+                    TRAY_RESTART_REQUESTED.store(true, Ordering::SeqCst);
                     #[cfg(target_os = "windows")]
                     windows::show_no_activate();
                     ctx.request_repaint();
@@ -615,7 +629,38 @@ pub fn poll_tray_events(ctx: &eframe::egui::Context) -> Option<TrayAction> {
         tracing::info!("quit requested from tray menu");
         ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
     }
+    if TRAY_RESTART_REQUESTED.swap(false, Ordering::SeqCst) {
+        tracing::info!("restart requested from tray menu");
+        RELAUNCH_ON_EXIT.store(true, Ordering::SeqCst);
+        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
+    }
     action
+}
+
+/// Whether the event loop was closed by the tray "Restart" item, so the
+/// caller must launch the next instance once this one has released the hotkey.
+pub fn restart_requested() -> bool {
+    RELAUNCH_ON_EXIT.load(Ordering::SeqCst)
+}
+
+/// Launch a new instance of this executable with the same arguments. Call
+/// only after this instance has unregistered its hotkey: the new instance
+/// registers the same combination at startup and refuses to run if it is taken.
+pub fn relaunch() {
+    let spawned = std::env::current_exe().and_then(|exe| {
+        let mut command = std::process::Command::new(exe);
+        command.args(std::env::args_os().skip(1));
+        // Own process group - launchd kills the exiting job's process group
+        // (`AbandonProcessGroup` defaults to false), which includes a child
+        // spawned by the instance the login LaunchAgent started.
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        command.spawn()
+    });
+    match spawned {
+        Ok(child) => tracing::info!("relaunched as pid {}", child.id()),
+        Err(e) => tracing::warn!("failed to relaunch: {e}"),
+    }
 }
 
 /// Show a native, modal alert with the given title and message, blocking until
@@ -644,5 +689,24 @@ pub fn pre_show_callback() -> Box<dyn Fn() + Send> {
     #[cfg(not(target_os = "windows"))]
     {
         Box::new(|| {})
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eframe::egui::{Context, RawInput, ViewportCommand, ViewportId};
+
+    #[test]
+    fn tray_restart_closes_the_event_loop_and_marks_the_relaunch() {
+        let ctx = Context::default();
+        TRAY_RESTART_REQUESTED.store(true, Ordering::SeqCst);
+        let mut action = Some(TrayAction::ReloadConfig);
+        let output = ctx.run(RawInput::default(), |ctx| action = poll_tray_events(ctx));
+
+        assert_eq!(action, None);
+        assert!(restart_requested());
+        let commands = &output.viewport_output[&ViewportId::ROOT].commands;
+        assert!(commands.contains(&ViewportCommand::Close), "{commands:?}");
     }
 }

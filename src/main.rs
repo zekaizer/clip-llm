@@ -299,6 +299,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }),
     )?;
 
+    // Release Ctrl+Shift+C before a tray restart launches the next instance,
+    // which fails startup while the combination is still registered.
+    if let Err(e) = manager.unregister(hotkey) {
+        warn!("failed to unregister hotkey: {e}");
+    }
+    drop(manager);
+    if clip_llm::platform::restart_requested() {
+        clip_llm::platform::relaunch();
+    }
+
     Ok(())
 }
 
