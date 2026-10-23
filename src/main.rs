@@ -232,6 +232,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Box::new(move |cc| {
             configure_fonts(&cc.egui_ctx);
             clip_llm::ui::theme::configure(&cc.egui_ctx);
+            // egui-winit requests winit's undecorated-window shadow, which
+            // extends the DWM frame into the client area: DWM then draws a
+            // border and caption buttons over the transparent margin around
+            // the panel, which draws its own shadow.
+            #[cfg(target_os = "windows")]
+            if let Some(window) = cc.winit_window() {
+                use winit::platform::windows::WindowExtWindows as _;
+                window.set_undecorated_shadow(false);
+            }
             cc.egui_ctx.set_theme(match clip_llm::config::get().ui_theme() {
                 clip_llm::config::ThemeChoice::Dark => egui::ThemePreference::Dark,
                 clip_llm::config::ThemeChoice::Light => egui::ThemePreference::Light,

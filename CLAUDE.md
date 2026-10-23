@@ -91,7 +91,7 @@ The project follows a 7-phase incremental plan defined in [docs/REQUIREMENTS.md]
 | Crate | Purpose |
 |-------|---------|
 | `eframe` / `egui` / `egui-wgpu` / `wgpu` | UI framework + GPU rendering |
-| `winit` | Window management (macOS) |
+| `winit` | Window management (macOS) and platform window settings egui-winit does not expose (Windows) |
 | `global-hotkey` | System-wide hotkey registration |
 | `arboard` | Clipboard read/write |
 | `reqwest` (`rustls-tls`) | Async HTTP client |
