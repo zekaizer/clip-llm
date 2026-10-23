@@ -565,9 +565,9 @@ fn truncate_chars(s: &str, max: usize) -> String {
     out
 }
 
-/// The copy-debug (🔍) action shared by Result and Error.
+/// The copy-debug (🛠) action shared by Result and Error.
 fn copy_debug_button(ui: &mut egui::Ui) -> bool {
-    docked_action_button(ui, "\u{1f50d}", "Copy the raw request + response to the clipboard")
+    docked_action_button(ui, "\u{1f6e0}", "Copy the raw request + response to the clipboard")
 }
 
 
@@ -1556,6 +1556,16 @@ mod tests {
         let failure = OverlayState::Error(Failure::request("Cannot reach the server."));
         let texts = settled_texts(&failure, "", Source::default);
         assert!(texts.iter().any(|t| t.contains("Request failed")), "{texts:?}");
+    }
+
+    /// The debug copy must not look like search: Translate's dictionary
+    /// lookup already says "Looking up".
+    #[test]
+    fn debug_copy_does_not_use_the_search_glyph() {
+        let failure = OverlayState::Error(Failure::request("Cannot reach the server."));
+        let texts = settled_texts(&failure, "", Source::default);
+        assert!(!texts.iter().any(|t| t.as_str() == "\u{1f50d}"), "{texts:?}");
+        assert!(texts.iter().any(|t| t.as_str() == "\u{1f6e0}"), "{texts:?}");
     }
 
     /// After a single-tap the footer carries both the clipboard source badge
