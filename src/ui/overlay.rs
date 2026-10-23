@@ -1176,27 +1176,26 @@ pub(crate) fn describe_images(images: &[crate::images::ImageAttachment]) -> Opti
 /// Compact source badge in Result's bottom row — where the content came from:
 /// selection (double-tap) vs clipboard (single-tap). Makes a slow double-tap
 /// that resolved to a single-tap — sending stale clipboard content — visibly
-/// different (#50). Icon-only to keep the row compact; the tooltip spells it out.
+/// different (#50). A word, not a glyph: no glyph reads at caption size.
+/// The tooltip adds the details.
 fn render_source_badge(
     ui: &mut egui::Ui,
     source: CaptureSource,
     files: &[String],
     images: &[crate::images::ImageAttachment],
 ) {
-    let (icon, mut tip) = if files.is_empty() {
-        match source {
-            CaptureSource::Selection => ("\u{2702}", "Source: selection (double-tap)".to_string()),
-            CaptureSource::Clipboard => ("\u{1f4cb}", "Source: clipboard (single-tap)".to_string()),
-        }
-    } else {
-        ("\u{1f4c4}", format!("Source: {} file(s) \u{2014} {}", files.len(), files.join(", ")))
+    let (label, mut tip) = match (files.len(), source) {
+        (0, CaptureSource::Selection) => ("Selection".to_string(), "Source: selection (double-tap)".to_string()),
+        (0, CaptureSource::Clipboard) => ("Clipboard".to_string(), "Source: clipboard (single-tap)".to_string()),
+        (1, _) => ("1 file".to_string(), format!("Source: {}", files[0])),
+        (n, _) => (format!("{n} files"), format!("Source: {n} files \u{2014} {}", files.join(", "))),
     };
     if let Some(summary) = describe_images(images) {
         tip.push('\n');
         tip.push_str(&summary);
     }
     ui.label(
-        egui::RichText::new(icon)
+        egui::RichText::new(label)
             .size(font::CAPTION)
             .color(color::text_muted()),
     )
@@ -1454,11 +1453,12 @@ mod tests {
         text: Option<&'a str>,
         capture: CaptureSource,
         auto_copy: bool,
+        files: &'a [String],
     }
 
     impl Default for Source<'_> {
         fn default() -> Self {
-            Self { text: None, capture: CaptureSource::Selection, auto_copy: true }
+            Self { text: None, capture: CaptureSource::Selection, auto_copy: true, files: &[] }
         }
     }
 
@@ -1492,7 +1492,7 @@ mod tests {
                 false,
                 source.auto_copy,
                 source.capture,
-                &[],
+                source.files,
                 &[],
                 false,
                 Some(std::time::Duration::from_secs(3)),
@@ -1568,15 +1568,23 @@ mod tests {
         assert!(texts.iter().any(|t| t.as_str() == "\u{1f6e0}"), "{texts:?}");
     }
 
-    /// After a single-tap the footer carries both the clipboard source badge
-    /// and the copy action; they must not share a glyph.
+    /// The source badge names the source in words: no glyph tells clipboard,
+    /// selection and files apart at caption size, and none may look like the
+    /// copy action next to it.
     #[test]
-    fn copy_action_and_clipboard_badge_look_different() {
-        let source = || Source { capture: CaptureSource::Clipboard, auto_copy: false, ..Source::default() };
-        let texts = settled_texts(&OverlayState::Result("answer".into()), "", source);
-        let clipboard = texts.iter().filter(|t| t.as_str() == "\u{1f4cb}").count();
-        assert_eq!(clipboard, 1, "only the source badge shows the clipboard glyph: {texts:?}");
-        assert!(texts.iter().any(|t| t.as_str() == "\u{1f5d0}"), "copy action shows the copy glyph: {texts:?}");
+    fn source_badge_names_the_source() {
+        let result = OverlayState::Result("answer".into());
+        let clipboard = settled_texts(&result, "", || Source { capture: CaptureSource::Clipboard, auto_copy: false, ..Source::default() });
+        assert!(clipboard.iter().any(|t| t.as_str() == "Clipboard"), "{clipboard:?}");
+        assert!(clipboard.iter().any(|t| t.as_str() == "\u{1f5d0}"), "copy action shows the copy glyph: {clipboard:?}");
+        assert!(!clipboard.iter().any(|t| t.as_str() == "\u{1f4cb}"), "{clipboard:?}");
+
+        let selection = settled_texts(&result, "", Source::default);
+        assert!(selection.iter().any(|t| t.as_str() == "Selection"), "{selection:?}");
+
+        static FILES: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| vec!["a.txt".into(), "b.png".into()]);
+        let files = settled_texts(&result, "", || Source { files: &FILES, ..Source::default() });
+        assert!(files.iter().any(|t| t.as_str() == "2 files"), "{files:?}");
     }
 
     /// Render `n` settled frames and return the last one's frame size.
