@@ -504,13 +504,13 @@ fn view_result(
         render_source_badge(ui, footer.source, footer.source_files, footer.source_images);
         actions_right(ui, |ui| {
             // Primary: auto_copy (double-tap) = paste/replace (↩); otherwise
-            // copy (📋), with ✓ confirming a just-done copy (#16a).
+            // copy (🗐), with ✓ confirming a just-done copy (#16a).
             let (icon, tip) = if footer.auto_copy {
                 ("\u{21a9}", "Paste over the selection (Enter)")
             } else if footer.copy_confirmed {
                 ("\u{2713}", "Copied")
             } else {
-                ("\u{1f4cb}", "Copy to clipboard (Enter)")
+                ("\u{1f5d0}", "Copy to clipboard (Enter)")
             };
             if docked_action_button(ui, icon, tip) {
                 *action = if footer.auto_copy {
@@ -1539,6 +1539,17 @@ mod tests {
         let streaming = settled_texts(&OverlayState::Processing, "the answer", source);
         assert!(streaming.iter().any(|t| t.contains("the answer")), "{streaming:?}");
         assert!(!streaming.iter().any(|t| t.contains("the captured words")), "{streaming:?}");
+    }
+
+    /// After a single-tap the footer carries both the clipboard source badge
+    /// and the copy action; they must not share a glyph.
+    #[test]
+    fn copy_action_and_clipboard_badge_look_different() {
+        let source = || Source { capture: CaptureSource::Clipboard, auto_copy: false, ..Source::default() };
+        let texts = settled_texts(&OverlayState::Result("answer".into()), "", source);
+        let clipboard = texts.iter().filter(|t| t.as_str() == "\u{1f4cb}").count();
+        assert_eq!(clipboard, 1, "only the source badge shows the clipboard glyph: {texts:?}");
+        assert!(texts.iter().any(|t| t.as_str() == "\u{1f5d0}"), "copy action shows the copy glyph: {texts:?}");
     }
 
     /// Render `n` settled frames and return the last one's frame size.
