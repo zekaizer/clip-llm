@@ -699,7 +699,7 @@ impl OverlayApp {
         );
         match action {
             overlay::SettingsAction::None => {}
-            overlay::SettingsAction::StartDrag => ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag),
+            overlay::SettingsAction::StartDrag => start_window_drag(ctx),
             overlay::SettingsAction::Cancel => self.close_settings(ctx),
             overlay::SettingsAction::OpenConfig => crate::platform::open_config_file(),
             overlay::SettingsAction::Save => self.save_settings(ctx),
@@ -1796,7 +1796,7 @@ impl OverlayApp {
             overlay::OverlayAction::Close => UiEvent::UserClose,
             overlay::OverlayAction::Cancel => UiEvent::UserCancel,
             overlay::OverlayAction::StartDrag => {
-                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                start_window_drag(ctx);
                 UiEvent::UserStartDrag
             }
             overlay::OverlayAction::Resize(size) => {
@@ -2293,6 +2293,13 @@ fn anchored_position_screen(
     anchored_clamped_to_bounds(anchor_top_left, win_size_points * scale, bounds)
 }
 
+
+/// Hand the window to the OS move loop.
+fn start_window_drag(ctx: &egui::Context) {
+    let (focused, primary_down) = ctx.input(|i| (i.viewport().focused, i.pointer.primary_down()));
+    debug!(?focused, primary_down, "start window drag");
+    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+}
 #[cfg(test)]
 mod tests {
     use super::*;

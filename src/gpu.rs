@@ -5,8 +5,11 @@
 //! ranking is pure over [`AdapterInfo`] so it is testable without a GPU;
 //! `main.rs` maps the live adapters through [`choose`].
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use egui_wgpu::SurfaceErrorAction;
 use tracing::warn;
-use wgpu::{AdapterInfo, DeviceType};
+use wgpu::{AdapterInfo, DeviceType, SurfaceError};
 
 /// `[ui].gpu` — which adapter the overlay renders with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,10 +106,53 @@ fn integrated_first(device_type: DeviceType) -> u8 {
     }
 }
 
+/// What the overlay's renderer does when acquiring a frame fails.
+///
+/// `Lost` and `Outdated` recreate the surface: egui-wgpu's default skips the
+/// frame instead and never recreates, so a surface lost to a GPU reset or a
+/// display change keeps failing until the process restarts - the window then
+/// never draws while repaint requests spin. Every other error skips the frame.
+pub fn surface_error_action(err: SurfaceError) -> SurfaceErrorAction {
+    match err {
+        SurfaceError::Lost | SurfaceError::Outdated => SurfaceErrorAction::RecreateSurface,
+        SurfaceError::Timeout | SurfaceError::OutOfMemory | SurfaceError::Other => SurfaceErrorAction::SkipFrame,
+    }
+}
+
+/// [`surface_error_action`] plus a warning. Errors can repeat every frame, so
+/// only the 1st, 2nd, 4th, 8th, ... are logged.
+pub fn on_surface_error(err: SurfaceError) -> SurfaceErrorAction {
+    static ERRORS: AtomicU64 = AtomicU64::new(0);
+    let count = ERRORS.fetch_add(1, Ordering::Relaxed) + 1;
+    let action = surface_error_action(err.clone());
+    if count.is_power_of_two() {
+        let action_name = match action {
+            SurfaceErrorAction::RecreateSurface => "recreating the surface",
+            SurfaceErrorAction::SkipFrame => "skipping the frame",
+        };
+        warn!("surface error #{count}: {err}; {action_name}");
+    }
+    action
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use wgpu::Backend;
+
+    #[test]
+    fn lost_and_outdated_surfaces_are_recreated() {
+        for err in [SurfaceError::Lost, SurfaceError::Outdated] {
+            assert!(matches!(surface_error_action(err.clone()), SurfaceErrorAction::RecreateSurface), "{err:?}");
+        }
+    }
+
+    #[test]
+    fn transient_surface_errors_skip_the_frame() {
+        for err in [SurfaceError::Timeout, SurfaceError::OutOfMemory, SurfaceError::Other] {
+            assert!(matches!(surface_error_action(err.clone()), SurfaceErrorAction::SkipFrame), "{err:?}");
+        }
+    }
 
     /// Every adapter composes alpha.
     fn all(n: usize) -> Vec<bool> {

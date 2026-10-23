@@ -789,9 +789,11 @@ pub fn show_no_activate_at(position: Option<(f32, f32)>) {
 /// moved there **synchronously** via `SetWindowPos` before becoming visible.
 /// This eliminates the one-frame flash at the wrong location.
 ///
-/// Uses `ShowWindowAsync` (PostMessage-based, cross-thread safe) + `SetForegroundWindow`.
+/// Uses `ShowWindowAsync` + `SetForegroundWindow` + `SetFocus`. Must run on the
+/// window's thread (the UI thread): `SetFocus` fails from any other thread.
 /// Called from `show_window()` in the UI after clipboard content is ready.
 pub fn show_and_focus_window(position: Option<(f32, f32)>) {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         SetForegroundWindow, SetWindowPos, ShowWindowAsync, HWND_TOP, SW_SHOW,
         SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
@@ -814,6 +816,10 @@ pub fn show_and_focus_window(position: Option<(f32, f32)>) {
             }
             ShowWindowAsync(hwnd, SW_SHOW);
             SetForegroundWindow(hwnd);
+            // Activation alone can leave the thread's keyboard focus NULL (the
+            // window was hidden while focused, e.g. set_tool_window's cycle);
+            // winit then reports it unfocused and drops every StartDrag.
+            SetFocus(hwnd);
         }
     }
 }
