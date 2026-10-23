@@ -64,7 +64,7 @@ pub fn show(
     // egui::Area remembers its previous size and, with `constrain` on, caps
     // the first sizing pass at the (small, initial) window — so a fixed-size
     // panel must opt out.
-    let area = egui::Area::new("overlay".into())
+    let area = egui::Area::new(egui::Id::unique("overlay"))
         .fixed_pos(egui::pos2(size::SHADOW_PAD, size::SHADOW_PAD))
         .constrain(false)
         .sense(egui::Sense::drag())
@@ -152,7 +152,7 @@ impl Body<'_> {
     /// it — the only way body text is drawn, so nothing outgrows the panel.
     pub fn fill_text(
         &mut self,
-        id_salt: impl std::hash::Hash,
+        id_salt: impl egui::AsIdSalt,
         text: &str,
         text_color: egui::Color32,
         stick_to_bottom: bool,
@@ -171,7 +171,7 @@ fn resize_grip(ui: &mut egui::Ui, frame_rect: egui::Rect) -> GripAction {
     let grip_rect =
         egui::Rect::from_min_max(frame_rect.max - egui::Vec2::splat(size::GRIP), frame_rect.max);
     let resp = ui
-        .interact(grip_rect, ui.id().with("resize_grip"), egui::Sense::click_and_drag())
+        .interact(grip_rect, ui.scope_id().with("resize_grip"), egui::Sense::click_and_drag())
         .on_hover_cursor(egui::CursorIcon::ResizeSouthEast)
         .on_hover_text("Drag to resize \u{b7} double-click for the default size");
     let tone = if resp.hovered() || resp.dragged() {

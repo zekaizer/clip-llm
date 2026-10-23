@@ -197,6 +197,11 @@ pub mod size {
     pub const TOOLTIP_WIDTH: f32 = 320.0;
     /// Popup (tooltip, dropdown) inner margin (horizontal, vertical).
     pub const POPUP_MARGIN: egui::Margin = egui::Margin::symmetric(8, 6);
+    /// Padding inside egui buttons (tabs, settings choices).
+    pub const BUTTON_PADDING: egui::Vec2 = egui::vec2(4.0, 1.0);
+    /// Minimum size of an egui interactive widget; the height sets the rows
+    /// of the settings form.
+    pub const INTERACT_SIZE: egui::Vec2 = egui::vec2(40.0, 18.0);
 }
 
 /// `RichText` in a type role and tone — the only way views make text.
@@ -221,6 +226,11 @@ pub fn configure(ctx: &egui::Context) {
             v.widgets.noninteractive.fg_stroke.color = color::text_soft();
             style.spacing.menu_margin = size::POPUP_MARGIN;
             style.spacing.tooltip_width = size::TOOLTIP_WIDTH;
+            style.spacing.button_padding = size::BUTTON_PADDING;
+            style.spacing.interact_size = size::INTERACT_SIZE;
+            // Body text fades itself (`widgets::scroll_text`); egui's
+            // gradient would composite over the translucent frame again.
+            style.spacing.scroll.fade.strength = 0.0;
             if theme == egui::Theme::Light {
                 // egui's light widgets assume a white window; on the
                 // overlay's light-grey frame their near-white fills and
@@ -257,7 +267,7 @@ mod tests {
         configure(&ctx);
         for theme in [egui::Theme::Dark, egui::Theme::Light] {
             ctx.set_theme(theme);
-            let style = ctx.style();
+            let style = ctx.global_style();
             let frame = egui::Frame::popup(&style);
             let dark = theme == egui::Theme::Dark;
             assert_eq!(frame.fill.a(), 255, "{theme:?}: popup fill is opaque");
@@ -269,6 +279,46 @@ mod tests {
             let text = style.visuals.text_color();
             assert_eq!(text.a(), 255, "{theme:?}: tooltip text is opaque");
             assert_eq!(text.r() >= 180, dark, "{theme:?}: tooltip text contrasts with the fill");
+        }
+    }
+
+    /// Body text fades by its own alpha (`widgets::scroll_text`); egui's
+    /// scroll fade paints a gradient over the translucent frame instead.
+    #[test]
+    fn scroll_areas_paint_no_fade_of_their_own() {
+        let ctx = egui::Context::default();
+        configure(&ctx);
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            ctx.set_theme(theme);
+            assert_eq!(ctx.global_style().spacing.scroll.fade.strength, 0.0, "{theme:?}");
+        }
+    }
+
+    /// Icon buttons are font glyphs and must come from the bundled fonts: a
+    /// fallback to system fonts differs per machine. These are the icons
+    /// egui's emoji fonts carry; the rest (✓ ✕ ⇄ ...) come from D2Coding,
+    /// which `main` adds and a test context lacks.
+    #[test]
+    fn emoji_icon_glyphs_are_in_the_bundled_fonts() {
+        let ctx = egui::Context::default();
+        let _ = crate::ui::test_pass(&ctx, egui::RawInput::default(), |_| {});
+        let icons = "\u{1f4cb}\u{1f50d}\u{1f4c4}\u{1f4cc}\u{26a0}\u{2702}\u{2318}\u{21bb}\u{21a9}\u{25b6}";
+        let font = egui::FontId::proportional(font::LABEL);
+        let missing: String = ctx.fonts_mut(|f| icons.chars().filter(|&c| !f.has_glyph(&font, c)).collect());
+        assert!(missing.is_empty(), "no bundled glyph for {missing:?}");
+    }
+
+    /// The header row and the settings form are laid out for these sizes; a
+    /// roomier egui default overlaps the tabs and pushes the form off-screen.
+    #[test]
+    fn egui_widgets_use_the_layout_tokens() {
+        let ctx = egui::Context::default();
+        configure(&ctx);
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            ctx.set_theme(theme);
+            let spacing = ctx.global_style().spacing.clone();
+            assert_eq!(spacing.button_padding, size::BUTTON_PADDING, "{theme:?}");
+            assert_eq!(spacing.interact_size, size::INTERACT_SIZE, "{theme:?}");
         }
     }
 
@@ -297,8 +347,8 @@ mod tests {
                 events: if frame == 1 { vec![egui::Event::PointerMoved(egui::pos2(30.0, 30.0))] } else { Vec::new() },
                 ..Default::default()
             };
-            output = Some(ctx.run(raw, |ctx| {
-                egui::Area::new("tip".into()).fixed_pos(egui::pos2(20.0, 20.0)).show(ctx, |ui| {
+            output = Some(crate::ui::test_pass(&ctx, raw, |ctx| {
+                egui::Area::new(egui::Id::unique("tip")).fixed_pos(egui::pos2(20.0, 20.0)).show(ctx, |ui| {
                     ui.add(egui::Button::new("x").min_size(egui::vec2(26.0, 26.0))).on_hover_text(text.as_str());
                 });
             }));

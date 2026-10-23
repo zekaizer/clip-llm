@@ -36,7 +36,7 @@ pub struct RevisionView<'a> {
 
 /// egui id of the revise input (Result footer).
 pub fn revise_field_id() -> egui::Id {
-    egui::Id::new("revise_field")
+    egui::Id::unique("revise_field")
 }
 
 /// Thinking mode state for UI rendering.
@@ -606,7 +606,7 @@ pub fn render_settings<'t>(
         form.notice = None;
     }
 
-    let area_resp = egui::Area::new("settings".into())
+    let area_resp = egui::Area::new(egui::Id::unique("settings"))
         .fixed_pos(egui::pos2(size::SHADOW_PAD, size::SHADOW_PAD))
         .constrain(false)
         .sense(egui::Sense::drag())
@@ -1202,7 +1202,7 @@ fn render_rephrase_params(
     // Capture the outer left edge before indent shifts the cursor.
     let outer_left = ui.cursor().min.x;
 
-    let response = ui.indent(egui::Id::new("rephrase_params"), |ui| {
+    let response = ui.indent("rephrase_params", |ui| {
         if let Some(style) = pill_row(ui, "Style", RephraseStyle::ALL, params.style, |s| s.label()) {
             *action = OverlayAction::ChangeRephraseStyle(style);
         }
@@ -1406,7 +1406,7 @@ mod tests {
         let mut form = crate::settings::SettingsForm::from_config(&crate::config::Config::default(), None);
         form.error = Some("Both language names are required.".into());
         let mut result = None;
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        let _ = crate::ui::test_pass(&ctx, egui::RawInput::default(), |ctx| {
             result = Some(render_settings(
                 ctx,
                 &mut form,
@@ -1436,7 +1436,7 @@ mod tests {
         panel_size: egui::Vec2,
     ) -> OverlayOutput {
         let mut output = None;
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        let _ = crate::ui::test_pass(ctx, egui::RawInput::default(), |ctx| {
             output = Some(render(
                 state,
                 mode,
@@ -1550,7 +1550,7 @@ mod tests {
     fn action_for(input: egui::RawInput, state: &OverlayState, mode: ProcessMode) -> OverlayAction {
         let ctx = egui::Context::default();
         let mut output = None;
-        let _ = ctx.run(input, |ctx| {
+        let _ = crate::ui::test_pass(&ctx, input, |ctx| {
             output = Some(render(
                 state,
                 mode,
@@ -1597,7 +1597,7 @@ mod tests {
         revising: bool,
     ) -> OverlayAction {
         let mut output = None;
-        let _ = ctx.run(input, |ctx| {
+        let _ = crate::ui::test_pass(ctx, input, |ctx| {
             output = Some(render(
                 state,
                 ProcessMode::Translate,

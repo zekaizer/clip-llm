@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use egui_wgpu::SurfaceErrorAction;
 use tracing::warn;
-use wgpu::{AdapterInfo, DeviceType, SurfaceError};
+use wgpu::{AdapterInfo, CurrentSurfaceTexture, DeviceType};
 
 /// `[ui].gpu` — which adapter the overlay renders with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,29 +108,35 @@ fn integrated_first(device_type: DeviceType) -> u8 {
 
 /// What the overlay's renderer does when acquiring a frame fails.
 ///
-/// `Lost` and `Outdated` recreate the surface: egui-wgpu's default skips the
-/// frame instead and never recreates, so a surface lost to a GPU reset or a
-/// display change keeps failing until the process restarts - the window then
-/// never draws while repaint requests spin. Every other error skips the frame.
-pub fn surface_error_action(err: SurfaceError) -> SurfaceErrorAction {
-    match err {
-        SurfaceError::Lost | SurfaceError::Outdated => SurfaceErrorAction::RecreateSurface,
-        SurfaceError::Timeout | SurfaceError::OutOfMemory | SurfaceError::Other => SurfaceErrorAction::SkipFrame,
+/// `Outdated` reconfigures and `Lost` recreates the surface: skipping either
+/// keeps failing every frame until the process restarts, the window never
+/// drawing while repaint requests spin. Every other status skips the frame.
+pub fn surface_status_action(status: &CurrentSurfaceTexture) -> SurfaceErrorAction {
+    match status {
+        CurrentSurfaceTexture::Outdated => SurfaceErrorAction::Reconfigure,
+        CurrentSurfaceTexture::Lost => SurfaceErrorAction::RecreateSurface,
+        _ => SurfaceErrorAction::SkipFrame,
     }
 }
 
-/// [`surface_error_action`] plus a warning. Errors can repeat every frame, so
-/// only the 1st, 2nd, 4th, 8th, ... are logged.
-pub fn on_surface_error(err: SurfaceError) -> SurfaceErrorAction {
+/// [`surface_status_action`] plus a warning, logged under this crate's target
+/// (egui-wgpu's own log is filtered out by default). Failures can repeat every
+/// frame, so only the 1st, 2nd, 4th, 8th, ... are logged. `Occluded` is a
+/// hidden window, not a failure, and is not logged.
+pub fn on_surface_status(status: &CurrentSurfaceTexture) -> SurfaceErrorAction {
     static ERRORS: AtomicU64 = AtomicU64::new(0);
+    let action = surface_status_action(status);
+    if matches!(status, CurrentSurfaceTexture::Occluded) {
+        return action;
+    }
     let count = ERRORS.fetch_add(1, Ordering::Relaxed) + 1;
-    let action = surface_error_action(err.clone());
     if count.is_power_of_two() {
         let action_name = match action {
+            SurfaceErrorAction::Reconfigure => "reconfiguring the surface",
             SurfaceErrorAction::RecreateSurface => "recreating the surface",
             SurfaceErrorAction::SkipFrame => "skipping the frame",
         };
-        warn!("surface error #{count}: {err}; {action_name}");
+        warn!("surface error #{count}: {status:?}; {action_name}");
     }
     action
 }
@@ -141,16 +147,21 @@ mod tests {
     use wgpu::Backend;
 
     #[test]
-    fn lost_and_outdated_surfaces_are_recreated() {
-        for err in [SurfaceError::Lost, SurfaceError::Outdated] {
-            assert!(matches!(surface_error_action(err.clone()), SurfaceErrorAction::RecreateSurface), "{err:?}");
-        }
+    fn outdated_surface_is_reconfigured() {
+        let action = surface_status_action(&CurrentSurfaceTexture::Outdated);
+        assert!(matches!(action, SurfaceErrorAction::Reconfigure));
     }
 
     #[test]
-    fn transient_surface_errors_skip_the_frame() {
-        for err in [SurfaceError::Timeout, SurfaceError::OutOfMemory, SurfaceError::Other] {
-            assert!(matches!(surface_error_action(err.clone()), SurfaceErrorAction::SkipFrame), "{err:?}");
+    fn lost_surface_is_recreated() {
+        let action = surface_status_action(&CurrentSurfaceTexture::Lost);
+        assert!(matches!(action, SurfaceErrorAction::RecreateSurface));
+    }
+
+    #[test]
+    fn transient_surface_statuses_skip_the_frame() {
+        for status in [CurrentSurfaceTexture::Timeout, CurrentSurfaceTexture::Occluded, CurrentSurfaceTexture::Validation] {
+            assert!(matches!(surface_status_action(&status), SurfaceErrorAction::SkipFrame), "{status:?}");
         }
     }
 
@@ -160,15 +171,7 @@ mod tests {
     }
 
     fn info(name: &str, device_type: DeviceType, backend: Backend) -> AdapterInfo {
-        AdapterInfo {
-            name: name.into(),
-            vendor: 0,
-            device: 0,
-            device_type,
-            driver: String::new(),
-            driver_info: String::new(),
-            backend,
-        }
+        AdapterInfo { name: name.into(), ..AdapterInfo::new(device_type, backend) }
     }
 
     #[test]

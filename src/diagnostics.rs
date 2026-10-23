@@ -74,8 +74,11 @@ pub struct DiagCollector {
     frame_counter: u64,
     pending_screenshot: bool,
     /// True once we've sent the Screenshot viewport command and are waiting
-    /// for the Event::Screenshot callback.
+    /// for its callback.
     screenshot_requested: bool,
+    /// Screenshot callbacks deliver here; drained by `poll_screenshots`.
+    shots_tx: mpsc::Sender<Arc<egui::ColorImage>>,
+    shots_rx: mpsc::Receiver<Arc<egui::ColorImage>>,
     /// Frame at which the viewport first settled (size matched desired).
     settled_at_frame: Option<u64>,
     dump_counter: u32,
@@ -95,11 +98,14 @@ impl DiagCollector {
             info!("diag: output dir = {}", dump_dir.display());
         }
 
+        let (shots_tx, shots_rx) = mpsc::channel();
         Self {
             ring: VecDeque::with_capacity(RING_CAPACITY),
             frame_counter: 0,
             pending_screenshot: false,
             screenshot_requested: false,
+            shots_tx,
+            shots_rx,
             settled_at_frame: None,
             dump_counter: 0,
             dump_dir,
@@ -187,17 +193,27 @@ impl DiagCollector {
                         "diag: requesting screenshot at frame {} (settled at {})",
                         self.frame_counter, settled_frame
                     );
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(
-                        egui::UserData::default(),
-                    ));
+                    let tx = self.shots_tx.clone();
+                    let repaint = ctx.clone();
+                    ctx.request_screenshot(move |image| {
+                        let _ = tx.send(image);
+                        repaint.request_repaint();
+                    });
                     self.screenshot_requested = true;
                 }
             }
         }
     }
 
-    /// Called when a screenshot event is received.
-    pub fn on_screenshot(&mut self, image: &Arc<egui::ColorImage>) {
+    /// Hand every delivered screenshot to `on_screenshot`.
+    pub fn poll_screenshots(&mut self) {
+        while let Ok(image) = self.shots_rx.try_recv() {
+            self.on_screenshot(&image);
+        }
+    }
+
+    /// Called when a screenshot arrives.
+    fn on_screenshot(&mut self, image: &Arc<egui::ColorImage>) {
         if !self.pending_screenshot {
             return;
         }
