@@ -120,7 +120,7 @@ pub(super) fn fixed_height_row(ui: &mut egui::Ui, height: f32, add_contents: imp
 /// `panel::Body::fill_text`, which supplies the height.
 pub(super) fn scroll_text(
     ui: &mut egui::Ui,
-    id_salt: impl std::hash::Hash,
+    id_salt: impl egui::AsIdSalt,
     text: &str,
     text_color: egui::Color32,
     max_height: f32,
@@ -145,9 +145,9 @@ pub(super) fn scroll_text(
             {
                 ui.scroll_with_delta(egui::vec2(0.0, step));
             }
-            // The content ui starts at the (scrolled) content top; its clip
-            // rect is the viewport plus egui's small clip margin.
-            let viewport = ui.clip_rect().shrink(ui.visuals().clip_rect_margin);
+            // The content ui starts at the (scrolled) content top; along the
+            // scroll axis its clip rect is the viewport.
+            let viewport = ui.clip_rect();
             let offset = viewport.top() - ui.cursor().top();
             let font_id = egui::FontId::proportional(font::BODY);
             let wrap_width = ui.available_width();
@@ -183,7 +183,7 @@ fn faded_job(
     let mut byte = 0usize;
     for row in &galley.rows {
         let start = byte;
-        for _ in 0..row.char_count_including_newline() {
+        for _ in 0..row.char_count_including_newline().0 {
             if let Some((i, c)) = chars.next() {
                 byte = i + c.len_utf8();
             }
@@ -195,14 +195,14 @@ fn faded_job(
         let alpha = row_alpha(mid, viewport_height, fade_top, fade_bottom);
         job.sections.push(egui::text::LayoutSection {
             leading_space: 0.0,
-            byte_range: start..byte,
+            byte_range: start.into()..byte.into(),
             format: egui::TextFormat { font_id: font_id.clone(), color: color.gamma_multiply(alpha), ..Default::default() },
         });
     }
     if byte < text.len() {
         job.sections.push(egui::text::LayoutSection {
             leading_space: 0.0,
-            byte_range: byte..text.len(),
+            byte_range: byte.into()..text.len().into(),
             format: egui::TextFormat { font_id, color, ..Default::default() },
         });
     }

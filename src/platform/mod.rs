@@ -702,7 +702,7 @@ mod tests {
         let ctx = Context::default();
         TRAY_RESTART_REQUESTED.store(true, Ordering::SeqCst);
         let mut action = Some(TrayAction::ReloadConfig);
-        let output = ctx.run(RawInput::default(), |ctx| action = poll_tray_events(ctx));
+        let output = crate::ui::test_pass(&ctx, RawInput::default(), |ctx| action = poll_tray_events(ctx));
 
         assert_eq!(action, None);
         assert!(restart_requested());

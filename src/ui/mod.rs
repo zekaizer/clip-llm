@@ -190,6 +190,9 @@ pub struct OverlayApp {
     /// so the taskbar exclusion must be (re)applied on the *next* frame, once
     /// that recomputation has happened. See [`OverlayApp::maybe_initial_hide`].
     pending_taskbar_exclude: bool,
+    /// Whether the last `logic` tick wanted the window on screen (an overlay
+    /// state or the settings panel). Its rising edge requests a painted frame.
+    wants_shown: bool,
     /// One-shot startup notice (e.g. a failed config load) surfaced via the
     /// error overlay on the first frame after the initial hide settles.
     startup_notice: Option<String>,
@@ -359,6 +362,7 @@ impl OverlayApp {
             spawn_position: None,
             initial_hide_done: false,
             pending_taskbar_exclude: false,
+            wants_shown: false,
             startup_notice: None,
             model_names: Vec::new(),
             settings: None,
@@ -428,6 +432,7 @@ impl OverlayApp {
             spawn_position: None,
             initial_hide_done: false,
             pending_taskbar_exclude: false,
+            wants_shown: false,
             startup_notice: None,
             model_names: Vec::new(),
             settings: None,
@@ -1958,24 +1963,11 @@ impl OverlayApp {
 }
 
 impl eframe::App for OverlayApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        theme::color::apply(ctx);
-        #[cfg(feature = "diagnostics")]
-        for key in std::mem::take(&mut self.diag_keys) {
-            ctx.input_mut(|i| {
-                i.events.push(egui::Event::Key {
-                    key,
-                    physical_key: None,
-                    pressed: true,
-                    repeat: false,
-                    modifiers: egui::Modifiers::NONE,
-                });
-            });
-        }
-        if !self.zoom_applied {
-            self.zoom_applied = true;
-            ctx.set_zoom_factor(self.saved_zoom);
-        }
+    /// Runs before every `ui`, and alone while the window is hidden: eframe
+    /// runs no ui pass for an occluded window (macOS reports a hidden window
+    /// as occluded), so every hotkey, worker reply and tray action is handled
+    /// here. Paints nothing.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let startup_settled = self.initial_hide_done;
         self.maybe_initial_hide(ctx);
 
@@ -2011,15 +2003,46 @@ impl eframe::App for OverlayApp {
         #[cfg(feature = "diagnostics")]
         self.poll_diag_actions(ctx);
 
-        // Diagnostics: receive screenshot events.
+        match crate::platform::poll_tray_events(ctx) {
+            Some(crate::platform::TrayAction::SelectModel(index)) => self.select_model(ctx, index),
+            Some(crate::platform::TrayAction::ReloadConfig) => self.reload_config(ctx),
+            Some(crate::platform::TrayAction::OpenSettings) => self.open_settings(ctx),
+            None => {}
+        }
+
+        // A show issued from a logic-only tick would otherwise leave the
+        // window displaying its last frame until macOS reports it unoccluded.
+        // Edge-triggered: a window that stays occluded must not repaint forever.
+        let wants_shown = self.settings.is_some() || !matches!(self.sm.state(), OverlayState::Hidden);
+        if wants_shown && !self.wants_shown {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);
+        }
+        self.wants_shown = wants_shown;
+
+        self.schedule_repaint(ctx);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx();
+        theme::color::apply(ctx);
         #[cfg(feature = "diagnostics")]
-        ctx.input(|i| {
-            for event in &i.events {
-                if let egui::Event::Screenshot { image, .. } = event {
-                    self.diag.on_screenshot(image);
-                }
-            }
-        });
+        for key in std::mem::take(&mut self.diag_keys) {
+            ctx.input_mut(|i| {
+                i.events.push(egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            });
+        }
+        if !self.zoom_applied {
+            self.zoom_applied = true;
+            ctx.set_zoom_factor(self.saved_zoom);
+        }
+        #[cfg(feature = "diagnostics")]
+        self.diag.poll_screenshots();
 
         let output = if self.settings.is_some() && matches!(self.sm.state(), OverlayState::Hidden) {
             // The settings panel borrows the window while the state machine
@@ -2103,13 +2126,6 @@ impl eframe::App for OverlayApp {
             });
             self.diag.tick_screenshot(ctx);
             self.diag.flush_pending_if_stale();
-        }
-
-        match crate::platform::poll_tray_events(ctx) {
-            Some(crate::platform::TrayAction::SelectModel(index)) => self.select_model(ctx, index),
-            Some(crate::platform::TrayAction::ReloadConfig) => self.reload_config(ctx),
-            Some(crate::platform::TrayAction::OpenSettings) => self.open_settings(ctx),
-            None => {}
         }
 
         // Focus-loss auto-hide (skip during diagnostics).
@@ -2300,6 +2316,19 @@ fn start_window_drag(ctx: &egui::Context) {
     debug!(?focused, primary_down, "start window drag");
     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
 }
+/// `Context::run_pass` for tests. Nothing paints the output, and egui
+/// debug-asserts that a dropped textures delta was applied.
+#[cfg(test)]
+pub(crate) fn test_pass(
+    ctx: &egui::Context,
+    input: egui::RawInput,
+    run: impl FnMut(&egui::Context),
+) -> egui::FullOutput {
+    let mut output = ctx.run_pass(input, run);
+    output.textures_delta.clear();
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2311,13 +2340,10 @@ mod tests {
     // --- scroll state reset (stale result scroll offset — see clear_scroll_state) ---
 
     #[test]
-    #[allow(clippy::field_reassign_with_default)]
     fn clear_scroll_state_drops_persisted_offsets() {
         let ctx = egui::Context::default();
-        let id = egui::Id::new("result_scroll_regression");
-        let mut state = egui::scroll_area::State::default();
-        state.offset = egui::vec2(0.0, 123.0);
-        state.store(&ctx, id);
+        let id = egui::Id::unique("result_scroll_regression");
+        egui::scroll_area::State::default().store(&ctx, id);
         assert!(
             egui::scroll_area::State::load(&ctx, id).is_some(),
             "precondition: scroll state must persist in ctx.data"
@@ -3073,7 +3099,7 @@ mod tests {
         app.poll_responses(&ctx);
         assert!(matches!(app.sm.state(), OverlayState::Result(_)));
 
-        let full = ctx.run(egui::RawInput::default(), |ctx| app.open_settings(ctx));
+        let full = crate::ui::test_pass(&ctx, egui::RawInput::default(), |ctx| app.open_settings(ctx));
 
         assert!(app.settings.is_some());
         assert_eq!(*app.sm.state(), OverlayState::Hidden);
@@ -3095,7 +3121,7 @@ mod tests {
         let ctx = egui::Context::default();
         app.open_settings(&ctx);
         assert!(app.settings.is_some());
-        let full = ctx.run(egui::RawInput::default(), |ctx| app.open_settings(ctx));
+        let full = crate::ui::test_pass(&ctx, egui::RawInput::default(), |ctx| app.open_settings(ctx));
         assert!(app.settings.is_some());
         // A request for a repaint is the observable "do something" here: the
         // native show has no egui footprint on macOS.
@@ -3158,11 +3184,11 @@ mod tests {
         raw.viewports.entry(egui::ViewportId::ROOT).or_default().outer_rect =
             Some(egui::Rect::from_min_size(egui::pos2(300.0, 400.0), egui::vec2(600.0, 520.0)));
         let mut changed = false;
-        let _ = ctx.run(raw.clone(), |ctx| changed = app.note_settings_position(ctx));
+        let _ = crate::ui::test_pass(&ctx, raw.clone(), |ctx| changed = app.note_settings_position(ctx));
         assert!(changed, "first note is a change");
         assert_eq!(app.settings_pos, Some(egui::pos2(300.0, 400.0)));
         let mut again = false;
-        let _ = ctx.run(raw, |ctx| again = app.note_settings_position(ctx));
+        let _ = crate::ui::test_pass(&ctx, raw, |ctx| again = app.note_settings_position(ctx));
         assert!(!again, "the same position again is not a change");
     }
 
@@ -3183,17 +3209,17 @@ mod tests {
                 .count()
         };
 
-        let first = ctx.run(egui::RawInput::default(), |ctx| {
+        let first = crate::ui::test_pass(&ctx, egui::RawInput::default(), |ctx| {
             app.update_viewport(ctx, Some(win), Some(app.panel_size));
         });
         assert_eq!(inner_sizes(&first), 1);
-        let same = ctx.run(egui::RawInput::default(), |ctx| {
+        let same = crate::ui::test_pass(&ctx, egui::RawInput::default(), |ctx| {
             app.update_viewport(ctx, Some(win), Some(app.panel_size));
         });
         assert_eq!(inner_sizes(&same), 0, "unchanged size and zoom: nothing sent");
 
-        let _ = ctx.run(egui::RawInput::default(), |ctx| ctx.set_zoom_factor(1.5));
-        let zoomed = ctx.run(egui::RawInput::default(), |ctx| {
+        let _ = crate::ui::test_pass(&ctx, egui::RawInput::default(), |ctx| ctx.set_zoom_factor(1.5));
+        let zoomed = crate::ui::test_pass(&ctx, egui::RawInput::default(), |ctx| {
             assert_eq!(ctx.zoom_factor(), 1.5);
             app.update_viewport(ctx, Some(win), Some(app.panel_size));
         });

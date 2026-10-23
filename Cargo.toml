@@ -16,10 +16,10 @@ thiserror = "2"
 regex = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-eframe = { version = "0.33", default-features = false, features = ["default_fonts", "wgpu"] }
-egui-wgpu = "0.33"
-wgpu = "27"
-wgpu-types = "27"
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "wgpu"] }
+egui-wgpu = "0.37"
+wgpu = "30"
+wgpu-types = "30"
 tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
 zstd = "0.13"
 png = "0.18"
@@ -45,5 +45,5 @@ winit = { version = "0.30", default-features = false }
 # Raw clipboard formats arboard does not expose; already linked through arboard.
 clipboard-win = "5.4"
 # COM (UI Automation) only; pinned to the version wgpu resolves (ADR-0003).
-windows = { version = "0.58", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Accessibility"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Accessibility"] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_System_DataExchange", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }

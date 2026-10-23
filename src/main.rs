@@ -326,7 +326,7 @@ fn build_native_options() -> eframe::NativeOptions {
         .with_taskbar(false);
 
     let gpu = clip_llm::config::get().ui_gpu();
-    let mut wgpu_setup = egui_wgpu::WgpuSetupCreateNew::default();
+    let mut wgpu_setup = egui_wgpu::WgpuSetupCreateNew::without_display_handle();
     // A DX12 swapchain made from the HWND cannot compose alpha (its surface
     // reports Opaque only), so the transparent overlay needs the
     // DirectComposition swapchain. Windows only; WGPU_DX12_PRESENTATION_SYSTEM
@@ -342,7 +342,7 @@ fn build_native_options() -> eframe::NativeOptions {
         viewport,
         wgpu_options: egui_wgpu::WgpuConfiguration {
             wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(wgpu_setup),
-            on_surface_error: Arc::new(clip_llm::gpu::on_surface_error),
+            on_surface_status: Arc::new(clip_llm::gpu::on_surface_status),
             ..Default::default()
         },
         // Accessory policy: no Dock icon, no Cmd+Tab, no "home Space".

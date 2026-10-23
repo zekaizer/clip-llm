@@ -257,7 +257,7 @@ mod tests {
         configure(&ctx);
         for theme in [egui::Theme::Dark, egui::Theme::Light] {
             ctx.set_theme(theme);
-            let style = ctx.style();
+            let style = ctx.global_style();
             let frame = egui::Frame::popup(&style);
             let dark = theme == egui::Theme::Dark;
             assert_eq!(frame.fill.a(), 255, "{theme:?}: popup fill is opaque");
@@ -297,8 +297,8 @@ mod tests {
                 events: if frame == 1 { vec![egui::Event::PointerMoved(egui::pos2(30.0, 30.0))] } else { Vec::new() },
                 ..Default::default()
             };
-            output = Some(ctx.run(raw, |ctx| {
-                egui::Area::new("tip".into()).fixed_pos(egui::pos2(20.0, 20.0)).show(ctx, |ui| {
+            output = Some(crate::ui::test_pass(&ctx, raw, |ctx| {
+                egui::Area::new(egui::Id::unique("tip")).fixed_pos(egui::pos2(20.0, 20.0)).show(ctx, |ui| {
                     ui.add(egui::Button::new("x").min_size(egui::vec2(26.0, 26.0))).on_hover_text(text.as_str());
                 });
             }));
