@@ -17,6 +17,8 @@ regex = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 eframe = { version = "0.37", default-features = false, features = ["default_fonts", "wgpu"] }
+# The monochrome emoji fonts carry the icon glyphs; 0.37 no longer bundles them by default.
+egui = { version = "0.37", default-features = false, features = ["monochrome_emoji_fonts"] }
 egui-wgpu = "0.37"
 wgpu = "30"
 wgpu-types = "30"

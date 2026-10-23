@@ -287,6 +287,20 @@ mod tests {
         }
     }
 
+    /// Icon buttons are font glyphs and must come from the bundled fonts: a
+    /// fallback to system fonts differs per machine. These are the icons
+    /// egui's emoji fonts carry; the rest (✓ ✕ ⇄ ...) come from D2Coding,
+    /// which `main` adds and a test context lacks.
+    #[test]
+    fn emoji_icon_glyphs_are_in_the_bundled_fonts() {
+        let ctx = egui::Context::default();
+        let _ = crate::ui::test_pass(&ctx, egui::RawInput::default(), |_| {});
+        let icons = "\u{1f4cb}\u{1f50d}\u{1f4c4}\u{1f4cc}\u{26a0}\u{2702}\u{2318}\u{21bb}\u{21a9}\u{25b6}";
+        let font = egui::FontId::proportional(font::LABEL);
+        let missing: String = ctx.fonts_mut(|f| icons.chars().filter(|&c| !f.has_glyph(&font, c)).collect());
+        assert!(missing.is_empty(), "no bundled glyph for {missing:?}");
+    }
+
     fn widest_rect(shape: &egui::Shape) -> f32 {
         match shape {
             egui::Shape::Rect(r) => r.rect.width(),
