@@ -1,7 +1,7 @@
 use eframe::egui;
 
 use super::panel::{self, GripAction, Slots};
-use super::state_machine::{CaptureSource, OverlayState};
+use super::state_machine::{CaptureSource, Failure, FailureKind, OverlayState};
 use super::theme::{self, color, font, size, space};
 use super::widgets::{
     cancel_button, docked_action_button, docked_action_button_enabled, hint_text, language_picker, pill,
@@ -193,8 +193,8 @@ pub fn render(
             ),
             // Retry needs loaded content; a capture failure leaves none
             // (available_modes is empty), so hide the button.
-            OverlayState::Error(msg) => {
-                view_error(slots, msg, !available_modes.is_empty(), debug_available, &mut action)
+            OverlayState::Error(failure) => {
+                view_error(slots, failure, !available_modes.is_empty(), debug_available, &mut action)
             }
             OverlayState::Hidden => unreachable!("returned above"),
         }
@@ -398,15 +398,19 @@ fn view_processing(
 /// Footer: Retry, copy-debug.
 fn view_error(
     slots: &mut Slots<'_>,
-    message: &str,
+    failure: &Failure,
     can_retry: bool,
     debug_available: bool,
     action: &mut OverlayAction,
 ) {
     slots.status(|ui| {
-        status_row(ui, false, theme::text("\u{2715} Request failed", font::LABEL, color::danger()), None);
+        let label = match failure.kind {
+            FailureKind::Request => "\u{2715} Request failed",
+            FailureKind::Clipboard => "\u{2715} Clipboard error",
+        };
+        status_row(ui, false, theme::text(label, font::LABEL, color::danger()), None);
     });
-    slots.body(|body| body.fill_text("error", message, color::text(), false));
+    slots.body(|body| body.fill_text("error", &failure.message, color::text(), false));
     slots.footer(|ui| {
         actions_right(ui, |ui| {
             if can_retry && docked_action_button(ui, "\u{21bb}", "Retry") {
@@ -1541,6 +1545,19 @@ mod tests {
         assert!(!streaming.iter().any(|t| t.contains("the captured words")), "{streaming:?}");
     }
 
+    /// A failed capture sent no request, so the status must not say one failed.
+    #[test]
+    fn a_clipboard_failure_is_not_called_a_failed_request() {
+        let failure = OverlayState::Error(Failure::clipboard("Clipboard is empty."));
+        let texts = settled_texts(&failure, "", Source::default);
+        assert!(texts.iter().any(|t| t.contains("Clipboard error")), "{texts:?}");
+        assert!(!texts.iter().any(|t| t.contains("Request failed")), "{texts:?}");
+
+        let failure = OverlayState::Error(Failure::request("Cannot reach the server."));
+        let texts = settled_texts(&failure, "", Source::default);
+        assert!(texts.iter().any(|t| t.contains("Request failed")), "{texts:?}");
+    }
+
     /// After a single-tap the footer carries both the clipboard source badge
     /// and the copy action; they must not share a glyph.
     #[test]
@@ -1580,7 +1597,7 @@ mod tests {
             (OverlayState::Result("short".into()), ProcessMode::Translate, ""),
             (OverlayState::Result(long.clone()), ProcessMode::Translate, ""),
             (OverlayState::Result(long.clone()), ProcessMode::Rephrase, ""),
-            (OverlayState::Error(long.clone()), ProcessMode::Translate, ""),
+            (OverlayState::Error(Failure::request(long.clone())), ProcessMode::Translate, ""),
         ];
         for (state, mode, streaming) in &cases {
             let size = settled_size(state, *mode, streaming, panel);
@@ -1606,7 +1623,7 @@ mod tests {
             OverlayState::Capturing,
             OverlayState::Processing,
             OverlayState::Result("line\n".repeat(50)),
-            OverlayState::Error("boom".into()),
+            OverlayState::Error(Failure::request("boom")),
         ] {
             ctx.memory_mut(|m| m.reset_areas());
             for _ in 0..3 {

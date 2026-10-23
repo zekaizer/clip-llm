@@ -45,7 +45,7 @@ Every view fills the same four slots, top to bottom, provided by
 | Slot | Content | Height |
 |------|---------|--------|
 | **Header** | Mode tabs left; thinking pills, pin, close right. Rephrase adds its parameter rows underneath. A separator closes the header. | Natural |
-| **Status** | One line saying what is going on: spinner + phase + elapsed while capturing or processing (`Revising…` for a revision round, `Looking up…` for a dictionary lookup); the Think toggle, completion summary (`✓ 2.4s · model`, doubles as the model switch) and the revision label (`✎ 2 · "more formal"`, the whole chain on hover) in Result; `✕ Request failed` in Error. | `theme::size::ROW` |
+| **Status** | One line saying what is going on: spinner + phase + elapsed while capturing or processing (`Revising…` for a revision round, `Looking up…` for a dictionary lookup); the Think toggle, completion summary (`✓ 2.4s · model`, doubles as the model switch) and the revision label (`✎ 2 · "more formal"`, the whole chain on hover) in Result; `✕ Request failed` in Error, or `✕ Clipboard error` when reading the content or writing the reply failed (no request failed). | `theme::size::ROW` |
 | **Body** | The one thing the state is about: picked text, streaming text, the answer, the error message. Until the first token, Processing shows the content being processed in `text_muted`, so the user can check what was captured. Text fills the remaining height and scrolls. | Remainder |
 | **Footer** | Left: the source badge (`📋` clipboard, `✂` selection, `📄` files; never an action glyph). Right: actions, primary at the far right (`↩`/`🗐`, then `↻`, then `🔍`, then `↶` Undo; Capturing and Processing show Cancel). Result fills the middle with the revise input. | `theme::size::ACTION_BTN` |
 
