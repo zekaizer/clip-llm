@@ -5,7 +5,7 @@ edition = "2024"
 authors = ["Luke Lee <zekaizer@gmail.com>"]
 
 [dependencies]
-global-hotkey = "0.7"
+global-hotkey = "0.9"
 arboard = "3"
 reqwest = { version = "0.13", features = ["rustls", "json", "form", "blocking"], default-features = false }
 serde = { version = "1", features = ["derive"] }
