@@ -197,6 +197,11 @@ pub mod size {
     pub const TOOLTIP_WIDTH: f32 = 320.0;
     /// Popup (tooltip, dropdown) inner margin (horizontal, vertical).
     pub const POPUP_MARGIN: egui::Margin = egui::Margin::symmetric(8, 6);
+    /// Padding inside egui buttons (tabs, settings choices).
+    pub const BUTTON_PADDING: egui::Vec2 = egui::vec2(4.0, 1.0);
+    /// Minimum size of an egui interactive widget; the height sets the rows
+    /// of the settings form.
+    pub const INTERACT_SIZE: egui::Vec2 = egui::vec2(40.0, 18.0);
 }
 
 /// `RichText` in a type role and tone — the only way views make text.
@@ -221,6 +226,8 @@ pub fn configure(ctx: &egui::Context) {
             v.widgets.noninteractive.fg_stroke.color = color::text_soft();
             style.spacing.menu_margin = size::POPUP_MARGIN;
             style.spacing.tooltip_width = size::TOOLTIP_WIDTH;
+            style.spacing.button_padding = size::BUTTON_PADDING;
+            style.spacing.interact_size = size::INTERACT_SIZE;
             // Body text fades itself (`widgets::scroll_text`); egui's
             // gradient would composite over the translucent frame again.
             style.spacing.scroll.fade.strength = 0.0;
@@ -299,6 +306,20 @@ mod tests {
         let font = egui::FontId::proportional(font::LABEL);
         let missing: String = ctx.fonts_mut(|f| icons.chars().filter(|&c| !f.has_glyph(&font, c)).collect());
         assert!(missing.is_empty(), "no bundled glyph for {missing:?}");
+    }
+
+    /// The header row and the settings form are laid out for these sizes; a
+    /// roomier egui default overlaps the tabs and pushes the form off-screen.
+    #[test]
+    fn egui_widgets_use_the_layout_tokens() {
+        let ctx = egui::Context::default();
+        configure(&ctx);
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            ctx.set_theme(theme);
+            let spacing = ctx.global_style().spacing.clone();
+            assert_eq!(spacing.button_padding, size::BUTTON_PADDING, "{theme:?}");
+            assert_eq!(spacing.interact_size, size::INTERACT_SIZE, "{theme:?}");
+        }
     }
 
     fn widest_rect(shape: &egui::Shape) -> f32 {

@@ -97,10 +97,13 @@ the popup outline · `shadow` the frame's and the popups' drop shadow.
 `MD` 8 / `LG` 10; `ROW` 24 for status rows and pills; `ACTION_BTN` 26;
 corner radius `RADIUS_SM` 4 for icon buttons, `RADIUS` 6 for pills, text
 buttons and popups, `FRAME_RADIUS` 12 for the panel; `TOOLTIP_WIDTH` 320
-caps a tooltip or dropdown (longer text wraps), `POPUP_MARGIN` 8×6 inside it.
+caps a tooltip or dropdown (longer text wraps), `POPUP_MARGIN` 8×6 inside it;
+`BUTTON_PADDING` 4×1 and `INTERACT_SIZE` 40×18 for egui's own buttons and
+form widgets.
 
 **egui's own style** — the popup frame (fill, outline, shadow, margin,
-width, text tone) and the light-widget contrast fixes — is set once from
+width, text tone), the widget padding and height, and the light-widget
+contrast fixes — is set once from
 these tokens by `theme::configure` at startup. A tooltip or dropdown never
 styles itself at the call site.
 
