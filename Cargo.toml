@@ -21,7 +21,7 @@ egui-wgpu = "0.37"
 wgpu = "30"
 wgpu-types = "30"
 tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
-zstd = "0.13"
+zstd = "0.14"
 png = "0.18"
 base64 = "0.22"
 tray-icon = "0.26"
@@ -32,7 +32,7 @@ chrono = { version = "0.4", optional = true, default-features = false, features 
 diagnostics = ["chrono"]
 
 [build-dependencies]
-zstd = "0.13"
+zstd = "0.14"
 # Embeds the Windows app icon (build.rs); only runs for a Windows target.
 winresource = "0.1"
 
