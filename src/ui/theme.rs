@@ -221,6 +221,9 @@ pub fn configure(ctx: &egui::Context) {
             v.widgets.noninteractive.fg_stroke.color = color::text_soft();
             style.spacing.menu_margin = size::POPUP_MARGIN;
             style.spacing.tooltip_width = size::TOOLTIP_WIDTH;
+            // Body text fades itself (`widgets::scroll_text`); egui's
+            // gradient would composite over the translucent frame again.
+            style.spacing.scroll.fade.strength = 0.0;
             if theme == egui::Theme::Light {
                 // egui's light widgets assume a white window; on the
                 // overlay's light-grey frame their near-white fills and
@@ -269,6 +272,18 @@ mod tests {
             let text = style.visuals.text_color();
             assert_eq!(text.a(), 255, "{theme:?}: tooltip text is opaque");
             assert_eq!(text.r() >= 180, dark, "{theme:?}: tooltip text contrasts with the fill");
+        }
+    }
+
+    /// Body text fades by its own alpha (`widgets::scroll_text`); egui's
+    /// scroll fade paints a gradient over the translucent frame instead.
+    #[test]
+    fn scroll_areas_paint_no_fade_of_their_own() {
+        let ctx = egui::Context::default();
+        configure(&ctx);
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            ctx.set_theme(theme);
+            assert_eq!(ctx.global_style().spacing.scroll.fade.strength, 0.0, "{theme:?}");
         }
     }
 
