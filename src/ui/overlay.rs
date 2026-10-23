@@ -98,7 +98,9 @@ pub fn render(
     streaming: StreamingState<'_>,
     available_modes: &[ProcessMode],
     preview_mode: Option<ProcessMode>,
-    picking_text: Option<&str>,
+    // The text being processed: the picked text while capturing, the
+    // request's content while processing.
+    source_text: Option<&str>,
     rephrase_params: RephraseParams,
     thinking: ThinkingState,
     pinned: bool,
@@ -166,10 +168,10 @@ pub fn render(
         });
         match state {
             OverlayState::Capturing => {
-                view_capturing(slots, picking_text, source, elapsed, &mut action)
+                view_capturing(slots, source_text, source, elapsed, &mut action)
             }
             OverlayState::Processing => {
-                view_processing(slots, mode, &streaming, elapsed, revising, lookup, &mut action)
+                view_processing(slots, mode, &streaming, source_text, elapsed, revising, lookup, &mut action)
             }
             OverlayState::Result(text) => view_result(
                 slots,
@@ -340,11 +342,14 @@ fn view_capturing(
 }
 
 /// Processing: status names the phase; the body streams the text, sticking
-/// to its bottom. Footer: Cancel.
+/// to its bottom, and shows the content being processed, muted, until the
+/// first token. Footer: Cancel.
+#[allow(clippy::too_many_arguments)]
 fn view_processing(
     slots: &mut Slots<'_>,
     mode: ProcessMode,
     streaming: &StreamingState<'_>,
+    source_text: Option<&str>,
     elapsed: Option<std::time::Duration>,
     revising: bool,
     lookup: bool,
@@ -376,6 +381,8 @@ fn view_processing(
     slots.body(|body| {
         if !streaming.text.is_empty() {
             body.fill_text(("streaming", mode), streaming.text, color::text(), true);
+        } else if let Some(text) = source_text.filter(|_| !revising) {
+            body.fill_text("source", text, color::text_muted(), false);
         }
     });
     slots.footer(|ui| {
@@ -1435,8 +1442,33 @@ mod tests {
         streaming_text: &str,
         panel_size: egui::Vec2,
     ) -> OverlayOutput {
+        render_frame(ctx, state, mode, streaming_text, panel_size, Source::default()).0
+    }
+
+    /// What the content came from, for tests that look at its rendering.
+    struct Source<'a> {
+        text: Option<&'a str>,
+        capture: CaptureSource,
+        auto_copy: bool,
+    }
+
+    impl Default for Source<'_> {
+        fn default() -> Self {
+            Self { text: None, capture: CaptureSource::Selection, auto_copy: true }
+        }
+    }
+
+    /// One headless frame: the overlay's output and the frame's painted shapes.
+    fn render_frame(
+        ctx: &egui::Context,
+        state: &OverlayState,
+        mode: ProcessMode,
+        streaming_text: &str,
+        panel_size: egui::Vec2,
+        source: Source<'_>,
+    ) -> (OverlayOutput, egui::FullOutput) {
         let mut output = None;
-        let _ = crate::ui::test_pass(ctx, egui::RawInput::default(), |ctx| {
+        let full = crate::ui::test_pass(ctx, egui::RawInput::default(), |ctx| {
             output = Some(render(
                 state,
                 mode,
@@ -1450,12 +1482,12 @@ mod tests {
                 },
                 ProcessMode::ALL,
                 None,
-                None,
+                source.text,
                 RephraseParams::default(),
                 ThinkingState { mode: ThinkingMode::NoThink, supported: true },
                 false,
-                true,
-                CaptureSource::Selection,
+                source.auto_copy,
+                source.capture,
                 &[],
                 &[],
                 false,
@@ -1469,7 +1501,44 @@ mod tests {
                 ctx,
             ));
         });
-        output.expect("render() must run synchronously inside ctx.run's closure")
+        (output.expect("render() must run synchronously inside ctx.run's closure"), full)
+    }
+
+    /// Every text run painted in a frame, in paint order.
+    fn painted_texts(full: &egui::FullOutput) -> Vec<String> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(t) => out.push(t.galley.text().to_owned()),
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        full.shapes.iter().for_each(|c| walk(&c.shape, &mut out));
+        out
+    }
+
+    /// The text a settled frame paints for `state` with `source`.
+    fn settled_texts(state: &OverlayState, streaming: &str, source: impl Fn() -> Source<'static>) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let mut full = None;
+        for _ in 0..3 {
+            full = Some(render_frame(&ctx, state, ProcessMode::Translate, streaming, size::DEFAULT_PANEL, source()).1);
+        }
+        painted_texts(&full.unwrap())
+    }
+
+    /// Until the first token arrives, Processing shows what was captured so
+    /// the user can check it is the text they meant; the answer replaces it.
+    #[test]
+    fn processing_shows_the_captured_text_until_the_answer_streams() {
+        let source = || Source { text: Some("the captured words"), ..Source::default() };
+        let waiting = settled_texts(&OverlayState::Processing, "", source);
+        assert!(waiting.iter().any(|t| t.contains("the captured words")), "{waiting:?}");
+
+        let streaming = settled_texts(&OverlayState::Processing, "the answer", source);
+        assert!(streaming.iter().any(|t| t.contains("the answer")), "{streaming:?}");
+        assert!(!streaming.iter().any(|t| t.contains("the captured words")), "{streaming:?}");
     }
 
     /// Render `n` settled frames and return the last one's frame size.
