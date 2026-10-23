@@ -365,7 +365,7 @@ pub fn mode_key(mode: ProcessMode) -> String {
 
 /// Set exactly the keys the panel owns in `doc`, leaving comments, ordering
 /// and every other key as they were.
-pub fn apply_patch(doc: &mut toml_edit::Document, patch: &SettingsPatch) {
+pub fn apply_patch(doc: &mut toml_edit::DocumentMut, patch: &SettingsPatch) {
     let languages = section(doc, "languages");
     set_scalar(languages, "primary", patch.primary.as_str());
     set_scalar(languages, "secondary", patch.secondary.as_str());
@@ -418,7 +418,7 @@ fn prompt_keys(mode: ProcessMode) -> &'static [&'static str] {
 
 /// Remove `keys` from the top-level `[section]` table, and the table itself
 /// once nothing else lives in it, so no empty `[section]` header is left.
-fn remove_keys(doc: &mut toml_edit::Document, section: &str, keys: &[&str]) {
+fn remove_keys(doc: &mut toml_edit::DocumentMut, section: &str, keys: &[&str]) {
     let now_empty = doc.get_mut(section).and_then(toml_edit::Item::as_table_mut).map(|t| {
         for key in keys {
             t.remove(key);
@@ -438,7 +438,7 @@ const API_PROFILE_KEYS: [&str; 6] =
 /// Write the profile list: the `[api]` profile (if present) in place, every
 /// other profile as a rebuilt `[[models]]` array (their own comments are not
 /// preserved — the panel owns those tables).
-fn apply_profiles(doc: &mut toml_edit::Document, profiles: &[crate::config::ModelSpec]) {
+fn apply_profiles(doc: &mut toml_edit::DocumentMut, profiles: &[crate::config::ModelSpec]) {
     // An empty list is "not edited" (a patch never legitimately removes every
     // profile — validation requires at least one).
     if profiles.is_empty() {
@@ -521,7 +521,7 @@ fn set_optional(table: &mut toml_edit::Table, key: &str, value: Option<&str>) {
 
 /// The named top-level table, created (non-implicit, so its header prints)
 /// when absent. A non-table item under that key is replaced.
-fn section<'a>(doc: &'a mut toml_edit::Document, name: &str) -> &'a mut toml_edit::Table {
+fn section<'a>(doc: &'a mut toml_edit::DocumentMut, name: &str) -> &'a mut toml_edit::Table {
     let item = doc.entry(name).or_insert(toml_edit::table());
     if !item.is_table() {
         *item = toml_edit::table();
@@ -558,7 +558,7 @@ pub fn save_ui_value(key: &str, value: Option<toml_edit::Value>) -> Result<PathB
     edit_file(&path, |doc| apply_ui_value(doc, key, value))
 }
 
-pub fn apply_ui_value(doc: &mut toml_edit::Document, key: &str, value: Option<toml_edit::Value>) {
+pub fn apply_ui_value(doc: &mut toml_edit::DocumentMut, key: &str, value: Option<toml_edit::Value>) {
     let ui = section(doc, "ui");
     match value {
         Some(v) => set_scalar(ui, key, v),
@@ -578,12 +578,12 @@ pub fn point_pair(a: f32, b: f32) -> toml_edit::Value {
 
 /// Parse the TOML file at `path`, let `edit` change the document in place
 /// (comments and ordering survive — ADR-0001), and write it back atomically.
-fn edit_file(path: &Path, edit: impl FnOnce(&mut toml_edit::Document)) -> Result<PathBuf, String> {
+fn edit_file(path: &Path, edit: impl FnOnce(&mut toml_edit::DocumentMut)) -> Result<PathBuf, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     // The parse error's Display renders the offending line — which may hold an
     // api_key — so only a generic message leaves this function.
-    let mut doc: toml_edit::Document = text
+    let mut doc: toml_edit::DocumentMut = text
         .parse()
         .map_err(|_| format!("{} is not valid TOML; fix it by hand first", path.display()))?;
     edit(&mut doc);
@@ -812,7 +812,7 @@ thinking = "think"
         auto.thinking_control = Some("auto".into());
         assert_eq!(ProfileForm::from_spec(&auto).thinking_control, "", "auto shows as the empty default");
 
-        let mut doc: toml_edit::Document = "[api]\nmodel = \"m\"\n".parse().unwrap();
+        let mut doc: toml_edit::DocumentMut = "[api]\nmodel = \"m\"\n".parse().unwrap();
         let mut patch = sample_patch();
         let mut api = openai_profile("api").to_spec().unwrap();
         api.from_api_section = true;
@@ -842,7 +842,7 @@ thinking = "think"
 
     #[test]
     fn apply_patch_rewrites_profiles() {
-        let mut doc: toml_edit::Document = r#"[api]
+        let mut doc: toml_edit::DocumentMut = r#"[api]
 provider = "grok-oauth"   # keep this comment
 model = "grok-4.3"
 streaming = true
@@ -875,7 +875,7 @@ model = "gone"
 
     #[test]
     fn apply_patch_can_move_everything_out_of_api_section() {
-        let mut doc: toml_edit::Document =
+        let mut doc: toml_edit::DocumentMut =
             "[api]\nendpoint = \"http://h/v1\"\nmodel = \"m\"\napi_key = \"k\"\nstreaming = false\n"
                 .parse()
                 .unwrap();
@@ -891,7 +891,7 @@ model = "gone"
 
     #[test]
     fn apply_patch_edits_in_place_and_preserves_everything_else() {
-        let mut doc: toml_edit::Document = DOC.parse().unwrap();
+        let mut doc: toml_edit::DocumentMut = DOC.parse().unwrap();
         apply_patch(&mut doc, &sample_patch());
         let out = doc.to_string();
         assert!(out.contains("# top comment stays"), "{out}");
@@ -915,7 +915,7 @@ model = "gone"
 
     #[test]
     fn apply_patch_without_default_model_keeps_existing_key() {
-        let mut doc: toml_edit::Document = "[ui]\ndefault_model = \"keep\"\n".parse().unwrap();
+        let mut doc: toml_edit::DocumentMut = "[ui]\ndefault_model = \"keep\"\n".parse().unwrap();
         let mut patch = sample_patch();
         patch.default_model = None;
         apply_patch(&mut doc, &patch);
@@ -925,7 +925,7 @@ model = "gone"
 
     #[test]
     fn apply_ui_value_writes_rounded_points_and_none_removes_the_key() {
-        let mut doc: toml_edit::Document =
+        let mut doc: toml_edit::DocumentMut =
             "# keep me\n[ui]\nsingle_tap_pinned = true\n".parse().unwrap();
         apply_ui_value(&mut doc, "panel_size", Some(point_pair(640.4, 419.6)));
         let text = doc.to_string();
@@ -1005,7 +1005,7 @@ model = "gone"
         // `prompt` goes, and with `thinking` back to default the section goes too.
         let mut patch = sample_patch();
         patch.reset_prompts = vec![ProcessMode::Summarize];
-        let mut doc: toml_edit::Document = DOC.parse().unwrap();
+        let mut doc: toml_edit::DocumentMut = DOC.parse().unwrap();
         apply_patch(&mut doc, &patch);
         let out = doc.to_string();
         assert!(!out.contains("prompt = \"P\""), "{out}");
@@ -1016,7 +1016,7 @@ model = "gone"
         let mut patch = sample_patch();
         patch.reset_prompts = vec![ProcessMode::Summarize];
         patch.thinking = vec![(ProcessMode::Summarize, Some(ThinkingMode::Think))];
-        let mut doc: toml_edit::Document = DOC.parse().unwrap();
+        let mut doc: toml_edit::DocumentMut = DOC.parse().unwrap();
         apply_patch(&mut doc, &patch);
         let out = doc.to_string();
         assert!(!out.contains("prompt = \"P\""), "{out}");
@@ -1027,7 +1027,7 @@ model = "gone"
     fn apply_patch_reset_rephrase_drops_base_style_and_length() {
         let mut patch = sample_patch();
         patch.reset_prompts = vec![ProcessMode::Rephrase];
-        let mut doc: toml_edit::Document =
+        let mut doc: toml_edit::DocumentMut =
             "[rephrase]\nbase = \"B\"\n\n[rephrase.style]\ncasual = \"C\"\n\n[rephrase.length]\nterse = \"T\"\n"
                 .parse()
                 .unwrap();
