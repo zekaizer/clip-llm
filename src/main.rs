@@ -342,6 +342,7 @@ fn build_native_options() -> eframe::NativeOptions {
         viewport,
         wgpu_options: egui_wgpu::WgpuConfiguration {
             wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(wgpu_setup),
+            on_surface_error: Arc::new(clip_llm::gpu::on_surface_error),
             ..Default::default()
         },
         // Accessory policy: no Dock icon, no Cmd+Tab, no "home Space".
