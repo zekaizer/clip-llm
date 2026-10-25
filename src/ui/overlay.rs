@@ -1473,7 +1473,8 @@ mod tests {
         events: Vec<egui::Event>,
     ) -> (OverlayOutput, egui::FullOutput) {
         let mut output = None;
-        let input = egui::RawInput { events, ..Default::default() };
+        let time = ctx.input(|i| i.time) + 1.0 / 60.0;
+        let input = egui::RawInput { events, time: Some(time), ..Default::default() };
         let full = crate::ui::test_pass(ctx, input, |ctx| {
             output = Some(render(
                 state,
@@ -1637,6 +1638,64 @@ mod tests {
             (overscrolled - untouched).abs() < 1.0,
             "text ends {overscrolled} pt below the body after an overscroll, {untouched} pt without"
         );
+    }
+
+    /// Scrolling back down to the end of a streaming answer resumes following
+    /// it, also when wheel or momentum events keep arriving after the end.
+    #[test]
+    fn scrolling_back_to_the_end_resumes_following() {
+        use egui::{MouseWheelSource as S, MouseWheelUnit as U, TouchPhase as P};
+        let wheel = |phase, dy, source, unit| egui::Event::MouseWheel {
+            unit,
+            delta: egui::vec2(0.0, dy),
+            phase,
+            source,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let gesture = |dy: f32, moves: usize| -> Vec<Vec<egui::Event>> {
+            std::iter::once(vec![wheel(P::Start, 0.0, S::Trackpad, U::Point)])
+                .chain((0..moves).map(|_| vec![wheel(P::Move, dy, S::Trackpad, U::Point)]))
+                .chain(std::iter::once(vec![wheel(P::End, 0.0, S::Trackpad, U::Point)]))
+                .collect()
+        };
+        let momentum: Vec<Vec<egui::Event>> = gesture(-300.0, 8)
+            .into_iter()
+            .chain((0..30).map(|i| vec![wheel(P::Move, -40.0 * 0.9f32.powi(i), S::Momentum, U::Point)]))
+            .collect();
+        let lines_up: Vec<Vec<egui::Event>> = (0..3).map(|_| vec![wheel(P::Move, 3.0, S::Wheel, U::Line)]).collect();
+        let lines_down: Vec<Vec<egui::Event>> = (0..12).map(|_| vec![wheel(P::Move, -3.0, S::Wheel, U::Line)]).collect();
+
+        let below_the_body = |up: Vec<Vec<egui::Event>>, down: Vec<Vec<egui::Event>>| {
+            let ctx = egui::Context::default();
+            theme::configure(&ctx);
+            let mut lines = 60;
+            let mut frame = |events: Vec<egui::Event>| {
+                lines += 1;
+                let text: String = (0..lines).map(|i| format!("line {i}\n")).collect();
+                let full =
+                    render_frame(&ctx, &OverlayState::Processing, ProcessMode::Translate, &text, size::DEFAULT_PANEL, Source::default(), events).1;
+                let end = format!("line {}", lines - 1);
+                full.shapes.iter().find_map(|c| match &c.shape {
+                    egui::Shape::Text(t) if t.galley.text().contains(&end) => {
+                        Some(t.pos.y + t.galley.size().y - c.clip_rect.bottom())
+                    }
+                    _ => None,
+                })
+            };
+            frame(vec![egui::Event::PointerMoved(egui::pos2(256.0, 200.0))]);
+            up.into_iter().chain((0..30).map(|_| Vec::new())).chain(down).for_each(|e| {
+                frame(e);
+            });
+            (0..180).map(|_| frame(Vec::new())).last().flatten().expect("the streamed text is painted")
+        };
+        let untouched = below_the_body(Vec::new(), Vec::new());
+        for (name, up, down) in [("trackpad with momentum", gesture(300.0, 3), momentum), ("mouse wheel", lines_up, lines_down)] {
+            let refollowed = below_the_body(up, down);
+            assert!(
+                (refollowed - untouched).abs() < 1.0,
+                "{name}: text ends {refollowed} pt below the body after scrolling back down, {untouched} pt untouched"
+            );
+        }
     }
 
     /// Until the first token arrives, Processing shows what was captured so
