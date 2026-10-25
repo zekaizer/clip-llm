@@ -170,3 +170,5 @@ Checklist for a new or changed view:
 3. Controls shared with another state sit in the same slot and order.
 4. Overflowing text goes through `Body::fill_text`.
 5. A diagnostics scenario captures the new state or variant.
+6. Hover changes colors only: no control moves (`hovering_a_control_moves_nothing`). A button that overrides egui's stroke relies on `theme::configure` giving every interactive state the same stroke width.
+7. A streaming body keeps following its end after the user scrolls past it (`overscrolling_a_streaming_body_keeps_it_following_the_end`); egui's rubber-banding stays off.
