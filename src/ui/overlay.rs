@@ -1445,7 +1445,7 @@ mod tests {
         streaming_text: &str,
         panel_size: egui::Vec2,
     ) -> OverlayOutput {
-        render_frame(ctx, state, mode, streaming_text, panel_size, Source::default(), None).0
+        render_frame(ctx, state, mode, streaming_text, panel_size, Source::default(), Vec::new()).0
     }
 
     /// What the content came from, for tests that look at its rendering.
@@ -1470,13 +1470,10 @@ mod tests {
         streaming_text: &str,
         panel_size: egui::Vec2,
         source: Source<'_>,
-        pointer: Option<egui::Pos2>,
+        events: Vec<egui::Event>,
     ) -> (OverlayOutput, egui::FullOutput) {
         let mut output = None;
-        let input = egui::RawInput {
-            events: vec![pointer.map_or(egui::Event::PointerGone, egui::Event::PointerMoved)],
-            ..Default::default()
-        };
+        let input = egui::RawInput { events, ..Default::default() };
         let full = crate::ui::test_pass(ctx, input, |ctx| {
             output = Some(render(
                 state,
@@ -1532,7 +1529,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut full = None;
         for _ in 0..3 {
-            full = Some(render_frame(&ctx, state, ProcessMode::Translate, streaming, size::DEFAULT_PANEL, source(), None).1);
+            full = Some(render_frame(&ctx, state, ProcessMode::Translate, streaming, size::DEFAULT_PANEL, source(), Vec::new()).1);
         }
         painted_texts(&full.unwrap())
     }
@@ -1564,7 +1561,16 @@ mod tests {
                 let mut full = None;
                 for _ in 0..3 {
                     full = Some(
-                        render_frame(&ctx, &state, ProcessMode::Translate, "", size::DEFAULT_PANEL, Source::default(), pointer).1,
+                        render_frame(
+                            &ctx,
+                            &state,
+                            ProcessMode::Translate,
+                            "",
+                            size::DEFAULT_PANEL,
+                            Source::default(),
+                            vec![pointer.map_or(egui::Event::PointerGone, egui::Event::PointerMoved)],
+                        )
+                        .1,
                     );
                 }
                 painted_text_positions(&full.unwrap())
@@ -1580,6 +1586,57 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// While an answer streams, the body follows its end; scrolling past the
+    /// bottom on a trackpad must not leave it behind.
+    #[test]
+    fn overscrolling_a_streaming_body_keeps_it_following_the_end() {
+        let follow = |overscroll: bool| {
+            let ctx = egui::Context::default();
+            theme::configure(&ctx);
+            let wheel = |phase, dy| egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, dy),
+                phase,
+                source: egui::MouseWheelSource::Trackpad,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let frame = |events: Vec<egui::Event>, lines: usize| {
+                let text: String = (0..lines).map(|i| format!("line {i}\n")).collect();
+                let full =
+                    render_frame(&ctx, &OverlayState::Processing, ProcessMode::Translate, &text, size::DEFAULT_PANEL, Source::default(), events).1;
+                let end = format!("line {}", lines - 1);
+                full.shapes
+                    .iter()
+                    .find_map(|c| match &c.shape {
+                        egui::Shape::Text(t) if t.galley.text().contains(&end) => {
+                            Some(t.pos.y + t.galley.size().y - c.clip_rect.bottom())
+                        }
+                        _ => None,
+                    })
+            };
+            let mut lines = 60;
+            frame(vec![egui::Event::PointerMoved(egui::pos2(256.0, 200.0))], lines);
+            if overscroll {
+                frame(vec![wheel(egui::TouchPhase::Start, 0.0)], lines);
+                for _ in 0..5 {
+                    frame(vec![wheel(egui::TouchPhase::Move, -200.0)], lines);
+                }
+                frame(vec![wheel(egui::TouchPhase::End, 0.0)], lines);
+            }
+            let mut below_the_body = None;
+            for _ in 0..120 {
+                lines += 1;
+                below_the_body = frame(Vec::new(), lines);
+            }
+            below_the_body.expect("the streamed text is painted")
+        };
+        let (untouched, overscrolled) = (follow(false), follow(true));
+        assert!(
+            (overscrolled - untouched).abs() < 1.0,
+            "text ends {overscrolled} pt below the body after an overscroll, {untouched} pt without"
+        );
     }
 
     /// Until the first token arrives, Processing shows what was captured so
