@@ -1445,7 +1445,7 @@ mod tests {
         streaming_text: &str,
         panel_size: egui::Vec2,
     ) -> OverlayOutput {
-        render_frame(ctx, state, mode, streaming_text, panel_size, Source::default()).0
+        render_frame(ctx, state, mode, streaming_text, panel_size, Source::default(), None).0
     }
 
     /// What the content came from, for tests that look at its rendering.
@@ -1470,9 +1470,14 @@ mod tests {
         streaming_text: &str,
         panel_size: egui::Vec2,
         source: Source<'_>,
+        pointer: Option<egui::Pos2>,
     ) -> (OverlayOutput, egui::FullOutput) {
         let mut output = None;
-        let full = crate::ui::test_pass(ctx, egui::RawInput::default(), |ctx| {
+        let input = egui::RawInput {
+            events: vec![pointer.map_or(egui::Event::PointerGone, egui::Event::PointerMoved)],
+            ..Default::default()
+        };
+        let full = crate::ui::test_pass(ctx, input, |ctx| {
             output = Some(render(
                 state,
                 mode,
@@ -1527,9 +1532,54 @@ mod tests {
         let ctx = egui::Context::default();
         let mut full = None;
         for _ in 0..3 {
-            full = Some(render_frame(&ctx, state, ProcessMode::Translate, streaming, size::DEFAULT_PANEL, source()).1);
+            full = Some(render_frame(&ctx, state, ProcessMode::Translate, streaming, size::DEFAULT_PANEL, source(), None).1);
         }
         painted_texts(&full.unwrap())
+    }
+
+    /// Every text run a frame paints with its position, in paint order.
+    fn painted_text_positions(full: &egui::FullOutput) -> Vec<(String, egui::Pos2)> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<(String, egui::Pos2)>) {
+            match shape {
+                egui::Shape::Text(t) => out.push((t.galley.text().to_owned(), t.pos)),
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        full.shapes.iter().for_each(|c| walk(&c.shape, &mut out));
+        out
+    }
+
+    /// Hover changes colors only: pointing at any control moves no text on
+    /// the panel, in either theme.
+    #[test]
+    fn hovering_a_control_moves_nothing() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            let ctx = egui::Context::default();
+            theme::configure(&ctx);
+            ctx.set_theme(theme);
+            let state = OverlayState::Result("answer".into());
+            let settle = |pointer: Option<egui::Pos2>| {
+                let mut full = None;
+                for _ in 0..3 {
+                    full = Some(
+                        render_frame(&ctx, &state, ProcessMode::Translate, "", size::DEFAULT_PANEL, Source::default(), pointer).1,
+                    );
+                }
+                painted_text_positions(&full.unwrap())
+            };
+            let idle = settle(None);
+            for (label, at) in idle.iter().filter(|(t, _)| !t.trim().is_empty() && t != "answer") {
+                let hovered = settle(Some(*at + egui::vec2(2.0, 4.0)));
+                for (text, pos) in &idle {
+                    assert!(
+                        hovered.iter().any(|(t, p)| t == text && (*p - *pos).length() < 0.01),
+                        "{theme:?}: hovering {label:?} moved {text:?} from {pos:?}; now {hovered:?}"
+                    );
+                }
+            }
+        }
     }
 
     /// Until the first token arrives, Processing shows what was captured so
