@@ -507,21 +507,21 @@ fn view_result(
     slots.footer(|ui| {
         render_source_badge(ui, footer.source, footer.source_files, footer.source_images);
         actions_right(ui, |ui| {
-            // Primary: auto_copy (double-tap) = paste/replace (↩); otherwise
-            // copy (🗐), with ✓ confirming a just-done copy (#16a).
-            let (icon, tip) = if footer.auto_copy {
-                ("\u{21a9}", "Paste over the selection (Enter)")
-            } else if footer.copy_confirmed {
+            // Primary: paste/replace (↩) after a double-tap, else copy (🗐).
+            // Copy is offered either way, with ✓ confirming a just-done copy
+            // (#16a).
+            if footer.auto_copy && docked_action_button(ui, "\u{21a9}", "Paste over the selection (Enter)") {
+                *action = OverlayAction::PasteReplace;
+            }
+            let (icon, tip) = if footer.copy_confirmed {
                 ("\u{2713}", "Copied")
+            } else if footer.auto_copy {
+                ("\u{1f5d0}", "Copy to clipboard (Cmd/Ctrl+C)")
             } else {
                 ("\u{1f5d0}", "Copy to clipboard (Enter)")
             };
             if docked_action_button(ui, icon, tip) {
-                *action = if footer.auto_copy {
-                    OverlayAction::PasteReplace
-                } else {
-                    OverlayAction::CopyToClipboard
-                };
+                *action = OverlayAction::CopyToClipboard;
             }
             if docked_action_button(ui, "\u{21bb}", "Retry") {
                 *action = OverlayAction::Retry;
@@ -1566,6 +1566,15 @@ mod tests {
         let texts = settled_texts(&failure, "", Source::default);
         assert!(!texts.iter().any(|t| t.as_str() == "\u{1f50d}"), "{texts:?}");
         assert!(texts.iter().any(|t| t.as_str() == "\u{1f6e0}"), "{texts:?}");
+    }
+
+    /// After a double-tap the primary action pastes over the selection; the
+    /// copy action is offered next to it, as after a single-tap.
+    #[test]
+    fn double_tap_result_offers_copy_next_to_paste() {
+        let texts = settled_texts(&OverlayState::Result("answer".into()), "", Source::default);
+        assert!(texts.iter().any(|t| t.as_str() == "\u{21a9}"), "paste action: {texts:?}");
+        assert!(texts.iter().any(|t| t.as_str() == "\u{1f5d0}"), "copy action: {texts:?}");
     }
 
     /// The source badge names the source in words: no glyph tells clipboard,

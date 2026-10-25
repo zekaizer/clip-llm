@@ -1864,7 +1864,7 @@ impl OverlayApp {
             self.execute_effects(effects, ctx);
         }
 
-        // Copy confirmation (#16a): flip the 📋 button to ✓ for a moment.
+        // Copy confirmation (#16a): flip the copy button to ✓ for a moment.
         // Gated on Result — UserCopy is a no-op in any other state.
         if matches!(action, overlay::OverlayAction::CopyToClipboard)
             && matches!(self.sm.state(), OverlayState::Result(_))
