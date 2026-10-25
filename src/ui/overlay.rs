@@ -1,7 +1,7 @@
 use eframe::egui;
 
 use super::panel::{self, GripAction, Slots};
-use super::state_machine::{CaptureSource, OverlayState};
+use super::state_machine::{CaptureSource, Failure, FailureKind, OverlayState};
 use super::theme::{self, color, font, size, space};
 use super::widgets::{
     cancel_button, docked_action_button, docked_action_button_enabled, hint_text, language_picker, pill,
@@ -98,7 +98,9 @@ pub fn render(
     streaming: StreamingState<'_>,
     available_modes: &[ProcessMode],
     preview_mode: Option<ProcessMode>,
-    picking_text: Option<&str>,
+    // The text being processed: the picked text while capturing, the
+    // request's content while processing.
+    source_text: Option<&str>,
     rephrase_params: RephraseParams,
     thinking: ThinkingState,
     pinned: bool,
@@ -166,10 +168,10 @@ pub fn render(
         });
         match state {
             OverlayState::Capturing => {
-                view_capturing(slots, picking_text, source, elapsed, &mut action)
+                view_capturing(slots, source_text, source, elapsed, &mut action)
             }
             OverlayState::Processing => {
-                view_processing(slots, mode, &streaming, elapsed, revising, lookup, &mut action)
+                view_processing(slots, mode, &streaming, source_text, elapsed, revising, lookup, &mut action)
             }
             OverlayState::Result(text) => view_result(
                 slots,
@@ -191,8 +193,8 @@ pub fn render(
             ),
             // Retry needs loaded content; a capture failure leaves none
             // (available_modes is empty), so hide the button.
-            OverlayState::Error(msg) => {
-                view_error(slots, msg, !available_modes.is_empty(), debug_available, &mut action)
+            OverlayState::Error(failure) => {
+                view_error(slots, failure, !available_modes.is_empty(), debug_available, &mut action)
             }
             OverlayState::Hidden => unreachable!("returned above"),
         }
@@ -340,11 +342,14 @@ fn view_capturing(
 }
 
 /// Processing: status names the phase; the body streams the text, sticking
-/// to its bottom. Footer: Cancel.
+/// to its bottom, and shows the content being processed, muted, until the
+/// first token. Footer: Cancel.
+#[allow(clippy::too_many_arguments)]
 fn view_processing(
     slots: &mut Slots<'_>,
     mode: ProcessMode,
     streaming: &StreamingState<'_>,
+    source_text: Option<&str>,
     elapsed: Option<std::time::Duration>,
     revising: bool,
     lookup: bool,
@@ -376,6 +381,8 @@ fn view_processing(
     slots.body(|body| {
         if !streaming.text.is_empty() {
             body.fill_text(("streaming", mode), streaming.text, color::text(), true);
+        } else if let Some(text) = source_text.filter(|_| !revising) {
+            body.fill_text("source", text, color::text_muted(), false);
         }
     });
     slots.footer(|ui| {
@@ -391,15 +398,19 @@ fn view_processing(
 /// Footer: Retry, copy-debug.
 fn view_error(
     slots: &mut Slots<'_>,
-    message: &str,
+    failure: &Failure,
     can_retry: bool,
     debug_available: bool,
     action: &mut OverlayAction,
 ) {
     slots.status(|ui| {
-        status_row(ui, false, theme::text("\u{2715} Request failed", font::LABEL, color::danger()), None);
+        let label = match failure.kind {
+            FailureKind::Request => "\u{2715} Request failed",
+            FailureKind::Clipboard => "\u{2715} Clipboard error",
+        };
+        status_row(ui, false, theme::text(label, font::LABEL, color::danger()), None);
     });
-    slots.body(|body| body.fill_text("error", message, color::text(), false));
+    slots.body(|body| body.fill_text("error", &failure.message, color::text(), false));
     slots.footer(|ui| {
         actions_right(ui, |ui| {
             if can_retry && docked_action_button(ui, "\u{21bb}", "Retry") {
@@ -496,21 +507,21 @@ fn view_result(
     slots.footer(|ui| {
         render_source_badge(ui, footer.source, footer.source_files, footer.source_images);
         actions_right(ui, |ui| {
-            // Primary: auto_copy (double-tap) = paste/replace (↩); otherwise
-            // copy (📋), with ✓ confirming a just-done copy (#16a).
-            let (icon, tip) = if footer.auto_copy {
-                ("\u{21a9}", "Paste over the selection (Enter)")
-            } else if footer.copy_confirmed {
+            // Primary: paste/replace (↩) after a double-tap, else copy (🗐).
+            // Copy is offered either way, with ✓ confirming a just-done copy
+            // (#16a).
+            if footer.auto_copy && docked_action_button(ui, "\u{21a9}", "Paste over the selection (Enter)") {
+                *action = OverlayAction::PasteReplace;
+            }
+            let (icon, tip) = if footer.copy_confirmed {
                 ("\u{2713}", "Copied")
+            } else if footer.auto_copy {
+                ("\u{1f5d0}", "Copy to clipboard (Cmd/Ctrl+C)")
             } else {
-                ("\u{1f4cb}", "Copy to clipboard (Enter)")
+                ("\u{1f5d0}", "Copy to clipboard (Enter)")
             };
             if docked_action_button(ui, icon, tip) {
-                *action = if footer.auto_copy {
-                    OverlayAction::PasteReplace
-                } else {
-                    OverlayAction::CopyToClipboard
-                };
+                *action = OverlayAction::CopyToClipboard;
             }
             if docked_action_button(ui, "\u{21bb}", "Retry") {
                 *action = OverlayAction::Retry;
@@ -554,9 +565,9 @@ fn truncate_chars(s: &str, max: usize) -> String {
     out
 }
 
-/// The copy-debug (🔍) action shared by Result and Error.
+/// The copy-debug (🛠) action shared by Result and Error.
 fn copy_debug_button(ui: &mut egui::Ui) -> bool {
-    docked_action_button(ui, "\u{1f50d}", "Copy the raw request + response to the clipboard")
+    docked_action_button(ui, "\u{1f6e0}", "Copy the raw request + response to the clipboard")
 }
 
 
@@ -1165,27 +1176,26 @@ pub(crate) fn describe_images(images: &[crate::images::ImageAttachment]) -> Opti
 /// Compact source badge in Result's bottom row — where the content came from:
 /// selection (double-tap) vs clipboard (single-tap). Makes a slow double-tap
 /// that resolved to a single-tap — sending stale clipboard content — visibly
-/// different (#50). Icon-only to keep the row compact; the tooltip spells it out.
+/// different (#50). A word, not a glyph: no glyph reads at caption size.
+/// The tooltip adds the details.
 fn render_source_badge(
     ui: &mut egui::Ui,
     source: CaptureSource,
     files: &[String],
     images: &[crate::images::ImageAttachment],
 ) {
-    let (icon, mut tip) = if files.is_empty() {
-        match source {
-            CaptureSource::Selection => ("\u{2702}", "Source: selection (double-tap)".to_string()),
-            CaptureSource::Clipboard => ("\u{1f4cb}", "Source: clipboard (single-tap)".to_string()),
-        }
-    } else {
-        ("\u{1f4c4}", format!("Source: {} file(s) \u{2014} {}", files.len(), files.join(", ")))
+    let (label, mut tip) = match (files.len(), source) {
+        (0, CaptureSource::Selection) => ("Selection".to_string(), "Source: selection (double-tap)".to_string()),
+        (0, CaptureSource::Clipboard) => ("Clipboard".to_string(), "Source: clipboard (single-tap)".to_string()),
+        (1, _) => ("1 file".to_string(), format!("Source: {}", files[0])),
+        (n, _) => (format!("{n} files"), format!("Source: {n} files \u{2014} {}", files.join(", "))),
     };
     if let Some(summary) = describe_images(images) {
         tip.push('\n');
         tip.push_str(&summary);
     }
     ui.label(
-        egui::RichText::new(icon)
+        egui::RichText::new(label)
             .size(font::CAPTION)
             .color(color::text_muted()),
     )
@@ -1435,8 +1445,37 @@ mod tests {
         streaming_text: &str,
         panel_size: egui::Vec2,
     ) -> OverlayOutput {
+        render_frame(ctx, state, mode, streaming_text, panel_size, Source::default(), Vec::new()).0
+    }
+
+    /// What the content came from, for tests that look at its rendering.
+    struct Source<'a> {
+        text: Option<&'a str>,
+        capture: CaptureSource,
+        auto_copy: bool,
+        files: &'a [String],
+    }
+
+    impl Default for Source<'_> {
+        fn default() -> Self {
+            Self { text: None, capture: CaptureSource::Selection, auto_copy: true, files: &[] }
+        }
+    }
+
+    /// One headless frame: the overlay's output and the frame's painted shapes.
+    fn render_frame(
+        ctx: &egui::Context,
+        state: &OverlayState,
+        mode: ProcessMode,
+        streaming_text: &str,
+        panel_size: egui::Vec2,
+        source: Source<'_>,
+        events: Vec<egui::Event>,
+    ) -> (OverlayOutput, egui::FullOutput) {
         let mut output = None;
-        let _ = crate::ui::test_pass(ctx, egui::RawInput::default(), |ctx| {
+        let time = ctx.input(|i| i.time) + 1.0 / 60.0;
+        let input = egui::RawInput { events, time: Some(time), ..Default::default() };
+        let full = crate::ui::test_pass(ctx, input, |ctx| {
             output = Some(render(
                 state,
                 mode,
@@ -1450,13 +1489,13 @@ mod tests {
                 },
                 ProcessMode::ALL,
                 None,
-                None,
+                source.text,
                 RephraseParams::default(),
                 ThinkingState { mode: ThinkingMode::NoThink, supported: true },
                 false,
-                true,
-                CaptureSource::Selection,
-                &[],
+                source.auto_copy,
+                source.capture,
+                source.files,
                 &[],
                 false,
                 Some(std::time::Duration::from_secs(3)),
@@ -1469,7 +1508,258 @@ mod tests {
                 ctx,
             ));
         });
-        output.expect("render() must run synchronously inside ctx.run's closure")
+        (output.expect("render() must run synchronously inside ctx.run's closure"), full)
+    }
+
+    /// Every text run painted in a frame, in paint order.
+    fn painted_texts(full: &egui::FullOutput) -> Vec<String> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(t) => out.push(t.galley.text().to_owned()),
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        full.shapes.iter().for_each(|c| walk(&c.shape, &mut out));
+        out
+    }
+
+    /// The text a settled frame paints for `state` with `source`.
+    fn settled_texts(state: &OverlayState, streaming: &str, source: impl Fn() -> Source<'static>) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let mut full = None;
+        for _ in 0..3 {
+            full = Some(render_frame(&ctx, state, ProcessMode::Translate, streaming, size::DEFAULT_PANEL, source(), Vec::new()).1);
+        }
+        painted_texts(&full.unwrap())
+    }
+
+    /// Every text run a frame paints with its position, in paint order.
+    fn painted_text_positions(full: &egui::FullOutput) -> Vec<(String, egui::Pos2)> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<(String, egui::Pos2)>) {
+            match shape {
+                egui::Shape::Text(t) => out.push((t.galley.text().to_owned(), t.pos)),
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        full.shapes.iter().for_each(|c| walk(&c.shape, &mut out));
+        out
+    }
+
+    /// Hover changes colors only: pointing at any control moves no text on
+    /// the panel, in either theme.
+    #[test]
+    fn hovering_a_control_moves_nothing() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            let ctx = egui::Context::default();
+            theme::configure(&ctx);
+            ctx.set_theme(theme);
+            let state = OverlayState::Result("answer".into());
+            let settle = |pointer: Option<egui::Pos2>| {
+                let mut full = None;
+                for _ in 0..3 {
+                    full = Some(
+                        render_frame(
+                            &ctx,
+                            &state,
+                            ProcessMode::Translate,
+                            "",
+                            size::DEFAULT_PANEL,
+                            Source::default(),
+                            vec![pointer.map_or(egui::Event::PointerGone, egui::Event::PointerMoved)],
+                        )
+                        .1,
+                    );
+                }
+                painted_text_positions(&full.unwrap())
+            };
+            let idle = settle(None);
+            for (label, at) in idle.iter().filter(|(t, _)| !t.trim().is_empty() && t != "answer") {
+                let hovered = settle(Some(*at + egui::vec2(2.0, 4.0)));
+                for (text, pos) in &idle {
+                    assert!(
+                        hovered.iter().any(|(t, p)| t == text && (*p - *pos).length() < 0.01),
+                        "{theme:?}: hovering {label:?} moved {text:?} from {pos:?}; now {hovered:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// While an answer streams, the body follows its end; scrolling past the
+    /// bottom on a trackpad must not leave it behind.
+    #[test]
+    fn overscrolling_a_streaming_body_keeps_it_following_the_end() {
+        let follow = |overscroll: bool| {
+            let ctx = egui::Context::default();
+            theme::configure(&ctx);
+            let wheel = |phase, dy| egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, dy),
+                phase,
+                source: egui::MouseWheelSource::Trackpad,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let frame = |events: Vec<egui::Event>, lines: usize| {
+                let text: String = (0..lines).map(|i| format!("line {i}\n")).collect();
+                let full =
+                    render_frame(&ctx, &OverlayState::Processing, ProcessMode::Translate, &text, size::DEFAULT_PANEL, Source::default(), events).1;
+                let end = format!("line {}", lines - 1);
+                full.shapes
+                    .iter()
+                    .find_map(|c| match &c.shape {
+                        egui::Shape::Text(t) if t.galley.text().contains(&end) => {
+                            Some(t.pos.y + t.galley.size().y - c.clip_rect.bottom())
+                        }
+                        _ => None,
+                    })
+            };
+            let mut lines = 60;
+            frame(vec![egui::Event::PointerMoved(egui::pos2(256.0, 200.0))], lines);
+            if overscroll {
+                frame(vec![wheel(egui::TouchPhase::Start, 0.0)], lines);
+                for _ in 0..5 {
+                    frame(vec![wheel(egui::TouchPhase::Move, -200.0)], lines);
+                }
+                frame(vec![wheel(egui::TouchPhase::End, 0.0)], lines);
+            }
+            let mut below_the_body = None;
+            for _ in 0..120 {
+                lines += 1;
+                below_the_body = frame(Vec::new(), lines);
+            }
+            below_the_body.expect("the streamed text is painted")
+        };
+        let (untouched, overscrolled) = (follow(false), follow(true));
+        assert!(
+            (overscrolled - untouched).abs() < 1.0,
+            "text ends {overscrolled} pt below the body after an overscroll, {untouched} pt without"
+        );
+    }
+
+    /// Scrolling back down to the end of a streaming answer resumes following
+    /// it, also when wheel or momentum events keep arriving after the end.
+    #[test]
+    fn scrolling_back_to_the_end_resumes_following() {
+        use egui::{MouseWheelSource as S, MouseWheelUnit as U, TouchPhase as P};
+        let wheel = |phase, dy, source, unit| egui::Event::MouseWheel {
+            unit,
+            delta: egui::vec2(0.0, dy),
+            phase,
+            source,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let gesture = |dy: f32, moves: usize| -> Vec<Vec<egui::Event>> {
+            std::iter::once(vec![wheel(P::Start, 0.0, S::Trackpad, U::Point)])
+                .chain((0..moves).map(|_| vec![wheel(P::Move, dy, S::Trackpad, U::Point)]))
+                .chain(std::iter::once(vec![wheel(P::End, 0.0, S::Trackpad, U::Point)]))
+                .collect()
+        };
+        let momentum: Vec<Vec<egui::Event>> = gesture(-300.0, 8)
+            .into_iter()
+            .chain((0..30).map(|i| vec![wheel(P::Move, -40.0 * 0.9f32.powi(i), S::Momentum, U::Point)]))
+            .collect();
+        let lines_up: Vec<Vec<egui::Event>> = (0..3).map(|_| vec![wheel(P::Move, 3.0, S::Wheel, U::Line)]).collect();
+        let lines_down: Vec<Vec<egui::Event>> = (0..12).map(|_| vec![wheel(P::Move, -3.0, S::Wheel, U::Line)]).collect();
+
+        let below_the_body = |up: Vec<Vec<egui::Event>>, down: Vec<Vec<egui::Event>>| {
+            let ctx = egui::Context::default();
+            theme::configure(&ctx);
+            let mut lines = 60;
+            let mut frame = |events: Vec<egui::Event>| {
+                lines += 1;
+                let text: String = (0..lines).map(|i| format!("line {i}\n")).collect();
+                let full =
+                    render_frame(&ctx, &OverlayState::Processing, ProcessMode::Translate, &text, size::DEFAULT_PANEL, Source::default(), events).1;
+                let end = format!("line {}", lines - 1);
+                full.shapes.iter().find_map(|c| match &c.shape {
+                    egui::Shape::Text(t) if t.galley.text().contains(&end) => {
+                        Some(t.pos.y + t.galley.size().y - c.clip_rect.bottom())
+                    }
+                    _ => None,
+                })
+            };
+            frame(vec![egui::Event::PointerMoved(egui::pos2(256.0, 200.0))]);
+            up.into_iter().chain((0..30).map(|_| Vec::new())).chain(down).for_each(|e| {
+                frame(e);
+            });
+            (0..180).map(|_| frame(Vec::new())).last().flatten().expect("the streamed text is painted")
+        };
+        let untouched = below_the_body(Vec::new(), Vec::new());
+        for (name, up, down) in [("trackpad with momentum", gesture(300.0, 3), momentum), ("mouse wheel", lines_up, lines_down)] {
+            let refollowed = below_the_body(up, down);
+            assert!(
+                (refollowed - untouched).abs() < 1.0,
+                "{name}: text ends {refollowed} pt below the body after scrolling back down, {untouched} pt untouched"
+            );
+        }
+    }
+
+    /// Until the first token arrives, Processing shows what was captured so
+    /// the user can check it is the text they meant; the answer replaces it.
+    #[test]
+    fn processing_shows_the_captured_text_until_the_answer_streams() {
+        let source = || Source { text: Some("the captured words"), ..Source::default() };
+        let waiting = settled_texts(&OverlayState::Processing, "", source);
+        assert!(waiting.iter().any(|t| t.contains("the captured words")), "{waiting:?}");
+
+        let streaming = settled_texts(&OverlayState::Processing, "the answer", source);
+        assert!(streaming.iter().any(|t| t.contains("the answer")), "{streaming:?}");
+        assert!(!streaming.iter().any(|t| t.contains("the captured words")), "{streaming:?}");
+    }
+
+    /// A failed capture sent no request, so the status must not say one failed.
+    #[test]
+    fn a_clipboard_failure_is_not_called_a_failed_request() {
+        let failure = OverlayState::Error(Failure::clipboard("Clipboard is empty."));
+        let texts = settled_texts(&failure, "", Source::default);
+        assert!(texts.iter().any(|t| t.contains("Clipboard error")), "{texts:?}");
+        assert!(!texts.iter().any(|t| t.contains("Request failed")), "{texts:?}");
+
+        let failure = OverlayState::Error(Failure::request("Cannot reach the server."));
+        let texts = settled_texts(&failure, "", Source::default);
+        assert!(texts.iter().any(|t| t.contains("Request failed")), "{texts:?}");
+    }
+
+    /// The debug copy must not look like search: Translate's dictionary
+    /// lookup already says "Looking up".
+    #[test]
+    fn debug_copy_does_not_use_the_search_glyph() {
+        let failure = OverlayState::Error(Failure::request("Cannot reach the server."));
+        let texts = settled_texts(&failure, "", Source::default);
+        assert!(!texts.iter().any(|t| t.as_str() == "\u{1f50d}"), "{texts:?}");
+        assert!(texts.iter().any(|t| t.as_str() == "\u{1f6e0}"), "{texts:?}");
+    }
+
+    /// After a double-tap the primary action pastes over the selection; the
+    /// copy action is offered next to it, as after a single-tap.
+    #[test]
+    fn double_tap_result_offers_copy_next_to_paste() {
+        let texts = settled_texts(&OverlayState::Result("answer".into()), "", Source::default);
+        assert!(texts.iter().any(|t| t.as_str() == "\u{21a9}"), "paste action: {texts:?}");
+        assert!(texts.iter().any(|t| t.as_str() == "\u{1f5d0}"), "copy action: {texts:?}");
+    }
+
+    /// The source badge names the source in words: no glyph tells clipboard,
+    /// selection and files apart at caption size, and none may look like the
+    /// copy action next to it.
+    #[test]
+    fn source_badge_names_the_source() {
+        let result = OverlayState::Result("answer".into());
+        let clipboard = settled_texts(&result, "", || Source { capture: CaptureSource::Clipboard, auto_copy: false, ..Source::default() });
+        assert!(clipboard.iter().any(|t| t.as_str() == "Clipboard"), "{clipboard:?}");
+        assert!(clipboard.iter().any(|t| t.as_str() == "\u{1f5d0}"), "copy action shows the copy glyph: {clipboard:?}");
+        assert!(!clipboard.iter().any(|t| t.as_str() == "\u{1f4cb}"), "{clipboard:?}");
+
+        let selection = settled_texts(&result, "", Source::default);
+        assert!(selection.iter().any(|t| t.as_str() == "Selection"), "{selection:?}");
+
+        static FILES: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| vec!["a.txt".into(), "b.png".into()]);
+        let files = settled_texts(&result, "", || Source { files: &FILES, ..Source::default() });
+        assert!(files.iter().any(|t| t.as_str() == "2 files"), "{files:?}");
     }
 
     /// Render `n` settled frames and return the last one's frame size.
@@ -1500,7 +1790,7 @@ mod tests {
             (OverlayState::Result("short".into()), ProcessMode::Translate, ""),
             (OverlayState::Result(long.clone()), ProcessMode::Translate, ""),
             (OverlayState::Result(long.clone()), ProcessMode::Rephrase, ""),
-            (OverlayState::Error(long.clone()), ProcessMode::Translate, ""),
+            (OverlayState::Error(Failure::request(long.clone())), ProcessMode::Translate, ""),
         ];
         for (state, mode, streaming) in &cases {
             let size = settled_size(state, *mode, streaming, panel);
@@ -1526,7 +1816,7 @@ mod tests {
             OverlayState::Capturing,
             OverlayState::Processing,
             OverlayState::Result("line\n".repeat(50)),
-            OverlayState::Error("boom".into()),
+            OverlayState::Error(Failure::request("boom")),
         ] {
             ctx.memory_mut(|m| m.reset_areas());
             for _ in 0..3 {

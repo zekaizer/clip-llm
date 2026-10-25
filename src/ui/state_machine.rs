@@ -47,7 +47,34 @@ pub enum OverlayState {
     Capturing,
     Processing,
     Result(String),
-    Error(String),
+    Error(Failure),
+}
+
+/// What failed, which decides how the overlay names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureKind {
+    /// The LLM request failed.
+    Request,
+    /// Reading the content or writing the reply failed; for a capture
+    /// failure no request was sent.
+    Clipboard,
+}
+
+/// The Error state's content: the failure kind and its user-facing message.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Failure {
+    pub kind: FailureKind,
+    pub message: String,
+}
+
+impl Failure {
+    pub fn request(message: impl Into<String>) -> Self {
+        Self { kind: FailureKind::Request, message: message.into() }
+    }
+
+    pub fn clipboard(message: impl Into<String>) -> Self {
+        Self { kind: FailureKind::Clipboard, message: message.into() }
+    }
 }
 
 impl OverlayState {
@@ -728,7 +755,7 @@ impl StateMachine {
             self.has_been_focused = self.is_focused;
             return vec![UiEffect::ResetAreas];
         }
-        self.state = OverlayState::Error(message);
+        self.state = OverlayState::Error(Failure::request(message));
         // Same auto-hide rule as on_worker_result (#62): if focus was held
         // through the failure the user has seen the error, so the next
         // FocusLost dismisses it; a detached error stays until the user
@@ -978,7 +1005,7 @@ impl StateMachine {
 
     fn on_clipboard_error(&mut self, msg: String) -> Vec<UiEffect> {
         // Must NOT emit WriteClipboard to avoid infinite recursion.
-        self.state = OverlayState::Error(msg);
+        self.state = OverlayState::Error(Failure::clipboard(msg));
         // Unified auto-hide rule (#62): track focus at entry. The ShowWindow
         // below activates the overlay (capture used ShowWindowNoActivate, so
         // is_focused is false here), and the resulting FocusGained re-arms
@@ -1216,7 +1243,7 @@ mod tests {
             request_id: rid,
         });
 
-        assert_eq!(*sm.state(), OverlayState::Error("fail".into()));
+        assert_eq!(*sm.state(), OverlayState::Error(Failure::request("fail")));
         assert!(!effects.contains(&UiEffect::ShowWindow));
         assert!(effects.contains(&UiEffect::ResetAreas));
         // Must NOT contain WriteClipboard.
@@ -1680,7 +1707,7 @@ mod tests {
 
         let effects = sm.handle(UiEvent::ClipboardError("write failed".into()));
 
-        assert_eq!(*sm.state(), OverlayState::Error("write failed".into()));
+        assert_eq!(*sm.state(), OverlayState::Error(Failure::clipboard("write failed")));
         assert!(effects.contains(&UiEffect::ShowWindow));
         assert!(effects.contains(&UiEffect::ResetAreas));
         // Must NOT contain WriteClipboard (avoid recursion).
@@ -1874,7 +1901,7 @@ mod tests {
             message: "fail".into(),
             request_id: rid,
         });
-        assert_eq!(*sm.state(), OverlayState::Error("fail".into()));
+        assert_eq!(*sm.state(), OverlayState::Error(Failure::request("fail")));
 
         // Switch back to Translate: cache hit
         let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Translate));
@@ -2439,7 +2466,7 @@ mod tests {
 
         // Clipboard read fails (e.g. copy_and_read timeout) → Error with no original_content.
         let effects = sm.handle(UiEvent::ClipboardError("timeout".into()));
-        assert_eq!(*sm.state(), OverlayState::Error("timeout".into()));
+        assert_eq!(*sm.state(), OverlayState::Error(Failure::clipboard("timeout")));
         assert!(effects.contains(&UiEffect::ShowWindow));
 
         // User switches mode from Error — should NOT transition to Processing
@@ -2447,7 +2474,7 @@ mod tests {
         let effects = sm.handle(UiEvent::UserSwitchMode(ProcessMode::Rephrase));
         assert!(effects.is_empty());
         // State stays Error, not Processing.
-        assert_eq!(*sm.state(), OverlayState::Error("timeout".into()));
+        assert_eq!(*sm.state(), OverlayState::Error(Failure::clipboard("timeout")));
     }
 
     #[test]
@@ -2472,12 +2499,12 @@ mod tests {
 
         // Clipboard error shows the error overlay, detached (no focus yet).
         sm.handle(UiEvent::ClipboardError("read failed".into()));
-        assert_eq!(*sm.state(), OverlayState::Error("read failed".into()));
+        assert_eq!(*sm.state(), OverlayState::Error(Failure::clipboard("read failed")));
 
         // Bare FocusLost is ignored — the user has not focused the error yet.
         let effects = sm.handle(UiEvent::FocusLost);
         assert!(effects.is_empty());
-        assert_eq!(*sm.state(), OverlayState::Error("read failed".into()));
+        assert_eq!(*sm.state(), OverlayState::Error(Failure::clipboard("read failed")));
 
         // A fresh focus → unfocus cycle dismisses it.
         sm.handle(UiEvent::FocusGained);
@@ -2502,12 +2529,12 @@ mod tests {
 
         // Error lands while detached.
         sm.handle(UiEvent::WorkerError { message: "boom".into(), request_id: rid });
-        assert_eq!(*sm.state(), OverlayState::Error("boom".into()));
+        assert_eq!(*sm.state(), OverlayState::Error(Failure::request("boom")));
 
         // Re-fired FocusLost is ignored — user has not seen the error yet.
         let effects = sm.handle(UiEvent::FocusLost);
         assert!(effects.is_empty());
-        assert_eq!(*sm.state(), OverlayState::Error("boom".into()));
+        assert_eq!(*sm.state(), OverlayState::Error(Failure::request("boom")));
 
         // Fresh focus → unfocus dismisses it.
         sm.handle(UiEvent::FocusGained);
@@ -2789,7 +2816,7 @@ mod tests {
         sm.handle(UiEvent::CaptureStarted { source: CaptureSource::Selection });
 
         let effects = sm.handle(UiEvent::ClipboardError("no text after copy".into()));
-        assert_eq!(*sm.state(), OverlayState::Error("no text after copy".into()));
+        assert_eq!(*sm.state(), OverlayState::Error(Failure::clipboard("no text after copy")));
         assert!(effects.contains(&UiEffect::ShowWindow));
         // No stale content left behind after a failed capture.
         assert_eq!(sm.original_text(), None);

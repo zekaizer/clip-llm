@@ -231,6 +231,9 @@ pub fn configure(ctx: &egui::Context) {
             // Body text fades itself (`widgets::scroll_text`); egui's
             // gradient would composite over the translucent frame again.
             style.spacing.scroll.fade.strength = 0.0;
+            // No bounce at the ends, as before egui 0.37; following a
+            // streaming body is `widgets::scroll_text`'s job.
+            style.spacing.scroll.kinetic.rubber_band = false;
             if theme == egui::Theme::Light {
                 // egui's light widgets assume a white window; on the
                 // overlay's light-grey frame their near-white fills and
@@ -247,6 +250,16 @@ pub fn configure(ctx: &egui::Context) {
                 v.widgets.hovered.weak_bg_fill = egui::Color32::from_gray(200);
                 v.widgets.active.bg_fill = egui::Color32::from_gray(175);
                 v.widgets.active.weak_bg_fill = egui::Color32::from_gray(185);
+            }
+            // egui narrows a button's margin by its state's stroke width and
+            // our buttons paint no stroke, so one width for every state keeps
+            // hover from moving the layout.
+            let w = &mut style.visuals.widgets;
+            let width = w.hovered.bg_stroke.width;
+            for state in [&mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
+                if state.bg_stroke.width != width {
+                    state.bg_stroke = egui::Stroke::new(width, egui::Color32::TRANSPARENT);
+                }
             }
         });
     }
@@ -302,7 +315,7 @@ mod tests {
     fn emoji_icon_glyphs_are_in_the_bundled_fonts() {
         let ctx = egui::Context::default();
         let _ = crate::ui::test_pass(&ctx, egui::RawInput::default(), |_| {});
-        let icons = "\u{1f4cb}\u{1f50d}\u{1f4c4}\u{1f4cc}\u{26a0}\u{2702}\u{2318}\u{21bb}\u{21a9}\u{25b6}";
+        let icons = "\u{1f5d0}\u{1f6e0}\u{1f4cc}\u{26a0}\u{2318}\u{21bb}\u{21a9}\u{25b6}";
         let font = egui::FontId::proportional(font::LABEL);
         let missing: String = ctx.fonts_mut(|f| icons.chars().filter(|&c| !f.has_glyph(&font, c)).collect());
         assert!(missing.is_empty(), "no bundled glyph for {missing:?}");

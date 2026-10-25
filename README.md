@@ -38,6 +38,22 @@ Settings come from a `config.toml` next to the executable (inside
 `clip-llm.app/Contents/MacOS/` on macOS) or `CLIP_LLM_*` env vars — see
 [Configuration](#configuration).
 
+### Building your own macOS bundle
+
+To try a branch with the settings you already use, build on the Mac and pass
+your current `config.toml` to the packaging script:
+
+```sh
+cargo build --release
+scripts/package-macos-app.sh target/release/clip-llm "$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" \
+  target/dist/clip-llm.app.zip --config /path/to/installed/clip-llm.app/Contents/MacOS/config.toml
+```
+
+The script writes `clip-llm.app` in the current directory. The config is copied
+into that bundle after the zip is made, so the zip never carries your API keys.
+Every build is a new ad-hoc identity: grant Accessibility to the new bundle
+(remove the old clip-llm entry and add this one), then launch it.
+
 ## Roadmap
 
 - [x] Phase 1 — Basic Pipeline

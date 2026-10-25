@@ -1864,7 +1864,7 @@ impl OverlayApp {
             self.execute_effects(effects, ctx);
         }
 
-        // Copy confirmation (#16a): flip the 📋 button to ✓ for a moment.
+        // Copy confirmation (#16a): flip the copy button to ✓ for a moment.
         // Gated on Result — UserCopy is a no-op in any other state.
         if matches!(action, overlay::OverlayAction::CopyToClipboard)
             && matches!(self.sm.state(), OverlayState::Result(_))
@@ -2059,6 +2059,10 @@ impl eframe::App for OverlayApp {
             let model_switchable = self.model_count() > 1;
             let lookup = self.sm.mode() == crate::ProcessMode::Translate
                 && crate::config::get().is_lookup(self.sm.original_text());
+            let source_text = match self.sm.state() {
+                OverlayState::Capturing => self.pending_content.as_ref().and_then(|c| c.text.as_deref()),
+                _ => self.sm.original_text(),
+            };
             let mut draft = std::mem::take(&mut self.revise_draft);
             let instructions = self.sm.revision_instructions();
             let mut output = overlay::render(
@@ -2074,7 +2078,7 @@ impl eframe::App for OverlayApp {
                 },
                 self.sm.available_modes(),
                 self.preview_mode,
-                self.pending_content.as_ref().and_then(|c| c.text.as_deref()),
+                source_text,
                 self.sm.rephrase_params(),
                 overlay::ThinkingState {
                     mode: self.sm.effective_thinking_mode(),

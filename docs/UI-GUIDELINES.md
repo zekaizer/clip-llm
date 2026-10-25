@@ -45,9 +45,9 @@ Every view fills the same four slots, top to bottom, provided by
 | Slot | Content | Height |
 |------|---------|--------|
 | **Header** | Mode tabs left; thinking pills, pin, close right. Rephrase adds its parameter rows underneath. A separator closes the header. | Natural |
-| **Status** | One line saying what is going on: spinner + phase + elapsed while capturing or processing (`Revising…` for a revision round, `Looking up…` for a dictionary lookup); the Think toggle, completion summary (`✓ 2.4s · model`, doubles as the model switch) and the revision label (`✎ 2 · "more formal"`, the whole chain on hover) in Result; `✕ Request failed` in Error. | `theme::size::ROW` |
-| **Body** | The one thing the state is about: picked text, streaming text, the answer, the error message. Text fills the remaining height and scrolls. | Remainder |
-| **Footer** | Left: the source badge. Right: actions, primary at the far right (`↩`/`📋`, then `↻`, then `🔍`, then `↶` Undo; Capturing and Processing show Cancel). Result fills the middle with the revise input. | `theme::size::ACTION_BTN` |
+| **Status** | One line saying what is going on: spinner + phase + elapsed while capturing or processing (`Revising…` for a revision round, `Looking up…` for a dictionary lookup); the Think toggle, completion summary (`✓ 2.4s · model`, doubles as the model switch) and the revision label (`✎ 2 · "more formal"`, the whole chain on hover) in Result; `✕ Request failed` in Error, or `✕ Clipboard error` when reading the content or writing the reply failed (no request failed). | `theme::size::ROW` |
+| **Body** | The one thing the state is about: picked text, streaming text, the answer, the error message. Until the first token, Processing shows the content being processed in `text_muted`, so the user can check what was captured. Text fills the remaining height and scrolls. | Remainder |
+| **Footer** | Left: the source badge, a word (`Clipboard`, `Selection`, `2 files`), never a glyph. Right: actions, primary at the far right (`↩` then `🗐` after a double-tap, `🗐` after a single-tap, then `↻`, then `🛠` (copy the raw request and response), then `↶` Undo; Capturing and Processing show Cancel). Result fills the middle with the revise input. | `theme::size::ACTION_BTN` |
 
 Rules:
 - Every state fills every slot (an empty slot keeps its height), so a
@@ -170,3 +170,5 @@ Checklist for a new or changed view:
 3. Controls shared with another state sit in the same slot and order.
 4. Overflowing text goes through `Body::fill_text`.
 5. A diagnostics scenario captures the new state or variant.
+6. Hover changes colors only: no control moves (`hovering_a_control_moves_nothing`). A button that overrides egui's stroke relies on `theme::configure` giving every interactive state the same stroke width.
+7. A streaming body follows its end until the user scrolls up, and follows again once they scroll back to the end (`overscrolling_a_streaming_body_keeps_it_following_the_end`, `scrolling_back_to_the_end_resumes_following`). `widgets::scroll_text` decides following itself: egui's stick-to-end lets go when a wheel or momentum step lands short of an end that just grew.
