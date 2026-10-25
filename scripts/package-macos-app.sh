@@ -13,6 +13,10 @@
 # zip is made: the zip is the distributable and must not carry API keys. The
 # file lands outside the code signature, where the app itself writes it.
 #
+# Signs ad hoc unless CODESIGN_IDENTITY (and CODESIGN_KEYCHAIN) are set; a
+# local build takes them from scripts/macos-dev-signing.sh so the
+# Accessibility grant survives rebuilds.
+#
 set -euo pipefail
 
 BIN="${1:?binary path required}"
@@ -58,8 +62,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Ad-hoc sign so TCC tracks a stable identity per release build.
-codesign --force --deep --sign - "$APP"
+sign_args=(--force --deep --sign "${CODESIGN_IDENTITY:--}")
+[ -n "${CODESIGN_KEYCHAIN:-}" ] && sign_args+=(--keychain "$CODESIGN_KEYCHAIN")
+codesign "${sign_args[@]}" "$APP"
 codesign --verify --verbose "$APP"
 
 # .app is a directory; ditto preserves the bundle structure inside a zip.

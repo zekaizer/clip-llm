@@ -45,14 +45,20 @@ your current `config.toml` to the packaging script:
 
 ```sh
 cargo build --release
+eval "$(scripts/macos-dev-signing.sh)"
 scripts/package-macos-app.sh target/release/clip-llm "$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" \
   target/dist/clip-llm.app.zip --config /path/to/installed/clip-llm.app/Contents/MacOS/config.toml
 ```
 
 The script writes `clip-llm.app` in the current directory. The config is copied
 into that bundle after the zip is made, so the zip never carries your API keys.
-Every build is a new ad-hoc identity: grant Accessibility to the new bundle
-(remove the old clip-llm entry and add this one), then launch it.
+
+`macos-dev-signing.sh` creates a self-signed `clip-llm-dev` signing identity in
+its own keychain on first use, and only unlocks it afterwards. Bundles signed
+with it share one designated requirement, so Accessibility is granted once:
+remove any older clip-llm entry, add the first such bundle, and later builds
+keep the grant. Without it the bundle is signed ad hoc, as in the release
+zips, and every build needs a new grant.
 
 ## Roadmap
 
