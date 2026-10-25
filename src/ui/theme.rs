@@ -231,6 +231,10 @@ pub fn configure(ctx: &egui::Context) {
             // Body text fades itself (`widgets::scroll_text`); egui's
             // gradient would composite over the translucent frame again.
             style.spacing.scroll.fade.strength = 0.0;
+            // egui re-sticks a body to its end only when the offset equals
+            // the end exactly; a rubber-band spring-back during streaming
+            // never lands there, and the body stops following the text.
+            style.spacing.scroll.kinetic.rubber_band = false;
             if theme == egui::Theme::Light {
                 // egui's light widgets assume a white window; on the
                 // overlay's light-grey frame their near-white fills and
