@@ -118,6 +118,9 @@ pub(super) fn fixed_height_row(ui: &mut egui::Ui, height: f32, add_contents: imp
 /// light desktop. ↑/↓ scroll by a line, PageUp/PageDown/Space by a page,
 /// Home/End to either end (UI-GUIDELINES §4). Views draw body text through
 /// `panel::Body::fill_text`, which supplies the height.
+///
+/// With `stick_to_bottom` the column follows its end until the user scrolls
+/// up, and follows again once they scroll back to the end.
 pub(super) fn scroll_text(
     ui: &mut egui::Ui,
     id_salt: impl egui::AsIdSalt,
@@ -126,7 +129,15 @@ pub(super) fn scroll_text(
     max_height: f32,
     stick_to_bottom: bool,
 ) {
-    egui::ScrollArea::vertical()
+    // egui re-sticks only when the offset lands exactly on the end, which a
+    // wheel or momentum step smaller than the text added that frame misses.
+    // `Some(offset)`: following, pin to that offset (last frame's end);
+    // `None`: the user scrolled away from the end.
+    let follow_id = ui.make_persistent_id(&id_salt).with("follow");
+    let pinned = stick_to_bottom
+        .then(|| ui.data(|d| d.get_temp::<Option<f32>>(follow_id)).unwrap_or(Some(0.0)))
+        .flatten();
+    let mut area = egui::ScrollArea::vertical()
         .id_salt(id_salt)
         .max_height(max_height)
         // egui's ScrollArea defaults to a 64px `min_scrolled_size` floor once
@@ -135,9 +146,11 @@ pub(super) fn scroll_text(
         // Match the panel's own text-column floor so a tight budget is honored.
         .min_scrolled_height(size::MIN_TEXT_HEIGHT)
         .auto_shrink([false, true])
-        .stick_to_bottom(stick_to_bottom)
-        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
-        .show(ui, |ui| {
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded);
+    if let Some(at) = pinned {
+        area = area.vertical_scroll_offset(at);
+    }
+    let output = area.show(ui, |ui| {
             // No focused widget means the keys are ours: the panel has no
             // text fields, and egui only scrolls areas that own the focus.
             if ui.memory(|m| m.focused().is_none())
@@ -157,6 +170,16 @@ pub(super) fn scroll_text(
             let galley = ui.fonts_mut(|f| f.layout_job(faded));
             ui.add(egui::Label::new(galley).wrap_mode(egui::TextWrapMode::Wrap));
         });
+    if stick_to_bottom {
+        let end = (output.content_size.y - output.inner_rect.height()).max(0.0);
+        let offset = output.state.clamped_offset().y;
+        let next = match pinned {
+            Some(at) if offset + 0.5 < at => None,
+            Some(_) => Some(end),
+            None => (offset >= end - 1.0).then_some(end),
+        };
+        ui.data_mut(|d| d.insert_temp(follow_id, next));
+    }
 }
 
 /// `text` laid out like `galley` (same font, wrap width and rows), with the

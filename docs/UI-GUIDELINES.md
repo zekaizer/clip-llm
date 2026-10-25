@@ -171,4 +171,4 @@ Checklist for a new or changed view:
 4. Overflowing text goes through `Body::fill_text`.
 5. A diagnostics scenario captures the new state or variant.
 6. Hover changes colors only: no control moves (`hovering_a_control_moves_nothing`). A button that overrides egui's stroke relies on `theme::configure` giving every interactive state the same stroke width.
-7. A streaming body keeps following its end after the user scrolls past it (`overscrolling_a_streaming_body_keeps_it_following_the_end`); egui's rubber-banding stays off.
+7. A streaming body follows its end until the user scrolls up, and follows again once they scroll back to the end (`overscrolling_a_streaming_body_keeps_it_following_the_end`, `scrolling_back_to_the_end_resumes_following`). `widgets::scroll_text` decides following itself: egui's stick-to-end lets go when a wheel or momentum step lands short of an end that just grew.
