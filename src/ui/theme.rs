@@ -248,6 +248,16 @@ pub fn configure(ctx: &egui::Context) {
                 v.widgets.active.bg_fill = egui::Color32::from_gray(175);
                 v.widgets.active.weak_bg_fill = egui::Color32::from_gray(185);
             }
+            // egui narrows a button's margin by its state's stroke width and
+            // our buttons paint no stroke, so one width for every state keeps
+            // hover from moving the layout.
+            let w = &mut style.visuals.widgets;
+            let width = w.hovered.bg_stroke.width;
+            for state in [&mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
+                if state.bg_stroke.width != width {
+                    state.bg_stroke = egui::Stroke::new(width, egui::Color32::TRANSPARENT);
+                }
+            }
         });
     }
     // Back to the resolved theme after walking both palettes.
