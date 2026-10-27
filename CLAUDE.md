@@ -154,7 +154,7 @@ on `WorkerCommand::SelectModel`, re-probing capabilities per profile):
 
 - Endpoint: OpenAI-compatible `/v1/chat/completions`
 - Response parsing: extract `choices[0].message.content`
-- Think-block stripping: regex `(?s)<think>.*?</think>`, trim whitespace after
+- Reasoning: structured reasoning (`reasoning_content`, Responses reasoning deltas) is kept out of band; from `content` only a leading inline block (`<think>`, `<thought>`, `<thinking>`, `<reasoning>`) is stripped. A tag pair later in the answer is content
 - User turn layout (both flavors, every request): the clipboard text inside `<content>…</content>`; when images are sent, a `<metadata>` block first (attachment count; per image the source size and, when reduced, the sent size) and one image part per image after the text. The shared preamble (`DEFAULT_PROMPT_PREAMBLE`) declares that layout so Transcribe/Summarize never reproduce the block or the tags — keep `structured_user_text` and the preamble sentence in sync. Measured 2026-09-06: a per-image marker text part next to each image was copied into Transcribe output by gemma-4-e2b; the metadata block was not. `scripts/prompt_vectors.json` I-001..I-003 check for leaks with `scripts/fixtures/chart.png`
 - Thinking control (No Think) is probed per profile by **effect**, not acceptance: `reasoning_effort:"none"` → `chat_template_kwargs.enable_thinking=false` → `/no_think`, keeping the first whose reply shows no reasoning (`reasoning_tokens`, `reasoning_content`, inline `<think>`). LM Studio accepts unknown fields with 200 and keeps thinking, which is why acceptance was never enough. `thinking_control` in a profile forces the method.
 - SSE (Phase 2+): parse `data: {...}` lines, accumulate `choices[0].delta.content`, finalize on `[DONE]`
