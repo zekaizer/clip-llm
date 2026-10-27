@@ -58,6 +58,8 @@ pub enum FailureKind {
     /// Reading the content or writing the reply failed; for a capture
     /// failure no request was sent.
     Clipboard,
+    /// The config file could not be loaded.
+    Config,
 }
 
 /// The Error state's content: the failure kind and its user-facing message.
@@ -74,6 +76,10 @@ impl Failure {
 
     pub fn clipboard(message: impl Into<String>) -> Self {
         Self { kind: FailureKind::Clipboard, message: message.into() }
+    }
+
+    pub fn config(message: impl Into<String>) -> Self {
+        Self { kind: FailureKind::Config, message: message.into() }
     }
 }
 
@@ -190,6 +196,8 @@ pub enum UiEvent {
     StreamDelta { text: String, request_id: u64 },
     /// Clipboard operation failed (read or write).
     ClipboardError(String),
+    /// The config file could not be loaded (startup or tray reload).
+    ConfigError(String),
     /// User clicked the copy button in the result area.
     UserCopy,
     /// User clicked the paste/replace button in the result area.
@@ -518,6 +526,7 @@ impl StateMachine {
                 self.on_focus_lost()
             }
             UiEvent::ClipboardError(msg) => self.on_clipboard_error(msg),
+            UiEvent::ConfigError(msg) => self.on_clipboard_error(msg),
             UiEvent::UserCopy => self.on_user_copy(),
             UiEvent::UserPaste => self.on_user_paste(),
             UiEvent::UserTogglePin => {
@@ -1745,6 +1754,20 @@ mod tests {
         let effects = sm.handle(UiEvent::ClipboardError("reload failed".into()));
 
         assert!(effects.contains(&UiEffect::CancelCapture), "{effects:?}");
+    }
+
+    /// A config failure is named as one, and ends the session like any
+    /// other failure that takes over.
+    #[test]
+    fn config_error_is_not_a_clipboard_failure() {
+        let mut sm = new_sm();
+        start_processing(&mut sm, "hello");
+
+        let effects = sm.handle(UiEvent::ConfigError("Config: reload failed".into()));
+
+        assert_eq!(*sm.state(), OverlayState::Error(Failure::config("Config: reload failed")));
+        assert!(effects.contains(&UiEffect::SendCancel), "{effects:?}");
+        assert!(effects.contains(&UiEffect::ShowWindow), "{effects:?}");
     }
 
     /// Nothing is in flight outside Processing/Capturing, so nothing is cancelled.
