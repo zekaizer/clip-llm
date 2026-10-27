@@ -1292,9 +1292,9 @@ static CONFIG: ConfigStore = ConfigStore::new();
 /// not leak into logs or the UI.
 pub type LoadFailure = &'static str;
 
-/// Reads, size-checks, parses and sanitizes one config file. No fallback: the
-/// caller decides what a failure means (defaults at startup, keep-previous on
-/// reload).
+/// Reads, size-checks, parses and sanitizes one config file, and rejects a
+/// profile set [`Config::model_specs`] refuses. No fallback: the caller decides
+/// what a failure means (defaults at startup, keep-previous on reload).
 pub fn load_file(path: &std::path::Path) -> Result<Config, LoadFailure> {
     // Reject non-regular files (a FIFO would otherwise block forever) and
     // oversized files before reading anything into memory.
@@ -1319,6 +1319,10 @@ pub fn load_file(path: &std::path::Path) -> Result<Config, LoadFailure> {
     // snippet of the offending source line (potentially an `api_key` line).
     match toml::from_str::<Config>(&contents) {
         Ok(mut config) => {
+            if let Err(e) = config.model_specs() {
+                warn!("config: {}: {e}", path.display());
+                return Err("invalid model profiles: duplicate name, or a [[models]] entry without model");
+            }
             config.generation = sanitize_generation(config.generation);
             Ok(config)
         }
