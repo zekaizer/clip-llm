@@ -20,6 +20,8 @@ pub struct StreamingState<'a> {
     pub think_expanded: bool,
     /// `Some(reason)` when the shown Result is partial (stream cut short).
     pub incomplete: Option<&'a str>,
+    /// Why the shown Result could not be written to the clipboard.
+    pub copy_error: Option<&'a str>,
 }
 
 /// Revision-round state for the Result/Processing views.
@@ -490,6 +492,12 @@ fn view_result(
         // A failed revision: the reply it was revising is shown, say why.
         if let Some(message) = revision.error {
             let banner = format!("\u{26a0} Revision failed \u{2014} {message}");
+            body.ui.label(theme::text(banner, font::LABEL, color::warning()));
+            body.ui.add_space(space::SM);
+        }
+        // The result stays, so say it did not reach the clipboard.
+        if let Some(message) = streaming.copy_error {
+            let banner = format!("\u{26a0} Not copied \u{2014} {message}");
             body.ui.label(theme::text(banner, font::LABEL, color::warning()));
             body.ui.add_space(space::SM);
         }
@@ -1487,6 +1495,7 @@ mod tests {
                     think_content: Some("some reasoning"),
                     think_expanded: false,
                     incomplete: Some("token limit"),
+                    copy_error: None,
                 },
                 ProcessMode::ALL,
                 None,
@@ -1865,6 +1874,7 @@ mod tests {
                     think_content: None,
                     think_expanded: false,
                     incomplete: None,
+                    copy_error: None,
                 },
                 &[ProcessMode::Translate, ProcessMode::Summarize, ProcessMode::Explain],
                 None,
@@ -1912,6 +1922,7 @@ mod tests {
                     think_content: None,
                     think_expanded: false,
                     incomplete: None,
+                    copy_error: None,
                 },
                 &[ProcessMode::Translate, ProcessMode::Summarize, ProcessMode::Explain],
                 None,

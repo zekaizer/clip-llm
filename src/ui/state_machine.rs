@@ -284,6 +284,9 @@ pub struct StateMachine {
     /// Message of a revision that failed, shown over the restored reply until
     /// the next request.
     revision_error: Option<String>,
+    /// Why the shown result could not be written to the clipboard; shown over
+    /// it until the next copy attempt or result.
+    copy_error: Option<String>,
     /// Instruction of the failed revision, handed back once to the adapter.
     failed_instruction: Option<String>,
     /// Accumulated visible streaming text (displayed during Processing).
@@ -329,6 +332,7 @@ impl StateMachine {
             rounds: Vec::new(),
             pending_revision: None,
             revision_error: None,
+            copy_error: None,
             failed_instruction: None,
             streaming_text: String::new(),
             think_started: false,
@@ -449,7 +453,7 @@ impl StateMachine {
 
     /// Why the shown result could not be written to the clipboard.
     pub fn copy_error(&self) -> Option<&str> {
-        None
+        self.copy_error.as_deref()
     }
 
     /// The instruction of the revision that just failed, handed back once so the
@@ -534,7 +538,7 @@ impl StateMachine {
             }
             UiEvent::ClipboardError(msg) => self.on_failure(Failure::clipboard(msg)),
             UiEvent::ConfigError(msg) => self.on_failure(Failure::config(msg)),
-            UiEvent::CopyFailed(msg) => self.on_failure(Failure::clipboard(msg)),
+            UiEvent::CopyFailed(msg) => self.on_copy_failed(msg),
             UiEvent::UserCopy => self.on_user_copy(),
             UiEvent::UserPaste => self.on_user_paste(),
             UiEvent::UserTogglePin => {
@@ -731,6 +735,7 @@ impl StateMachine {
         self.think_content = think_content.clone();
         self.result_incomplete = incomplete;
         self.revision_error = None;
+        self.copy_error = None;
         if let Some(round) = self.pending_revision.take() {
             self.rounds.push(round);
         }
@@ -793,6 +798,7 @@ impl StateMachine {
         self.retry_notice = None;
         self.think_content = None;
         self.result_incomplete = None;
+        self.copy_error = None;
         self.has_been_focused = false;
         self.is_focused = false;
         self.auto_copy = false;
@@ -872,6 +878,7 @@ impl StateMachine {
         self.think_content = think_content;
         // Cached results carry no truncation state; clear any stale banner.
         self.result_incomplete = None;
+        self.copy_error = None;
         self.state = OverlayState::Result(text.clone());
         let mut effects = Vec::new();
         if self.auto_copy {
@@ -904,8 +911,10 @@ impl StateMachine {
         vec![UiEffect::HideWindow]
     }
 
-    fn on_user_copy(&self) -> Vec<UiEffect> {
+    fn on_user_copy(&mut self) -> Vec<UiEffect> {
         if let OverlayState::Result(text) = &self.state {
+            // A failure of this write sets it again.
+            self.copy_error = None;
             vec![UiEffect::WriteClipboard(text.clone())]
         } else {
             vec![]
@@ -999,6 +1008,7 @@ impl StateMachine {
     fn restore_reply(&mut self, round: RevisionRound) {
         self.think_content = round.think_before;
         self.result_incomplete = None;
+        self.copy_error = None;
         self.state = OverlayState::Result(round.turn.reply_before);
     }
 
@@ -1018,6 +1028,17 @@ impl StateMachine {
         self.pending_revision = None;
         self.revision_error = None;
         self.failed_instruction = None;
+    }
+
+    /// A shown result outlives a failed write of it (a transient clipboard
+    /// lock must not discard a finished generation); without one, the failure
+    /// takes over.
+    fn on_copy_failed(&mut self, msg: String) -> Vec<UiEffect> {
+        if matches!(self.state, OverlayState::Result(_)) {
+            self.copy_error = Some(msg);
+            return vec![];
+        }
+        self.on_failure(Failure::clipboard(msg))
     }
 
     /// A clipboard or config failure, which can take over from any state.

@@ -920,13 +920,15 @@ impl OverlayApp {
                     } else if let Err(e) = self.clipboard.write_text(&text) {
                         error!("clipboard write failed: {e}");
                         let err_effects =
-                            self.sm_handle(UiEvent::ClipboardError(friendly_clipboard_error(&e)));
-                        // ClipboardError never emits WriteClipboard — recursion safe.
+                            self.sm_handle(UiEvent::CopyFailed(friendly_clipboard_error(&e)));
+                        // CopyFailed never emits WriteClipboard — recursion safe.
                         self.execute_effects(err_effects, ctx);
-                        // Abort remaining effects: the state machine transitioned to
-                        // Error, so subsequent effects (e.g. PasteClipboard) from the
-                        // original chain are stale and must not execute.
-                        return;
+                        // A shown result stays (with a banner), so the rest of its
+                        // chain still applies. Otherwise the state machine moved to
+                        // Error, and the rest (e.g. PasteClipboard) is stale.
+                        if !matches!(self.sm.state(), OverlayState::Result(_)) {
+                            return;
+                        }
                     } else {
                         self.last_clipboard_write =
                             Some((text.clone(), self.platform.clipboard_change_count()));
@@ -1865,9 +1867,11 @@ impl OverlayApp {
         }
 
         // Copy confirmation (#16a): flip the copy button to ✓ for a moment.
-        // Gated on Result — UserCopy is a no-op in any other state.
+        // Gated on Result — UserCopy is a no-op in any other state — and on
+        // the write having succeeded.
         if matches!(action, overlay::OverlayAction::CopyToClipboard)
             && matches!(self.sm.state(), OverlayState::Result(_))
+            && self.sm.copy_error().is_none()
         {
             self.copy_confirmed_at = Some(std::time::Instant::now());
             ctx.request_repaint_after(COPY_CONFIRM);
@@ -2084,6 +2088,7 @@ impl eframe::App for OverlayApp {
                     think_content: self.sm.think_content(),
                     think_expanded: self.think_expanded,
                     incomplete: self.sm.result_incomplete(),
+                    copy_error: self.sm.copy_error(),
                 },
                 self.sm.available_modes(),
                 self.preview_mode,
