@@ -513,7 +513,8 @@ struct GenerationConfig {
     /// Per-request timeout in seconds (also the streaming connect timeout).
     request_timeout_secs: Option<u64>,
     /// Maximum wait in seconds for response headers on streaming requests
-    /// before the attempt is treated as transient and retried.
+    /// before the attempt is treated as transient and retried. Also caps the
+    /// non-streaming connect timeout (at most `request_timeout_secs`).
     initial_response_timeout_secs: Option<u64>,
 }
 
@@ -1492,7 +1493,7 @@ fn starter_template() -> String {
     t.push_str(&r("max_tokens", "16384", "max output tokens (a ceiling when token_budget is set)"));
     t.push_str(&r("token_budget", "6000", "optional: total (prompt+completion) cap; max_tokens is computed per request to fit it"));
     t.push_str(&r("request_timeout_secs", "30", "per-request timeout (also the streaming connect timeout)"));
-    t.push_str(&r("initial_response_timeout_secs", "10", "streaming only: max wait for response headers before retry"));
+    t.push_str(&r("initial_response_timeout_secs", "10", "max wait for streaming response headers before retry; also the non-streaming connect timeout"));
     t.push('\n');
 
     // [telemetry] — opt-in remote log/trace shipping (off unless url is set).

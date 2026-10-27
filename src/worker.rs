@@ -181,7 +181,10 @@ pub fn friendly_api_error(e: &ApiError) -> String {
         ApiError::InitialResponseTimeout(_) => {
             "The server is slow to respond. Try again in a moment.".to_string()
         }
-        ApiError::GenerationTimeout(_) => String::new(),
+        ApiError::GenerationTimeout(secs) => format!(
+            "The reply took longer than {secs}s. Raise [generation] request_timeout_secs \
+             or set [api] streaming = true in config.toml."
+        ),
         ApiError::EmptyResponse => {
             "The model returned no visible output. Try switching mode or disabling thinking."
                 .to_string()
