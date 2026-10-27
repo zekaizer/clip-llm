@@ -33,6 +33,12 @@ fn reload_swaps_in_new_values_and_keeps_previous_on_failure() {
     assert_eq!(config::get().primary_lang(), "German");
     assert_eq!(config::load_outcome(), config::LoadOutcome::Loaded(path.clone()));
 
+    // So is a file whose model profiles do not validate, as a whole: the
+    // language change next to the bad profile is not applied either.
+    std::fs::write(&path, "[languages]\nprimary = \"French\"\n[[models]]\nname = \"a\"\n").unwrap();
+    assert!(config::reload().is_err());
+    assert_eq!(config::get().primary_lang(), "German");
+
     let _ = std::fs::remove_file(&path);
     // SAFETY: same invariant as above.
     unsafe {

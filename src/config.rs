@@ -1864,6 +1864,16 @@ mod tests {
     }
 
     #[test]
+    fn load_file_rejects_an_invalid_profile_set() {
+        let duplicate = tmp_config("dup.toml", "[api]\nmodel = \"m\"\n[[models]]\nname = \"m\"\nmodel = \"x\"\n");
+        let reason = load_file(&duplicate).expect_err("duplicate profile name must fail the load");
+        assert!(reason.contains("duplicate"), "{reason}");
+        let no_model = tmp_config("no_model.toml", "[[models]]\nname = \"a\"\n");
+        let reason = load_file(&no_model).expect_err("[[models]] without model must fail the load");
+        assert!(reason.contains("model"), "{reason}");
+    }
+
+    #[test]
     fn config_store_replace_and_init_semantics() {
         let store = ConfigStore::new();
         assert_eq!(store.get().primary_lang(), "Korean");
