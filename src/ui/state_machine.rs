@@ -1005,6 +1005,14 @@ impl StateMachine {
 
     fn on_clipboard_error(&mut self, msg: String) -> Vec<UiEffect> {
         // Must NOT emit WriteClipboard to avoid infinite recursion.
+        // The error replaces the session's view, so whatever is in flight is
+        // aborted: the request, the capture, or the revision round.
+        let mut effects = match self.state {
+            OverlayState::Processing => vec![UiEffect::SendCancel],
+            OverlayState::Capturing => vec![UiEffect::CancelCapture],
+            _ => vec![],
+        };
+        self.pending_revision = None;
         self.state = OverlayState::Error(Failure::clipboard(msg));
         // Unified auto-hide rule (#62): track focus at entry. The ShowWindow
         // below activates the overlay (capture used ShowWindowNoActivate, so
@@ -1012,7 +1020,8 @@ impl StateMachine {
         // has_been_focused — so the user sees the error, then a FocusLost
         // dismisses it.
         self.has_been_focused = self.is_focused;
-        vec![UiEffect::ResetAreas, UiEffect::ShowWindow]
+        effects.extend([UiEffect::ResetAreas, UiEffect::ShowWindow]);
+        effects
     }
 
     /// Cache key identifying the request that would be sent for the current state.
