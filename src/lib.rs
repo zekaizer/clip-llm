@@ -406,6 +406,10 @@ impl ProcessMode {
         }
     }
 
+    pub fn builtin_thinking(self) -> ThinkingMode {
+        self.default_thinking()
+    }
+
     /// Whether this mode consumes image input. Summarize/Explain describe or
     /// explain the image; Translate/Rephrase transform existing text and have
     /// nothing to act on. Single source of truth for image handling — the API
