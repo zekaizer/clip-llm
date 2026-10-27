@@ -57,6 +57,8 @@ pub struct ProfileForm {
     pub token_budget: String,
     /// `thinking_control` key; empty = auto (probe on first use).
     pub thinking_control: String,
+    /// Not edited in the panel; carried so a save writes them back.
+    pub headers: std::collections::BTreeMap<String, String>,
     /// Lives in `[api]` (the `CLIP_LLM_*`-overridable profile) rather than in
     /// a `[[models]]` entry.
     pub from_api_section: bool,
@@ -90,6 +92,7 @@ impl ProfileForm {
                 .filter(|v| !v.is_empty() && *v != "auto")
                 .unwrap_or("")
                 .to_string(),
+            headers: spec.headers.clone(),
             from_api_section: spec.from_api_section,
         }
     }
@@ -106,6 +109,7 @@ impl ProfileForm {
             max_tokens: String::new(),
             token_budget: String::new(),
             thinking_control: String::new(),
+            headers: Default::default(),
             from_api_section: false,
         }
     }
@@ -127,7 +131,7 @@ impl ProfileForm {
                 model: non_empty(&self.model),
                 api_key: non_empty(&self.api_key),
                 auth_file: non_empty(&self.auth_file),
-                headers: Default::default(),
+                headers: self.headers.clone(),
                 max_tokens: None,
                 token_budget: None,
                 thinking_control: non_empty(&self.thinking_control),
@@ -168,7 +172,7 @@ impl ProfileForm {
             model: Some(model.to_string()),
             api_key,
             auth_file: non_empty(&self.auth_file),
-            headers: Default::default(),
+            headers: self.headers.clone(),
             max_tokens: number(&self.max_tokens, "max_tokens")?,
             token_budget: number(&self.token_budget, "token_budget")?,
             thinking_control: non_empty(&self.thinking_control),
@@ -650,6 +654,7 @@ mod tests {
             max_tokens: "40960".into(),
             token_budget: "6000".into(),
             thinking_control: String::new(),
+            headers: Default::default(),
             from_api_section: false,
         }
     }
