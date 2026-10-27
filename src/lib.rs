@@ -392,22 +392,22 @@ impl ProcessMode {
 
     /// Default thinking mode for this processing mode: the per-mode config
     /// override (`[translate|rephrase|summarize|explain].thinking`) when set,
-    /// else the built-in default — Translate/Rephrase start fast (NoThink),
-    /// Summarize/Explain benefit from reasoning (Think).
+    /// else [`ProcessMode::builtin_thinking`].
     pub fn default_thinking(self) -> ThinkingMode {
-        if let Some(configured) = crate::config::get().mode_default_thinking(self) {
-            return configured;
-        }
+        crate::config::get()
+            .mode_default_thinking(self)
+            .unwrap_or_else(|| self.builtin_thinking())
+    }
+
+    /// Built-in thinking mode, ignoring any config override: Translate/Rephrase
+    /// start fast (NoThink), Summarize/Explain benefit from reasoning (Think).
+    pub fn builtin_thinking(self) -> ThinkingMode {
         match self {
             // Transcribe reads rather than reasons, and its output is long — the
             // reasoning pass would only delay the first token.
             Self::Translate | Self::Rephrase | Self::Transcribe => ThinkingMode::NoThink,
             Self::Summarize | Self::Explain => ThinkingMode::Think,
         }
-    }
-
-    pub fn builtin_thinking(self) -> ThinkingMode {
-        self.default_thinking()
     }
 
     /// Whether this mode consumes image input. Summarize/Explain describe or

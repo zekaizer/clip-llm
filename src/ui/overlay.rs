@@ -783,7 +783,7 @@ fn render_settings_body(
                     ui.horizontal(|ui| {
                         // "Default" selected is the quiet state (gray);
                         // an explicit override is what earns the accent.
-                        let built_in = mode.default_thinking().label();
+                        let built_in = mode.builtin_thinking().label();
                         if pill_styled(ui, "Default", thinking.is_none(), PillTone::Quiet)
                             .on_hover_text(format!("Built-in default for {}: {built_in}", mode.label()))
                             .clicked()
