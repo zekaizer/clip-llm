@@ -525,8 +525,8 @@ impl StateMachine {
                 self.is_focused = false;
                 self.on_focus_lost()
             }
-            UiEvent::ClipboardError(msg) => self.on_clipboard_error(msg),
-            UiEvent::ConfigError(msg) => self.on_clipboard_error(msg),
+            UiEvent::ClipboardError(msg) => self.on_failure(Failure::clipboard(msg)),
+            UiEvent::ConfigError(msg) => self.on_failure(Failure::config(msg)),
             UiEvent::UserCopy => self.on_user_copy(),
             UiEvent::UserPaste => self.on_user_paste(),
             UiEvent::UserTogglePin => {
@@ -734,7 +734,7 @@ impl StateMachine {
         // Auto-hide counts only focus held at or after entering this visible
         // state (#61, #62): focus held through the transition arms the next
         // FocusLost to hide; a detached transition stays visible until a fresh
-        // focus → unfocus cycle. on_worker_error / on_clipboard_error apply the
+        // focus → unfocus cycle. on_worker_error / on_failure apply the
         // same rule — Result and Error are unified.
         self.has_been_focused = self.is_focused;
         let mut effects = Vec::new();
@@ -1012,7 +1012,8 @@ impl StateMachine {
         self.failed_instruction = None;
     }
 
-    fn on_clipboard_error(&mut self, msg: String) -> Vec<UiEffect> {
+    /// A clipboard or config failure, which can take over from any state.
+    fn on_failure(&mut self, failure: Failure) -> Vec<UiEffect> {
         // Must NOT emit WriteClipboard to avoid infinite recursion.
         // The error replaces the session's view, so whatever is in flight is
         // aborted: the request, the capture, or the revision round.
@@ -1022,7 +1023,7 @@ impl StateMachine {
             _ => vec![],
         };
         self.pending_revision = None;
-        self.state = OverlayState::Error(Failure::clipboard(msg));
+        self.state = OverlayState::Error(failure);
         // Unified auto-hide rule (#62): track focus at entry. The ShowWindow
         // below activates the overlay (capture used ShowWindowNoActivate, so
         // is_focused is false here), and the resulting FocusGained re-arms

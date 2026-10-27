@@ -406,7 +406,8 @@ fn view_error(
     slots.status(|ui| {
         let label = match failure.kind {
             FailureKind::Request => "\u{2715} Request failed",
-            FailureKind::Clipboard | FailureKind::Config => "\u{2715} Clipboard error",
+            FailureKind::Clipboard => "\u{2715} Clipboard error",
+            FailureKind::Config => "\u{2715} Config error",
         };
         status_row(ui, false, theme::text(label, font::LABEL, color::danger()), None);
     });

@@ -739,7 +739,7 @@ impl OverlayApp {
         if matches!(outcome, ReloadOutcome::Failed(_)) {
             // Failure needs attention now; success is visible in the tray row.
             self.capture_mouse_position();
-            let effects = self.sm_handle(UiEvent::ClipboardError(line));
+            let effects = self.sm_handle(UiEvent::ConfigError(line));
             self.execute_effects(effects, ctx);
         }
     }
@@ -1986,7 +1986,7 @@ impl eframe::App for OverlayApp {
         if startup_settled {
             if let Some(msg) = self.startup_notice.take() {
                 self.capture_mouse_position();
-                let effects = self.sm_handle(UiEvent::ClipboardError(msg));
+                let effects = self.sm_handle(UiEvent::ConfigError(msg));
                 self.execute_effects(effects, ctx);
             }
         } else if self.startup_notice.is_some() {
