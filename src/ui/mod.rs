@@ -1692,13 +1692,16 @@ impl OverlayApp {
         self.capture_seq += 1;
         let seq = self.capture_seq;
         self.capture_kind = state_machine::CaptureSource::Clipboard;
-        // Supersede any in-flight selection capture from a prior trigger.
+        // Supersede any in-flight capture from a prior trigger, and arm a
+        // fresh flag so this read's markup fetch can be superseded in turn.
         self.capture_cancel.store(true, Ordering::SeqCst);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.capture_cancel = cancel.clone();
         let tx = self.capture_tx.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let result = crate::clipboard::guard_capture(|| match ClipboardManager::new() {
-                Ok(mut cm) => cm.read_content(),
+                Ok(mut cm) => cm.read_content(&cancel),
                 Err(e) => Err(e),
             });
             let _ = tx.send((seq, result));

@@ -1,15 +1,17 @@
 //! Bytes behind an `<img src>`, by scheme: inline `data:` URIs, local
 //! `file:` URLs (Office writes clipboard images to a temp folder), and
-//! `http(s)` on the intranet. Every path is bounded in size and time, since
-//! this runs on the clipboard-read thread during a capture.
+//! `http(s)` on the intranet. Every path is bounded in size, and a remote
+//! one in time by the caller's timeout, since this runs on the
+//! clipboard-read thread during a capture.
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Duration;
+
+use tracing::warn;
 
 /// Bytes accepted from one source; larger files and responses are skipped.
 pub const MAX_SOURCE_BYTES: u64 = 8 * 1024 * 1024;
-/// Total wait for one remote image (connect + headers + body).
-pub const FETCH_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Decode a `data:` URI's base64 payload. `None` for anything else, for a
 /// non-base64 encoding, or for a payload over [`MAX_SOURCE_BYTES`].
@@ -90,15 +92,16 @@ pub fn file_url_path(src: &str) -> Option<PathBuf> {
 }
 
 /// Fetch by scheme. `None` for an unsupported scheme, an unreadable file,
-/// a failed or oversized response, or a timeout.
-pub fn fetch_source(src: &str) -> Option<Vec<u8>> {
+/// a failed or oversized response, or a remote fetch over `timeout`
+/// (connect + headers + body).
+pub fn fetch_source(src: &str, timeout: Duration) -> Option<Vec<u8>> {
     let s = src.trim();
     if has_scheme(s, "data:") {
         data_uri_bytes(s)
     } else if has_scheme(s, "file:") {
         read_local(&file_url_path(s)?)
     } else if has_scheme(s, "http://") || has_scheme(s, "https://") {
-        fetch_http(s)
+        fetch_http(s, timeout)
     } else {
         None
     }
@@ -112,15 +115,26 @@ fn read_local(path: &std::path::Path) -> Option<Vec<u8>> {
     std::fs::read(path).ok()
 }
 
-/// Bounded GET: [`FETCH_TIMEOUT`] overall, at most [`MAX_SOURCE_BYTES`]
-/// read even when the server sends no `Content-Length`.
-fn fetch_http(url: &str) -> Option<Vec<u8>> {
+/// One blocking client for the process, built on the first remote fetch:
+/// each blocking client owns a runtime thread and a TLS config, and sharing
+/// it reuses connections. `None` when it cannot be built.
+fn http_client() -> Option<&'static reqwest::blocking::Client> {
+    static CLIENT: OnceLock<Option<reqwest::blocking::Client>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::blocking::Client::builder()
+                .build()
+                .inspect_err(|e| warn!("markup fetch: no HTTP client: {e}"))
+                .ok()
+        })
+        .as_ref()
+}
+
+/// Bounded GET: `timeout` overall, at most [`MAX_SOURCE_BYTES`] read even
+/// when the server sends no `Content-Length`.
+fn fetch_http(url: &str, timeout: Duration) -> Option<Vec<u8>> {
     use std::io::Read;
-    let client = reqwest::blocking::Client::builder()
-        .timeout(FETCH_TIMEOUT)
-        .build()
-        .ok()?;
-    let resp = client.get(url).send().ok()?;
+    let resp = http_client()?.get(url).timeout(timeout).send().ok()?;
     if !resp.status().is_success() || resp.content_length().is_some_and(|n| n > MAX_SOURCE_BYTES) {
         return None;
     }
@@ -163,7 +177,7 @@ mod tests {
 
     #[test]
     fn fetch_dispatches_data_and_file_and_refuses_the_rest() {
-        assert_eq!(fetch_source("data:image/jpeg;base64,/9g="), Some(vec![0xFF, 0xD8]));
+        assert_eq!(fetch_source("data:image/jpeg;base64,/9g=", Duration::from_secs(1)), Some(vec![0xFF, 0xD8]));
         let dir = std::env::temp_dir().join(format!("clip-llm-fetch-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("img one.bin");
@@ -171,10 +185,10 @@ mod tests {
         // file:///C:/dir/x on Windows, file:///dir/x elsewhere.
         let slashed = path.display().to_string().replace('\\', "/").replace(' ', "%20");
         let url = format!("file:///{}", slashed.trim_start_matches('/'));
-        assert_eq!(fetch_source(&url), Some(vec![1, 2, 3]));
-        assert_eq!(fetch_source("file:///definitely/missing/x.png"), None);
-        assert_eq!(fetch_source("ftp://h/a.png"), None);
-        assert_eq!(fetch_source("about:blank"), None);
-        assert_eq!(fetch_source(""), None);
+        assert_eq!(fetch_source(&url, Duration::from_secs(1)), Some(vec![1, 2, 3]));
+        assert_eq!(fetch_source("file:///definitely/missing/x.png", Duration::from_secs(1)), None);
+        assert_eq!(fetch_source("ftp://h/a.png", Duration::from_secs(1)), None);
+        assert_eq!(fetch_source("about:blank", Duration::from_secs(1)), None);
+        assert_eq!(fetch_source("", Duration::from_secs(1)), None);
     }
 }

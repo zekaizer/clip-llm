@@ -2,6 +2,7 @@
 //! [`ClipboardContent`] the pipeline already understands (text and images).
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracing::{info, warn};
 
@@ -22,7 +23,8 @@ pub const MAX_IMAGE_FILE_BYTES: u64 = 32 * 1024 * 1024;
 /// (one file raw; several joined under `=== name ===` headers), image files
 /// (PNG, JPEG, GIF, WebP, BMP) become images; any unsupported file fails the whole ingest with
 /// [`ClipboardError::UnsupportedFiles`] so nothing is dropped silently.
-pub fn ingest_files(paths: &[PathBuf]) -> Result<ClipboardContent, ClipboardError> {
+/// `cancel` is checked before each file: [`ClipboardError::Cancelled`].
+pub fn ingest_files(paths: &[PathBuf], cancel: &AtomicBool) -> Result<ClipboardContent, ClipboardError> {
     if paths.is_empty() {
         return Err(ClipboardError::NoTextInClipboard);
     }
@@ -33,6 +35,9 @@ pub fn ingest_files(paths: &[PathBuf]) -> Result<ClipboardContent, ClipboardErro
     let mut total_text: u64 = 0;
 
     for path in paths {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(ClipboardError::Cancelled);
+        }
         let name = display_name(path);
         let meta = std::fs::metadata(path).map_err(|e| ClipboardError::FileReadFailed {
             name: name.clone(),
@@ -193,6 +198,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static SEQ: AtomicU64 = AtomicU64::new(0);
+    static NO_CANCEL: AtomicBool = AtomicBool::new(false);
 
     fn tmp_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -219,7 +225,7 @@ mod tests {
     fn single_text_file_is_raw_content() {
         let d = tmp_dir();
         let p = write(&d, "notes.md", "# Title\n\nbody\n".as_bytes());
-        let c = ingest_files(&[p]).unwrap();
+        let c = ingest_files(&[p], &NO_CANCEL).unwrap();
         assert_eq!(c.text.as_deref(), Some("# Title\n\nbody\n"));
         assert!(c.images.is_empty());
         assert_eq!(c.files, vec!["notes.md".to_string()]);
@@ -230,7 +236,7 @@ mod tests {
         let d = tmp_dir();
         let a = write(&d, "a.rs", b"fn a() {}\n");
         let b = write(&d, "b.toml", b"k = 1\n");
-        let c = ingest_files(&[a, b]).unwrap();
+        let c = ingest_files(&[a, b], &NO_CANCEL).unwrap();
         assert_eq!(
             c.text.as_deref(),
             Some("=== a.rs ===\nfn a() {}\n\n=== b.toml ===\nk = 1\n"),
@@ -242,7 +248,7 @@ mod tests {
     fn extensionless_utf8_file_counts_as_text() {
         let d = tmp_dir();
         let p = write(&d, "Makefile", "all:\n\techo hi\n".as_bytes());
-        let c = ingest_files(&[p]).unwrap();
+        let c = ingest_files(&[p], &NO_CANCEL).unwrap();
         assert_eq!(c.text.as_deref(), Some("all:\n\techo hi\n"));
     }
 
@@ -256,7 +262,7 @@ mod tests {
             RgbImage::from_pixel(4, 3, image::Rgb([10, 200, 30])).write_to(&mut out, format).unwrap();
             paths.push(write(&d, name, &out.into_inner()));
         }
-        let c = ingest_files(&paths).unwrap();
+        let c = ingest_files(&paths, &NO_CANCEL).unwrap();
         assert_eq!(c.images.len(), 3);
         assert!(c.images.iter().all(|i| i.bytes.starts_with(&[0x89, b'P', b'N', b'G'])));
         assert_eq!(c.files, vec!["a.JPG".to_string(), "b.gif".to_string(), "c.bmp".to_string()]);
@@ -266,7 +272,7 @@ mod tests {
     fn image_files_are_capped_per_request() {
         let d = tmp_dir();
         let paths: Vec<PathBuf> = (0..6).map(|i| write(&d, &format!("s{i}.png"), &tiny_png())).collect();
-        let c = ingest_files(&paths).unwrap();
+        let c = ingest_files(&paths, &NO_CANCEL).unwrap();
         assert_eq!(c.images.len(), crate::images::filter::MAX_IMAGES);
         // The badge still names every file that was read.
         assert_eq!(c.files.len(), 6);
@@ -276,7 +282,7 @@ mod tests {
     fn png_file_becomes_image() {
         let d = tmp_dir();
         let p = write(&d, "shot.png", &tiny_png());
-        let c = ingest_files(&[p]).unwrap();
+        let c = ingest_files(&[p], &NO_CANCEL).unwrap();
         assert!(c.text.is_none());
         assert_eq!(c.images.len(), 1);
         assert!(c.is_image_only());
@@ -290,7 +296,7 @@ mod tests {
     fn oversized_png_is_refused_from_the_header() {
         let d = tmp_dir();
         let p = write(&d, "huge.png", &png_with_header(20_000, 20_000));
-        match ingest_files(&[p]) {
+        match ingest_files(&[p], &NO_CANCEL) {
             Err(ClipboardError::ImageTooLarge { width: 20_000, height: 20_000, .. }) => {}
             other => panic!("expected ImageTooLarge, got {other:?}"),
         }
@@ -324,7 +330,7 @@ mod tests {
         let d = tmp_dir();
         let t = write(&d, "caption.txt", b"see picture");
         let i = write(&d, "pic.PNG", &tiny_png());
-        let c = ingest_files(&[t, i]).unwrap();
+        let c = ingest_files(&[t, i], &NO_CANCEL).unwrap();
         assert_eq!(c.text.as_deref(), Some("see picture"));
         assert_eq!(c.images.len(), 1);
         assert_eq!(c.files.len(), 2);
@@ -336,7 +342,7 @@ mod tests {
         let ok = write(&d, "ok.txt", b"fine");
         let bin = write(&d, "blob.bin", &[0u8, 1, 2, 3, 0xff]);
         let pdf = write(&d, "doc.pdf", b"%PDF-1.4\n\x00\x00");
-        match ingest_files(&[ok, bin, pdf]) {
+        match ingest_files(&[ok, bin, pdf], &NO_CANCEL) {
             Err(ClipboardError::UnsupportedFiles(names)) => {
                 assert_eq!(names, vec!["blob.bin".to_string(), "doc.pdf".to_string()]);
             }
@@ -349,7 +355,7 @@ mod tests {
         let d = tmp_dir();
         let p = write(&d, "fake.png", b"not a png at all");
         assert!(matches!(
-            ingest_files(&[p]),
+            ingest_files(&[p], &NO_CANCEL),
             Err(ClipboardError::UnsupportedFiles(n)) if n == vec!["fake.png".to_string()]
         ));
     }
@@ -360,7 +366,7 @@ mod tests {
         let sub = d.join("folder");
         fs::create_dir_all(&sub).unwrap();
         assert!(matches!(
-            ingest_files(&[sub]),
+            ingest_files(&[sub], &NO_CANCEL),
             Err(ClipboardError::UnsupportedFiles(n)) if n == vec!["folder".to_string()]
         ));
     }
@@ -370,7 +376,7 @@ mod tests {
         let d = tmp_dir();
         // EUC-KR bytes for a Korean syllable: valid text elsewhere, not UTF-8.
         let p = write(&d, "legacy.txt", &[0xb0, 0xa1, 0x0a]);
-        assert!(matches!(ingest_files(&[p]), Err(ClipboardError::UnsupportedFiles(_))));
+        assert!(matches!(ingest_files(&[p], &NO_CANCEL), Err(ClipboardError::UnsupportedFiles(_))));
     }
 
     #[test]
@@ -378,7 +384,7 @@ mod tests {
         let d = tmp_dir();
         let big = vec![b'x'; MAX_TEXT_FILE_BYTES as usize + 1];
         let p = write(&d, "big.log", &big);
-        match ingest_files(&[p]) {
+        match ingest_files(&[p], &NO_CANCEL) {
             Err(ClipboardError::FileTooLarge { name, limit_bytes }) => {
                 assert_eq!(name, "big.log");
                 assert_eq!(limit_bytes, MAX_TEXT_FILE_BYTES);
@@ -394,7 +400,7 @@ mod tests {
         let a = write(&d, "a.txt", &half);
         let b = write(&d, "b.txt", &half);
         let c = write(&d, "c.txt", b"one more byte");
-        match ingest_files(&[a, b, c]) {
+        match ingest_files(&[a, b, c], &NO_CANCEL) {
             Err(ClipboardError::FileTooLarge { name, limit_bytes }) => {
                 assert_eq!(name, "c.txt");
                 assert_eq!(limit_bytes, MAX_TOTAL_TEXT_BYTES);
@@ -408,20 +414,28 @@ mod tests {
         let d = tmp_dir();
         let p = d.join("gone.txt");
         assert!(matches!(
-            ingest_files(&[p]),
+            ingest_files(&[p], &NO_CANCEL),
             Err(ClipboardError::FileReadFailed { name, .. }) if name == "gone.txt"
         ));
     }
 
     #[test]
+    fn cancelled_ingest_stops_before_the_files() {
+        let d = tmp_dir();
+        let p = write(&d, "notes.txt", b"body\n");
+        let cancel = AtomicBool::new(true);
+        assert!(matches!(ingest_files(&[p], &cancel), Err(ClipboardError::Cancelled)));
+    }
+
+    #[test]
     fn empty_list_is_empty_clipboard() {
-        assert!(matches!(ingest_files(&[]), Err(ClipboardError::NoTextInClipboard)));
+        assert!(matches!(ingest_files(&[], &NO_CANCEL), Err(ClipboardError::NoTextInClipboard)));
     }
 
     #[test]
     fn whitespace_only_text_file_is_unsupported() {
         let d = tmp_dir();
         let p = write(&d, "blank.txt", b"  \n\t\n");
-        assert!(matches!(ingest_files(&[p]), Err(ClipboardError::EmptyCopy)));
+        assert!(matches!(ingest_files(&[p], &NO_CANCEL), Err(ClipboardError::EmptyCopy)));
     }
 }
