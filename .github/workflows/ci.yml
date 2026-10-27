@@ -11,7 +11,13 @@ permissions:
 
 jobs:
   check:
-    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows-only code (platform/windows.rs, uia.rs, capture steps 2/4/5)
+        # compiles only on the Windows runner.
+        os: [macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
 
