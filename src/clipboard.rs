@@ -97,6 +97,23 @@ fn read_image_from_board(board: &mut Clipboard) -> Result<Vec<ImageAttachment>, 
     }
 }
 
+/// The image flavor's outcome next to the text flavor. `None`: the image
+/// flavor failed and the text is sent alone, without the HTML-flavor
+/// fallback. The error is returned only when there is no text to send.
+fn image_flavor_beside_text(
+    text: &Option<String>,
+    images: Result<Vec<ImageAttachment>, ClipboardError>,
+) -> Result<Option<Vec<ImageAttachment>>, ClipboardError> {
+    match images {
+        Ok(images) => Ok(Some(images)),
+        Err(e) if text.is_some() => {
+            warn!("image flavor dropped, sending the text alone: {e}");
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Wait for the user's Ctrl+Shift hotkey modifiers to release before a copy
 /// simulation is posted, so the synthetic chord isn't contaminated by keys
 /// the user is still physically holding down. Polls `is_held` at
@@ -411,10 +428,13 @@ impl ClipboardManager {
     /// Text and images across the flavors: the plain-text flavor, the image
     /// flavor, and, only when the image flavor is empty, the images the HTML
     /// flavor references (a rich-text selection carries its pictures solely
-    /// as markup references).
+    /// as markup references). An image flavor that fails beside text is
+    /// dropped (see [`image_flavor_beside_text`]).
     fn read_flavors(&mut self) -> Result<(Option<String>, Vec<ImageAttachment>), ClipboardError> {
         let text = self.board.get_text().ok().filter(|s| !s.trim().is_empty());
-        let mut images = read_image_from_board(&mut self.board)?;
+        let Some(mut images) = image_flavor_beside_text(&text, read_image_from_board(&mut self.board))? else {
+            return Ok((text, vec![]));
+        };
         if images.is_empty()
             && let Ok(html) = self.board.get().html()
             && !html.trim().is_empty()
@@ -613,6 +633,34 @@ mod tests {
         assert_eq!(content.images.len(), 1, "{:?}", content.images.iter().map(|i| (i.width, i.height)).collect::<Vec<_>>());
         assert_eq!((content.images[0].width, content.images[0].height), (600, 400));
         assert_eq!(content.images[0].origin, ImageOrigin::Markup);
+    }
+
+    fn too_large() -> ClipboardError {
+        ClipboardError::ImageTooLarge { width: 10_000, height: 10_000, limit_px: 50_000_000 }
+    }
+
+    #[test]
+    fn image_flavor_error_beside_text_keeps_the_text() {
+        let text = Some("quarterly totals".to_string());
+        assert!(matches!(image_flavor_beside_text(&text, Err(too_large())), Ok(None)));
+        let encode = Err(ClipboardError::ImageEncodeFailed("png".into()));
+        assert!(matches!(image_flavor_beside_text(&text, encode), Ok(None)));
+    }
+
+    #[test]
+    fn image_flavor_error_without_text_fails_the_read() {
+        assert!(matches!(
+            image_flavor_beside_text(&None, Err(too_large())),
+            Err(ClipboardError::ImageTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn image_flavor_success_is_kept_beside_text() {
+        let text = Some("caption".to_string());
+        let images = vec![ImageAttachment::stub(vec![1, 2, 3])];
+        assert_eq!(image_flavor_beside_text(&text, Ok(images.clone())).unwrap(), Some(images));
+        assert_eq!(image_flavor_beside_text(&None, Ok(vec![])).unwrap(), Some(vec![]));
     }
 
     #[test]
