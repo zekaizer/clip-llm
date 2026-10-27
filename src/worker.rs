@@ -206,17 +206,26 @@ pub fn friendly_api_error(e: &ApiError) -> String {
     }
 }
 
-/// Strip think blocks from raw LLM output and build the appropriate response.
-/// Logs completion with the given `label` (e.g. "complete", "stream complete").
+/// Strip a leading inline think block from the answer content and build the
+/// appropriate response. `reasoning` is reasoning delivered out of band
+/// (`reasoning_content`); when non-blank it fills the think pane, otherwise
+/// the leading inline block does. Logs completion with the given `label`
+/// (e.g. "complete", "stream complete").
 fn make_complete_response(
     raw: &str,
+    reasoning: &str,
     mode: ProcessMode,
     request_id: u64,
     label: &str,
     incomplete: Option<String>,
     debug: DebugCapture,
 ) -> WorkerResponse {
-    let think_content = extract_first_think_content(raw);
+    let reasoning = reasoning.trim();
+    let think_content = if reasoning.is_empty() {
+        extract_first_think_content(raw)
+    } else {
+        Some(reasoning.to_string())
+    };
     let text = strip_think_blocks(raw);
     if text.is_empty() {
         // Nothing usable arrived. If the stream was cut short, report that
@@ -271,12 +280,13 @@ fn finalize_stream_capture(
 /// parameters) keeps both functions' signatures manageable.
 #[derive(Default)]
 struct StreamState {
-    /// Accumulated content in wire order: reasoning tokens wrapped in a
-    /// synthetic `<think>…</think>` block, followed by answer tokens.
+    /// Answer content tokens in wire order; may start with an inline
+    /// reasoning block (models without a server-side reasoning parser).
     full_content: String,
-    /// `true` while inside a reasoning block reconstructed from a separate
-    /// `reasoning_content`/`reasoning` SSE field (see [`handle_stream_event`]).
-    reasoning_open: bool,
+    /// Reasoning tokens from a separate `reasoning_content`/`reasoning` SSE
+    /// field. Kept apart from `full_content` so neither can be mistaken for
+    /// the other by tag matching.
+    reasoning: String,
     filter: ThinkBlockFilter,
     /// Set once `ThinkStarted` has been sent, so it fires at most once.
     think_notified: bool,
@@ -301,13 +311,6 @@ fn stream_incomplete_reason(state: &StreamState) -> Option<String> {
 /// Process one parsed SSE event into streaming state, emitting `ThinkStarted`
 /// and `StreamDelta` responses as needed. Returns `true` when a terminal
 /// `[DONE]` marker was seen (the caller then finalizes the response).
-///
-/// Reasoning tokens (servers running a reasoning parser — e.g. vLLM for Qwen3 —
-/// deliver them in a separate `reasoning_content` field, ahead of the answer)
-/// are wrapped back into a leading `<think>…</think>` block inside
-/// `state.full_content`. This keeps the existing think-block extraction,
-/// stripping, and partial-recovery paths working with a single uniform
-/// representation.
 fn handle_stream_event(
     event: SseEvent,
     state: &mut StreamState,
@@ -316,22 +319,13 @@ fn handle_stream_event(
 ) -> bool {
     match event {
         SseEvent::Reasoning(token) => {
-            if !state.reasoning_open {
-                state.full_content.push_str("<think>");
-                state.reasoning_open = true;
-            }
-            state.full_content.push_str(&token);
+            state.reasoning.push_str(&token);
             if !state.think_notified {
                 state.think_notified = true;
                 let _ = resp_tx.send(WorkerResponse::ThinkStarted { request_id });
             }
         }
         SseEvent::Content(token) => {
-            // First answer token after reasoning closes the think block.
-            if state.reasoning_open {
-                state.full_content.push_str("</think>");
-                state.reasoning_open = false;
-            }
             state.full_content.push_str(&token);
             let visible = state.filter.feed(&token);
             // Inline `<think>` path (no reasoning parser): notify on first
@@ -367,8 +361,7 @@ fn handle_stream_event(
 }
 
 /// Finalize a streaming response at one of `run_streaming`'s exit points:
-/// close a dangling `<think>` tag left open by an unterminated reasoning
-/// block, stamp the debug capture (elapsed time, raw SSE received so far, and
+/// stamp the debug capture (elapsed time, raw SSE received so far, and
 /// an optional error reason for the debug view), build the completion
 /// response via [`make_complete_response`], and send it.
 ///
@@ -390,10 +383,6 @@ fn finalize_stream(
     raw_sse: &mut Vec<u8>,
     resp_tx: &mpsc::Sender<WorkerResponse>,
 ) {
-    if state.reasoning_open {
-        state.full_content.push_str("</think>");
-        state.reasoning_open = false;
-    }
     if let Some(usage) = state.usage {
         capture.prompt_tokens = Some(usage.prompt_tokens);
         capture.completion_tokens = Some(usage.completion_tokens);
@@ -407,7 +396,9 @@ fn finalize_stream(
         );
     }
     finalize_stream_capture(&mut capture, started, raw_sse, debug_error);
-    let r = make_complete_response(&state.full_content, mode, request_id, label, incomplete, capture);
+    let r = make_complete_response(
+        &state.full_content, &state.reasoning, mode, request_id, label, incomplete, capture,
+    );
     let _ = resp_tx.send(r);
 }
 
@@ -433,7 +424,7 @@ async fn run_non_streaming(
     };
     capture.elapsed_ms = Some(started.elapsed().as_millis());
     let r = match result {
-        Ok(raw) => make_complete_response(&raw, mode, request_id, "complete", None, capture),
+        Ok(raw) => make_complete_response(&raw, "", mode, request_id, "complete", None, capture),
         Err(e) => {
             error!("worker: LLM error: {e}");
             capture.error = Some(format!("{e:?}"));
@@ -912,7 +903,7 @@ mod tests {
 
     #[test]
     fn make_complete_response_plain_text() {
-        let r = make_complete_response("hello world", ProcessMode::Translate, 1, "complete", None, DebugCapture::default());
+        let r = make_complete_response("hello world", "", ProcessMode::Translate, 1, "complete", None, DebugCapture::default());
         let text = assert_complete(&r, 1);
         assert_eq!(text, "hello world");
     }
@@ -920,7 +911,7 @@ mod tests {
     #[test]
     fn make_complete_response_strips_think_blocks() {
         let raw = "<think>internal</think>visible output";
-        let r = make_complete_response(raw, ProcessMode::Rephrase, 2, "stream complete", None, DebugCapture::default());
+        let r = make_complete_response(raw, "", ProcessMode::Rephrase, 2, "stream complete", None, DebugCapture::default());
         let text = assert_complete(&r, 2);
         assert_eq!(text, "visible output");
     }
@@ -928,14 +919,14 @@ mod tests {
     #[test]
     fn make_complete_response_empty_after_strip() {
         let raw = "<think>only thinking</think>";
-        let r = make_complete_response(raw, ProcessMode::Summarize, 3, "complete", None, DebugCapture::default());
+        let r = make_complete_response(raw, "", ProcessMode::Summarize, 3, "complete", None, DebugCapture::default());
         let msg = assert_error(&r, 3);
         assert!(msg.contains("no visible output"));
     }
 
     #[test]
     fn make_complete_response_empty_input() {
-        let r = make_complete_response("", ProcessMode::Translate, 4, "complete", None, DebugCapture::default());
+        let r = make_complete_response("", "", ProcessMode::Translate, 4, "complete", None, DebugCapture::default());
         let msg = assert_error(&r, 4);
         assert!(msg.contains("no visible output"));
     }
@@ -943,7 +934,7 @@ mod tests {
     #[test]
     fn make_complete_response_whitespace_only_after_strip() {
         let raw = "<think>x</think>   \n  ";
-        let r = make_complete_response(raw, ProcessMode::Translate, 5, "complete", None, DebugCapture::default());
+        let r = make_complete_response(raw, "", ProcessMode::Translate, 5, "complete", None, DebugCapture::default());
         // strip_think_blocks trims whitespace; empty after trim → error.
         let msg = assert_error(&r, 5);
         assert!(msg.contains("no visible output"));
@@ -951,7 +942,7 @@ mod tests {
 
     #[test]
     fn make_complete_response_preserves_request_id() {
-        let r = make_complete_response("ok", ProcessMode::Translate, 42, "test", None, DebugCapture::default());
+        let r = make_complete_response("ok", "", ProcessMode::Translate, 42, "test", None, DebugCapture::default());
         assert_complete(&r, 42);
     }
 
@@ -960,7 +951,7 @@ mod tests {
         // #65: a cut-off reply with content is shown (not dropped), carrying
         // the reason as the `incomplete` banner.
         let r = make_complete_response(
-            "partial text", ProcessMode::Translate, 7, "stream", Some("cut off".to_string()),
+            "partial text", "", ProcessMode::Translate, 7, "stream", Some("cut off".to_string()),
             DebugCapture::default(),
         );
         match r {
@@ -1000,7 +991,7 @@ mod tests {
     fn make_complete_response_empty_partial_is_error_with_reason() {
         // Cut off before any visible content → error using the cut-off reason.
         let r = make_complete_response(
-            "<think>x</think>", ProcessMode::Translate, 8, "stream", Some("cut off".to_string()),
+            "<think>x</think>", "", ProcessMode::Translate, 8, "stream", Some("cut off".to_string()),
             DebugCapture::default(),
         );
         let msg = assert_error(&r, 8);
@@ -1010,37 +1001,24 @@ mod tests {
     // -- handle_stream_event tests --
 
     use crate::api::client::SseEvent;
-    use crate::api::response::{extract_first_think_content, strip_think_blocks};
 
     #[test]
-    fn handle_stream_event_wraps_reasoning_as_think() {
+    fn handle_stream_event_streams_reasoning_out_of_band() {
         let (tx, rx) = mpsc::channel();
         let mut state = StreamState::default();
 
-        // Reasoning token opens a think block and fires ThinkStarted once.
+        // Reasoning fires ThinkStarted once and never reaches the live answer.
         let done = handle_stream_event(SseEvent::Reasoning("why".into()), &mut state, &tx, 1);
         assert!(!done);
-        assert!(state.reasoning_open);
-        assert!(state.think_notified);
-        assert_eq!(state.full_content, "<think>why");
-
-        // The answer token closes the think block and is streamed as visible.
+        handle_stream_event(SseEvent::Reasoning(" more".into()), &mut state, &tx, 1);
         handle_stream_event(SseEvent::Content("answer".into()), &mut state, &tx, 1);
-        assert!(!state.reasoning_open);
-        assert_eq!(state.full_content, "<think>why</think>answer");
-
-        // The reconstructed block extracts/strips exactly like an inline one.
-        assert_eq!(strip_think_blocks(&state.full_content), "answer");
-        assert_eq!(
-            extract_first_think_content(&state.full_content).as_deref(),
-            Some("why")
-        );
 
         assert!(matches!(rx.try_recv().unwrap(), WorkerResponse::ThinkStarted { .. }));
         assert!(matches!(
             rx.try_recv().unwrap(),
             WorkerResponse::StreamDelta { text, .. } if text == "answer"
         ));
+        assert!(rx.try_recv().is_err());
     }
 
     /// Feed `events` through the streaming state machine and finalize it the
@@ -1103,7 +1081,7 @@ mod tests {
     #[test]
     fn make_complete_response_keeps_mid_text_think_tags() {
         let raw = "Use <thinking>…</thinking> for the scratchpad.";
-        let r = make_complete_response(raw, ProcessMode::Translate, 9, "complete", None, DebugCapture::default());
+        let r = make_complete_response(raw, "", ProcessMode::Translate, 9, "complete", None, DebugCapture::default());
         assert_eq!(assert_complete(&r, 9), raw);
     }
 

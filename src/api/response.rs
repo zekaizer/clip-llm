@@ -2,9 +2,13 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-// Matches a reasoning block delimited by any of the known tag variants emitted
-// by different models inline in the content: `<think>` (DeepSeek R1, Qwen,
-// most), `<thought>` (Gemma), `<thinking>`, `<reasoning>`. The Rust regex crate
+// Matches a reasoning block at the start of the content (after optional
+// whitespace), delimited by any of the known tag variants emitted inline by
+// different models: `<think>` (DeepSeek R1, Qwen, most), `<thought>` (Gemma),
+// `<thinking>`, `<reasoning>`. Anchored because reasoning only ever precedes
+// the answer: a tag pair later in the text is answer content (e.g. a prompt
+// the user asked to translate), as [`ThinkBlockFilter`] treats the live
+// stream. The Rust regex crate
 // has no backreferences, so each variant is spelled out as its own paired
 // alternative — a close tag only terminates a block opened by the same name.
 // Otherwise a block that merely *mentions* another variant's close tag (e.g.
@@ -14,14 +18,14 @@ use regex::Regex;
 // need no stripping here.)
 static THINK_CAPTURE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?s)<think>(.*?)</think>|<thought>(.*?)</thought>|<thinking>(.*?)</thinking>|<reasoning>(.*?)</reasoning>",
+        r"(?s)\A\s*(?:<think>(.*?)</think>|<thought>(.*?)</thought>|<thinking>(.*?)</thinking>|<reasoning>(.*?)</reasoning>)",
     )
     .unwrap()
 });
 
-/// Extract the content of the first reasoning block (any of the
-/// [`OPEN_TAGS`] variants), tags removed. Returns `None` if no complete block
-/// exists.
+/// Extract the content of the leading reasoning block (any of the
+/// [`OPEN_TAGS`] variants), tags removed. Returns `None` if the text does not
+/// start with a complete block.
 pub fn extract_first_think_content(text: &str) -> Option<String> {
     THINK_CAPTURE_RE
         .captures(text)
@@ -31,12 +35,13 @@ pub fn extract_first_think_content(text: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Strip reasoning blocks (any of the [`OPEN_TAGS`] variants) from an LLM
-/// response. Only trims leading newlines (from block removal) and trailing
-/// whitespace, preserving leading indentation on the first content line.
+/// Strip the leading reasoning block (any of the [`OPEN_TAGS`] variants) from
+/// an LLM response; later tag pairs are kept as answer text. Only trims leading
+/// newlines (from block removal) and trailing whitespace, preserving leading
+/// indentation on the first content line.
 pub fn strip_think_blocks(text: &str) -> String {
     THINK_CAPTURE_RE
-        .replace_all(text, "")
+        .replace(text, "")
         .trim_end()
         .trim_start_matches(['\n', '\r'])
         .to_string()
@@ -263,8 +268,10 @@ mod tests {
 
     #[test]
     fn trims_trailing_whitespace_only() {
+        // Whitespace before the block goes with it; the answer's own
+        // indentation stays.
         let input = "  <think>x</think>  result  ";
-        assert_eq!(strip_think_blocks(input), "    result");
+        assert_eq!(strip_think_blocks(input), "  result");
     }
 
     #[test]
