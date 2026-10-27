@@ -874,6 +874,20 @@ model = "gone"
     }
 
     #[test]
+    fn saving_the_form_keeps_profile_headers() {
+        let text = "[[models]]\nname = \"gw\"\nendpoint = \"http://h/v1\"\nmodel = \"m\"\napi_key = \"k\"\n\
+                    [models.headers]\nX-Gateway-Token = \"t\"\n";
+        let cfg: Config = toml::from_str(text).unwrap();
+        let patch = SettingsForm::from_config(&cfg, None).to_patch().unwrap();
+        let mut doc: toml_edit::DocumentMut = text.parse().unwrap();
+        apply_patch(&mut doc, &patch);
+        let saved: Config = toml::from_str(&doc.to_string()).unwrap();
+        let specs = saved.model_specs().unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].headers.get("X-Gateway-Token").map(String::as_str), Some("t"), "{doc}");
+    }
+
+    #[test]
     fn apply_patch_can_move_everything_out_of_api_section() {
         let mut doc: toml_edit::DocumentMut =
             "[api]\nendpoint = \"http://h/v1\"\nmodel = \"m\"\napi_key = \"k\"\nstreaming = false\n"
