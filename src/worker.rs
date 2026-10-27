@@ -1204,6 +1204,131 @@ mod tests {
         assert!(!msg.contains("Cannot reach"), "{msg}");
     }
 
+    // -- consume_stream exit paths --
+
+    enum Step {
+        Chunk(&'static str),
+        Fail(&'static str),
+        /// The server goes silent: the read never completes.
+        Stall,
+    }
+
+    #[derive(Debug)]
+    struct ScriptedError(&'static str);
+
+    impl std::fmt::Display for ScriptedError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    struct Scripted(std::collections::VecDeque<Step>);
+
+    impl ChunkSource for Scripted {
+        type Error = ScriptedError;
+        async fn next_chunk(&mut self) -> Result<Option<impl AsRef<[u8]>>, ScriptedError> {
+            match self.0.pop_front() {
+                Some(Step::Chunk(text)) => Ok(Some(text.as_bytes())),
+                Some(Step::Fail(reason)) => Err(ScriptedError(reason)),
+                Some(Step::Stall) => std::future::pending().await,
+                None => Ok(None),
+            }
+        }
+        fn user_message(error: &ScriptedError) -> String {
+            format!("chunk failed: {error}")
+        }
+    }
+
+    /// Run `consume_stream` over `steps`; returns the completion it sent, if any.
+    fn run_script(
+        steps: Vec<Step>,
+        idle_timeout: std::time::Duration,
+        cancelled: bool,
+    ) -> Option<WorkerResponse> {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        // A dropped sender resolves the receiver, which reads as a cancel.
+        let _cancel_tx = if cancelled {
+            cancel_tx.send(()).unwrap();
+            None
+        } else {
+            Some(cancel_tx)
+        };
+        rt.block_on(consume_stream(
+            Scripted(steps.into()), idle_timeout, ProcessMode::Translate, 1,
+            DebugCapture::default(), Instant::now(), &tx, &mut cancel_rx,
+        ));
+        rx.try_iter()
+            .find(|r| matches!(r, WorkerResponse::Complete { .. } | WorkerResponse::Error { .. }))
+    }
+
+    enum Outcome {
+        /// Clean completion with this result.
+        Clean(&'static str),
+        /// Partial result shown with a banner containing the second string.
+        Partial(&'static str, &'static str),
+        /// Error whose message contains this string.
+        Failed(&'static str),
+        /// No completion at all (cancelled).
+        Nothing,
+    }
+
+    #[test]
+    fn consume_stream_exit_paths() {
+        use Step::{Chunk, Fail, Stall};
+        const HI: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n";
+        const STOP: &str = "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n";
+        const LENGTH: &str = "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n";
+        const DONE: &str = "data: [DONE]\n\n";
+        let idle = std::time::Duration::from_secs(60);
+        let short = std::time::Duration::from_millis(20);
+        let cases = vec![
+            ("[DONE]", vec![Chunk(HI), Chunk(DONE)], idle, false, Outcome::Clean("hi")),
+            ("flushed [DONE]", vec![Chunk(HI), Chunk("data: [DONE]")], idle, false, Outcome::Clean("hi")),
+            ("[DONE] after length", vec![Chunk(HI), Chunk(LENGTH), Chunk(DONE)], idle, false,
+                Outcome::Partial("hi", "token limit")),
+            ("EOF after stop", vec![Chunk(HI), Chunk(STOP)], idle, false, Outcome::Clean("hi")),
+            ("EOF without finish_reason", vec![Chunk(HI)], idle, false,
+                Outcome::Partial("hi", "connection closed")),
+            ("EOF after length", vec![Chunk(HI), Chunk(LENGTH)], idle, false,
+                Outcome::Partial("hi", "token limit")),
+            ("EOF before content", vec![], idle, false, Outcome::Failed("connection closed")),
+            ("chunk error", vec![Chunk(HI), Fail("reset")], idle, false,
+                Outcome::Partial("hi", "chunk failed: reset")),
+            ("chunk error before content", vec![Fail("reset")], idle, false,
+                Outcome::Failed("chunk failed: reset")),
+            ("idle stall", vec![Chunk(HI), Stall], short, false,
+                Outcome::Partial("hi", "stopped responding")),
+            ("cancel", vec![Chunk(HI), Stall], idle, true, Outcome::Nothing),
+        ];
+        for (name, steps, idle_timeout, cancelled, expected) in cases {
+            let got = run_script(steps, idle_timeout, cancelled);
+            match (expected, got) {
+                (Outcome::Clean(text), Some(WorkerResponse::Complete { result, incomplete, debug, .. })) => {
+                    assert_eq!(result, text, "{name}");
+                    assert_eq!(incomplete, None, "{name}");
+                    assert_eq!(debug.error, None, "{name}");
+                }
+                (
+                    Outcome::Partial(text, banner),
+                    Some(WorkerResponse::Complete { result, incomplete, debug, .. }),
+                ) => {
+                    assert_eq!(result, text, "{name}");
+                    let incomplete = incomplete.unwrap_or_default();
+                    assert!(incomplete.contains(banner), "{name}: {incomplete}");
+                    assert!(debug.error.is_some(), "{name}");
+                }
+                (Outcome::Failed(message_part), Some(WorkerResponse::Error { message, debug, .. })) => {
+                    assert!(message.contains(message_part), "{name}: {message}");
+                    assert!(debug.error.is_some(), "{name}");
+                }
+                (Outcome::Nothing, None) => {}
+                (_, got) => panic!("{name}: unexpected {:?}", got.as_ref().map(variant_name)),
+            }
+        }
+    }
+
     // -- friendly_status_message tests --
 
     #[test]
