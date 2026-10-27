@@ -1714,6 +1714,54 @@ mod tests {
         assert!(!effects.iter().any(|e| matches!(e, UiEffect::WriteClipboard(_))));
     }
 
+    /// An error that takes over during Processing ends the session's request:
+    /// left running, it would complete for nothing.
+    #[test]
+    fn clipboard_error_while_processing_cancels_the_request() {
+        let mut sm = new_sm();
+        start_processing(&mut sm, "hello");
+
+        let effects = sm.handle(UiEvent::ClipboardError("reload failed".into()));
+
+        assert!(effects.contains(&UiEffect::SendCancel), "{effects:?}");
+    }
+
+    /// An error that takes over during Capturing aborts the capture before it
+    /// clears the clipboard and simulates the copy.
+    #[test]
+    fn clipboard_error_while_capturing_cancels_the_capture() {
+        let mut sm = new_sm();
+        sm.handle(UiEvent::CaptureStarted { source: CaptureSource::Selection });
+
+        let effects = sm.handle(UiEvent::ClipboardError("reload failed".into()));
+
+        assert!(effects.contains(&UiEffect::CancelCapture), "{effects:?}");
+    }
+
+    /// Nothing is in flight outside Processing/Capturing, so nothing is cancelled.
+    #[test]
+    fn clipboard_error_with_nothing_in_flight_cancels_nothing() {
+        let mut sm = new_sm();
+        let effects = sm.handle(UiEvent::ClipboardError("read failed".into()));
+        assert!(!effects.contains(&UiEffect::SendCancel), "{effects:?}");
+        assert!(!effects.contains(&UiEffect::CancelCapture), "{effects:?}");
+    }
+
+    /// An error during a revision drops the round in flight: a retry from
+    /// the error re-sends the request without it.
+    #[test]
+    fn clipboard_error_during_a_revision_drops_the_round_in_flight() {
+        let mut sm = new_sm();
+        with_pending_revision(&mut sm);
+
+        let effects = sm.handle(UiEvent::ClipboardError("reload failed".into()));
+        assert!(effects.contains(&UiEffect::SendCancel), "{effects:?}");
+        assert!(!sm.revising());
+
+        let effects = sm.handle(UiEvent::UserRetry);
+        assert_eq!(sent_revision(&effects).expect("retry re-sends").len(), 0);
+    }
+
     #[test]
     fn full_lifecycle_invariants_hold() {
         let mut sm = new_sm();
