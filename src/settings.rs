@@ -296,6 +296,20 @@ impl SettingsForm {
         }
     }
 
+    /// The form for the file at `path` as it is now. A save patches the file,
+    /// so a form from the live snapshot would revert hand edits that were
+    /// never reloaded. A missing file reads as the built-in defaults (a save
+    /// creates it); `Err` is the message for a file that does not load.
+    pub fn from_file(path: &Path, active_model: Option<&str>) -> Result<Self, String> {
+        if matches!(path.try_exists(), Ok(false)) {
+            return Ok(Self::from_config(&Config::default(), active_model));
+        }
+        let config = crate::config::load_file(path).map_err(|reason| {
+            format!("{} could not be loaded ({reason}); fix it by hand first", path.display())
+        })?;
+        Ok(Self::from_config(&config, active_model))
+    }
+
     /// Profile names in config order (the panel's model pills).
     pub fn profile_names(&self) -> Vec<String> {
         self.profiles.iter().map(|p| p.name.trim().to_string()).collect()
@@ -691,6 +705,31 @@ thinking = "think"
             .contains(&(ProcessMode::Summarize, Some(ThinkingMode::NoThink))));
         assert!(form.thinking.contains(&(ProcessMode::Translate, None)));
         assert_eq!(form.error, None);
+    }
+
+    #[test]
+    fn from_file_reads_the_file_as_it_is_on_disk() {
+        let dir = std::env::temp_dir().join(format!("clip-llm-settings-open-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "[languages]\nprimary = \"Japanese\"\n[[models]]\nname = \"hand\"\nendpoint = \"http://h/v1\"\nmodel = \"m\"\napi_key = \"k\"\n",
+        )
+        .unwrap();
+        let form = SettingsForm::from_file(&path, None).unwrap();
+        assert_eq!(form.primary, "Japanese");
+        assert_eq!(form.profile_names(), ["hand"]);
+
+        // A file that does not load opens no editor.
+        std::fs::write(&path, "[[models]]\nname = \"a\"\n").unwrap();
+        assert!(SettingsForm::from_file(&path, None).unwrap_err().contains("model profiles"));
+        std::fs::write(&path, "[languages\n").unwrap();
+        assert!(SettingsForm::from_file(&path, None).unwrap_err().contains("TOML"));
+
+        // No file yet: the built-in defaults, which a save writes out.
+        let missing = dir.join("missing.toml");
+        assert_eq!(SettingsForm::from_file(&missing, None).unwrap().primary, "Korean");
     }
 
     #[test]

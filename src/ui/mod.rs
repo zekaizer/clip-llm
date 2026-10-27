@@ -538,6 +538,21 @@ impl OverlayApp {
             ctx.request_repaint();
             return;
         }
+        let active = self.model_names.get(self.sm.active_model()).map(String::as_str);
+        let form = match crate::config::candidate_path() {
+            Some(path) => crate::settings::SettingsForm::from_file(&path, active),
+            None => Ok(crate::settings::SettingsForm::from_config(&crate::config::get(), active)),
+        };
+        let form = match form {
+            Ok(form) => form,
+            Err(msg) => {
+                warn!("settings: {msg}");
+                self.capture_mouse_position();
+                let effects = self.sm_handle(UiEvent::ClipboardError(format!("Settings: {msg}")));
+                self.execute_effects(effects, ctx);
+                return;
+            }
+        };
         if !matches!(self.sm.state(), OverlayState::Hidden) {
             // Close the session but keep the window: the panel takes it over.
             // `HideWindow` would queue `Visible(false)` for the end of this
@@ -551,8 +566,6 @@ impl OverlayApp {
             self.pending_capture = false;
             self.spawn_position = None;
         }
-        let active = self.model_names.get(self.sm.active_model()).map(String::as_str);
-        let form = crate::settings::SettingsForm::from_config(&crate::config::get(), active);
         self.settings_baseline = Some(form.clone());
         self.settings = Some(form);
         self.profile_test = None;
