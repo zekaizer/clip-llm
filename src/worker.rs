@@ -278,7 +278,7 @@ fn finalize_stream_capture(
     }
 }
 
-/// Mutable state threaded through the SSE parsing loop in `run_streaming`,
+/// Mutable state threaded through the SSE parsing loop in `consume_stream`,
 /// accumulated event-by-event by [`handle_stream_event`] and read/closed out
 /// by [`finalize_stream`]. Bundling these fields (previously separate
 /// parameters) keeps both functions' signatures manageable.
@@ -364,7 +364,7 @@ fn handle_stream_event(
     false
 }
 
-/// Finalize a streaming response at one of `run_streaming`'s exit points:
+/// Finalize a streaming response at one of `consume_stream`'s exit points:
 /// stamp the debug capture (elapsed time, raw SSE received so far, and
 /// an optional error reason for the debug view), build the completion
 /// response via [`make_complete_response`], and send it.
@@ -442,7 +442,7 @@ async fn run_non_streaming(
     let _ = resp_tx.send(r);
 }
 
-/// Streaming LLM request: SSE parsing loop with incremental delta delivery.
+/// Streaming LLM request: open the response, then read it with [`consume_stream`].
 async fn run_streaming(
     llm: LlmClient,
     task: ProcessTask,
@@ -463,7 +463,7 @@ async fn run_streaming(
         }
     };
 
-    let mut resp = match resp {
+    let resp = match resp {
         Ok(r) => r,
         Err(e) => {
             error!("worker: LLM stream error: {e}");
@@ -491,6 +491,48 @@ async fn run_streaming(
         resp.headers().get(reqwest::header::CONNECTION),
     );
 
+    consume_stream(
+        resp, STREAM_IDLE_TIMEOUT, mode, request_id, capture, started, &resp_tx, &mut cancel_rx,
+    )
+    .await;
+}
+
+/// A streaming response body read chunk by chunk. The seam between
+/// [`consume_stream`] and the HTTP client, so the loop's exit paths can be
+/// driven by scripted chunks in tests.
+trait ChunkSource {
+    type Error: std::fmt::Display + std::fmt::Debug;
+    /// Next body chunk; `Ok(None)` at the end of the body.
+    async fn next_chunk(&mut self) -> Result<Option<impl AsRef<[u8]>>, Self::Error>;
+    /// User-facing message for a chunk error.
+    fn user_message(error: &Self::Error) -> String;
+}
+
+impl ChunkSource for reqwest::Response {
+    type Error = reqwest::Error;
+    async fn next_chunk(&mut self) -> Result<Option<impl AsRef<[u8]>>, reqwest::Error> {
+        self.chunk().await
+    }
+    fn user_message(error: &reqwest::Error) -> String {
+        friendly_reqwest_error(error)
+    }
+}
+
+/// SSE parsing loop of a streaming request: reads `source` until a terminal
+/// event, the end of the body, a chunk error, a gap longer than
+/// `idle_timeout`, or cancellation, and sends the completion (nothing on
+/// cancellation).
+#[allow(clippy::too_many_arguments)]
+async fn consume_stream<S: ChunkSource>(
+    mut source: S,
+    idle_timeout: std::time::Duration,
+    mode: ProcessMode,
+    request_id: u64,
+    capture: DebugCapture,
+    started: Instant,
+    resp_tx: &mpsc::Sender<WorkerResponse>,
+    cancel_rx: &mut tokio::sync::oneshot::Receiver<()>,
+) {
     let mut parser = SseParser::new();
     let mut state = StreamState::default();
     // Diagnostic counters: how much arrived before any early close, so the logs
@@ -505,24 +547,24 @@ async fn run_streaming(
 
     loop {
         let chunk = tokio::select! {
-            c = tokio::time::timeout(STREAM_IDLE_TIMEOUT, resp.chunk()) => match c {
+            c = tokio::time::timeout(idle_timeout, source.next_chunk()) => match c {
                 Ok(chunk) => chunk,
                 Err(_elapsed) => {
                     warn!(
                         "worker: stream idle for {}s after {chunk_count} chunks/{byte_count} bytes — treating as stalled",
-                        STREAM_IDLE_TIMEOUT.as_secs()
+                        idle_timeout.as_secs()
                     );
                     // Keep whatever arrived before the stall (#65).
                     finalize_stream(
                         &mut state, mode, request_id, "stream stalled",
                         Some("The server stopped responding mid-reply. Try again.".to_string()),
                         Some("stream idle timeout — server stopped responding mid-reply"),
-                        capture, started, &mut raw_sse, &resp_tx,
+                        capture, started, &mut raw_sse, resp_tx,
                     );
                     return;
                 }
             },
-            _ = &mut cancel_rx => {
+            _ = &mut *cancel_rx => {
                 debug!("worker: request cancelled during streaming");
                 return;
             }
@@ -530,18 +572,19 @@ async fn run_streaming(
 
         match chunk {
             Ok(Some(bytes)) => {
+                let bytes = bytes.as_ref();
                 chunk_count += 1;
                 byte_count += bytes.len();
                 if tracing::enabled!(tracing::Level::TRACE) {
                     trace!(
                         "SSE raw chunk #{chunk_count} ({} bytes):\n{}",
                         bytes.len(),
-                        String::from_utf8_lossy(&bytes)
+                        String::from_utf8_lossy(bytes)
                     );
                 }
-                raw_sse.extend_from_slice(&bytes);
-                for event in parser.feed(&bytes) {
-                    let done = handle_stream_event(event, &mut state, &resp_tx, request_id);
+                raw_sse.extend_from_slice(bytes);
+                for event in parser.feed(bytes) {
+                    let done = handle_stream_event(event, &mut state, resp_tx, request_id);
                     if done {
                         // Terminal event received. "length" means generation
                         // hit max_tokens, a Fatal carries a server-reported
@@ -555,7 +598,7 @@ async fn run_streaming(
                         finalize_stream(
                             &mut state, mode, request_id, "stream complete",
                             incomplete.clone(), incomplete.as_deref(),
-                            capture, started, &mut raw_sse, &resp_tx,
+                            capture, started, &mut raw_sse, resp_tx,
                         );
                         return;
                     }
@@ -566,12 +609,12 @@ async fn run_streaming(
                 // a trailing newline (a [DONE] or finish chunk feed() couldn't
                 // parse). A flushed [DONE] finalizes exactly like the inline arm.
                 for event in parser.flush() {
-                    if handle_stream_event(event, &mut state, &resp_tx, request_id) {
+                    if handle_stream_event(event, &mut state, resp_tx, request_id) {
                         let incomplete = stream_incomplete_reason(&state);
                         finalize_stream(
                             &mut state, mode, request_id, "stream complete (flushed)",
                             incomplete.clone(), incomplete.as_deref(),
-                            capture, started, &mut raw_sse, &resp_tx,
+                            capture, started, &mut raw_sse, resp_tx,
                         );
                         return;
                     }
@@ -590,7 +633,7 @@ async fn run_streaming(
                         );
                         finalize_stream(
                             &mut state, mode, request_id, "stream complete (no DONE)", None, None,
-                            capture, started, &mut raw_sse, &resp_tx,
+                            capture, started, &mut raw_sse, resp_tx,
                         );
                     }
                     other => {
@@ -607,7 +650,7 @@ async fn run_streaming(
                         finalize_stream(
                             &mut state, mode, request_id, "stream closed early", Some(incomplete),
                             Some(&debug_error),
-                            capture, started, &mut raw_sse, &resp_tx,
+                            capture, started, &mut raw_sse, resp_tx,
                         );
                     }
                 }
@@ -620,8 +663,8 @@ async fn run_streaming(
                 );
                 finalize_stream(
                     &mut state, mode, request_id, "stream error",
-                    Some(friendly_reqwest_error(&e)), Some(&debug_error),
-                    capture, started, &mut raw_sse, &resp_tx,
+                    Some(S::user_message(&e)), Some(&debug_error),
+                    capture, started, &mut raw_sse, resp_tx,
                 );
                 return;
             }
@@ -1026,7 +1069,7 @@ mod tests {
     }
 
     /// Feed `events` through the streaming state machine and finalize it the
-    /// way `run_streaming`'s `[DONE]` arm does; returns the completion sent.
+    /// way `consume_stream`'s `[DONE]` arm does; returns the completion sent.
     fn finish_stream(events: Vec<SseEvent>) -> WorkerResponse {
         let (tx, rx) = mpsc::channel();
         let mut state = StreamState::default();
