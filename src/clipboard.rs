@@ -101,10 +101,17 @@ fn read_image_from_board(board: &mut Clipboard) -> Result<Vec<ImageAttachment>, 
 /// flavor failed and the text is sent alone, without the HTML-flavor
 /// fallback. The error is returned only when there is no text to send.
 fn image_flavor_beside_text(
-    _text: &Option<String>,
+    text: &Option<String>,
     images: Result<Vec<ImageAttachment>, ClipboardError>,
 ) -> Result<Option<Vec<ImageAttachment>>, ClipboardError> {
-    images.map(Some)
+    match images {
+        Ok(images) => Ok(Some(images)),
+        Err(e) if text.is_some() => {
+            warn!("image flavor dropped, sending the text alone: {e}");
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Wait for the user's Ctrl+Shift hotkey modifiers to release before a copy
@@ -421,7 +428,8 @@ impl ClipboardManager {
     /// Text and images across the flavors: the plain-text flavor, the image
     /// flavor, and, only when the image flavor is empty, the images the HTML
     /// flavor references (a rich-text selection carries its pictures solely
-    /// as markup references).
+    /// as markup references). An image flavor that fails beside text is
+    /// dropped (see [`image_flavor_beside_text`]).
     fn read_flavors(&mut self) -> Result<(Option<String>, Vec<ImageAttachment>), ClipboardError> {
         let text = self.board.get_text().ok().filter(|s| !s.trim().is_empty());
         let Some(mut images) = image_flavor_beside_text(&text, read_image_from_board(&mut self.board))? else {
