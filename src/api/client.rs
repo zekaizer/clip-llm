@@ -29,8 +29,8 @@ const REQUEST_TIMEOUT_SECS: u64 = 30;
 /// bounded by the regular client's total timeout instead.
 const INITIAL_RESPONSE_TIMEOUT_SECS: u64 = 10;
 /// Transient-failure and rate-limit retries per request (total attempts =
-/// MAX_RETRIES + 1). The same budget covers both: a connect/timeout/5xx
-/// failure retries after `RETRY_DELAY`, an HTTP 429 retries after the
+/// MAX_RETRIES + 1). The same budget covers both: a connect/5xx/initial-
+/// response-timeout failure retries after `RETRY_DELAY`, an HTTP 429 retries after the
 /// server's `Retry-After` hint (see [`parse_retry_after`]).
 const MAX_RETRIES: u32 = 1;
 const RETRY_DELAY: Duration = Duration::from_millis(500);
@@ -816,6 +816,8 @@ struct LlmClientInner {
     temperature: f64,
     max_tokens: u32,
     token_budget: Option<u32>,
+    /// Total timeout of the non-streaming client.
+    request_timeout: Duration,
     initial_response_timeout: Duration,
     supports_vision: OnceCell<bool>,
     thinking_control: OnceCell<ThinkingControlMethod>,
@@ -974,15 +976,26 @@ fn require_setting(
         .ok_or(ApiError::MissingConfig(name))
 }
 
-/// Whether a request failure is transient and worth a retry: connect errors,
-/// timeouts (total or initial-response), and HTTP 5xx.
+/// Whether a request failure is transient and worth a retry: connect errors
+/// (including a connect timeout), the streaming initial-response timeout, and
+/// HTTP 5xx. A total timeout is not retried: the connection was up and the
+/// server may still be generating, so a resend repeats the same long wait.
 fn is_transient_error(e: &ApiError) -> bool {
     match e {
         ApiError::InitialResponseTimeout(_) => true,
-        ApiError::Http(e) => {
-            e.is_connect() || e.is_timeout() || e.status().is_some_and(|s| s.is_server_error())
-        }
+        ApiError::Http(e) => e.is_connect() || e.status().is_some_and(|s| s.is_server_error()),
         _ => false,
+    }
+}
+
+/// Turn a total-timeout failure of a non-streaming completion into
+/// [`ApiError::GenerationTimeout`]; other errors pass through.
+fn classify_generation_timeout(e: ApiError, timeout_secs: u64) -> ApiError {
+    match e {
+        ApiError::Http(err) if err.is_timeout() && !err.is_connect() => {
+            ApiError::GenerationTimeout(timeout_secs)
+        }
+        e => e,
     }
 }
 
@@ -1237,7 +1250,13 @@ impl LlmClient {
             initial_response_timeout.as_secs(),
         );
 
-        let client = Client::builder().timeout(timeout).build()?;
+        // The connect phase gets its own, shorter bound so an unreachable host
+        // fails as a connect error (retried, reported as unreachable) instead
+        // of running into the total timeout, which means a slow generation.
+        let client = Client::builder()
+            .timeout(timeout)
+            .connect_timeout(initial_response_timeout.min(timeout))
+            .build()?;
         // Streaming client: connect timeout only, no total body timeout.
         //
         // pool_max_idle_per_host(0): never reuse a pooled keep-alive connection
@@ -1270,6 +1289,7 @@ impl LlmClient {
             temperature,
             max_tokens,
             token_budget,
+            request_timeout: timeout,
             initial_response_timeout,
             supports_vision: OnceCell::new(),
             thinking_control: preset_thinking_control(spec),
@@ -1843,11 +1863,15 @@ impl LlmClient {
         debug!("sending request to {}", inner.endpoint);
         debug!("model={}, temperature={}, max_tokens={}", inner.model, inner.temperature, inner.max_tokens);
 
+        let timeout_secs = inner.request_timeout.as_secs();
         let resp = self
             .build_and_send(content, mode, rephrase_params, thinking_mode, revision, false, capture)
             .await
-            .map_err(|e| self.map_grok_rejection(e))?;
-        let text = resp.text().await?;
+            .map_err(|e| classify_generation_timeout(self.map_grok_rejection(e), timeout_secs))?;
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| classify_generation_timeout(e.into(), timeout_secs))?;
         // Record the raw body before parsing, so even a parse failure exposes it.
         capture.response_raw = Some(text.clone());
         if tracing::enabled!(tracing::Level::DEBUG) {
@@ -2183,6 +2207,46 @@ mod tests {
         assert!(!is_transient_error(&ApiError::EmptyResponse));
         assert!(!is_transient_error(&ApiError::NoUsableContent));
         assert!(!is_transient_error(&ApiError::Cancelled));
+    }
+
+    /// A total-timeout error: the kernel completes the handshake into the
+    /// listener's backlog, so the connection succeeds and no reply ever comes.
+    fn total_timeout_error() -> reqwest::Error {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        client.get(url).send().unwrap_err()
+    }
+
+    /// A connect error: nothing listens on the port.
+    fn connect_error() -> reqwest::Error {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        reqwest::blocking::get(format!("http://127.0.0.1:{port}/")).unwrap_err()
+    }
+
+    #[test]
+    fn total_timeout_is_not_retried_but_connect_failure_is() {
+        let timeout = total_timeout_error();
+        assert!(timeout.is_timeout() && !timeout.is_connect(), "{timeout:?}");
+        assert!(!is_transient_error(&ApiError::Http(timeout)));
+        let connect = connect_error();
+        assert!(connect.is_connect(), "{connect:?}");
+        assert!(is_transient_error(&ApiError::Http(connect)));
+    }
+
+    #[test]
+    fn total_timeout_becomes_generation_timeout() {
+        assert!(matches!(
+            classify_generation_timeout(ApiError::Http(total_timeout_error()), 30),
+            ApiError::GenerationTimeout(30)
+        ));
+        assert!(matches!(
+            classify_generation_timeout(ApiError::Http(connect_error()), 30),
+            ApiError::Http(_)
+        ));
     }
 
     #[test]

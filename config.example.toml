@@ -78,7 +78,7 @@ max_tokens           = 16384   # max output tokens per response (a ceiling when 
                                # max_tokens), so short inputs get a large reply budget and long
                                # inputs shrink it instead of being rejected as "request too large".
 request_timeout_secs = 30      # per-request timeout (also the streaming connect timeout)
-initial_response_timeout_secs = 10  # streaming only: max wait for response headers before retry
+initial_response_timeout_secs = 10  # max wait for streaming response headers before retry; also the non-streaming connect timeout
 
 # Optional telemetry: ship structured logs/traces to a VictoriaLogs instance.
 # Distinct from console (stderr) logging, which is always on (RUST_LOG). This
