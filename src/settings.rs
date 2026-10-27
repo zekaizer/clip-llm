@@ -296,8 +296,18 @@ impl SettingsForm {
         }
     }
 
-    pub fn from_file(_path: &Path, active_model: Option<&str>) -> Result<Self, String> {
-        Ok(Self::from_config(&crate::config::get(), active_model))
+    /// The form for the file at `path` as it is now. A save patches the file,
+    /// so a form from the live snapshot would revert hand edits that were
+    /// never reloaded. A missing file reads as the built-in defaults (a save
+    /// creates it); `Err` is the message for a file that does not load.
+    pub fn from_file(path: &Path, active_model: Option<&str>) -> Result<Self, String> {
+        if matches!(path.try_exists(), Ok(false)) {
+            return Ok(Self::from_config(&Config::default(), active_model));
+        }
+        let config = crate::config::load_file(path).map_err(|reason| {
+            format!("{} could not be loaded ({reason}); fix it by hand first", path.display())
+        })?;
+        Ok(Self::from_config(&config, active_model))
     }
 
     /// Profile names in config order (the panel's model pills).
