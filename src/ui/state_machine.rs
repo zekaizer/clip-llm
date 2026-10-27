@@ -198,6 +198,8 @@ pub enum UiEvent {
     ClipboardError(String),
     /// The config file could not be loaded (startup or tray reload).
     ConfigError(String),
+    /// A `WriteClipboard` effect failed.
+    CopyFailed(String),
     /// User clicked the copy button in the result area.
     UserCopy,
     /// User clicked the paste/replace button in the result area.
@@ -282,6 +284,9 @@ pub struct StateMachine {
     /// Message of a revision that failed, shown over the restored reply until
     /// the next request.
     revision_error: Option<String>,
+    /// Why the shown result could not be written to the clipboard; shown over
+    /// it until the next copy attempt or result.
+    copy_error: Option<String>,
     /// Instruction of the failed revision, handed back once to the adapter.
     failed_instruction: Option<String>,
     /// Accumulated visible streaming text (displayed during Processing).
@@ -327,6 +332,7 @@ impl StateMachine {
             rounds: Vec::new(),
             pending_revision: None,
             revision_error: None,
+            copy_error: None,
             failed_instruction: None,
             streaming_text: String::new(),
             think_started: false,
@@ -445,6 +451,11 @@ impl StateMachine {
         self.revision_error.as_deref()
     }
 
+    /// Why the shown result could not be written to the clipboard.
+    pub fn copy_error(&self) -> Option<&str> {
+        self.copy_error.as_deref()
+    }
+
     /// The instruction of the revision that just failed, handed back once so the
     /// adapter can put it back into the input.
     pub fn take_failed_instruction(&mut self) -> Option<String> {
@@ -527,6 +538,7 @@ impl StateMachine {
             }
             UiEvent::ClipboardError(msg) => self.on_failure(Failure::clipboard(msg)),
             UiEvent::ConfigError(msg) => self.on_failure(Failure::config(msg)),
+            UiEvent::CopyFailed(msg) => self.on_copy_failed(msg),
             UiEvent::UserCopy => self.on_user_copy(),
             UiEvent::UserPaste => self.on_user_paste(),
             UiEvent::UserTogglePin => {
@@ -723,6 +735,7 @@ impl StateMachine {
         self.think_content = think_content.clone();
         self.result_incomplete = incomplete;
         self.revision_error = None;
+        self.copy_error = None;
         if let Some(round) = self.pending_revision.take() {
             self.rounds.push(round);
         }
@@ -785,6 +798,7 @@ impl StateMachine {
         self.retry_notice = None;
         self.think_content = None;
         self.result_incomplete = None;
+        self.copy_error = None;
         self.has_been_focused = false;
         self.is_focused = false;
         self.auto_copy = false;
@@ -864,6 +878,7 @@ impl StateMachine {
         self.think_content = think_content;
         // Cached results carry no truncation state; clear any stale banner.
         self.result_incomplete = None;
+        self.copy_error = None;
         self.state = OverlayState::Result(text.clone());
         let mut effects = Vec::new();
         if self.auto_copy {
@@ -896,8 +911,10 @@ impl StateMachine {
         vec![UiEffect::HideWindow]
     }
 
-    fn on_user_copy(&self) -> Vec<UiEffect> {
+    fn on_user_copy(&mut self) -> Vec<UiEffect> {
         if let OverlayState::Result(text) = &self.state {
+            // A failure of this write sets it again.
+            self.copy_error = None;
             vec![UiEffect::WriteClipboard(text.clone())]
         } else {
             vec![]
@@ -991,6 +1008,7 @@ impl StateMachine {
     fn restore_reply(&mut self, round: RevisionRound) {
         self.think_content = round.think_before;
         self.result_incomplete = None;
+        self.copy_error = None;
         self.state = OverlayState::Result(round.turn.reply_before);
     }
 
@@ -1010,6 +1028,17 @@ impl StateMachine {
         self.pending_revision = None;
         self.revision_error = None;
         self.failed_instruction = None;
+    }
+
+    /// A shown result outlives a failed write of it (a transient clipboard
+    /// lock must not discard a finished generation); without one, the failure
+    /// takes over.
+    fn on_copy_failed(&mut self, msg: String) -> Vec<UiEffect> {
+        if matches!(self.state, OverlayState::Result(_)) {
+            self.copy_error = Some(msg);
+            return vec![];
+        }
+        self.on_failure(Failure::clipboard(msg))
     }
 
     /// A clipboard or config failure, which can take over from any state.
@@ -1768,6 +1797,51 @@ mod tests {
 
         assert_eq!(*sm.state(), OverlayState::Error(Failure::config("Config: reload failed")));
         assert!(effects.contains(&UiEffect::SendCancel), "{effects:?}");
+        assert!(effects.contains(&UiEffect::ShowWindow), "{effects:?}");
+    }
+
+    /// A finished result stays when writing it to the clipboard fails: the
+    /// failure is a banner over it, not an Error that discards the generation.
+    #[test]
+    fn copy_failure_keeps_the_result_with_a_banner() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        let effects = complete(&mut sm, &effects, "done");
+        assert!(effects.contains(&UiEffect::WriteClipboard("done".into())));
+
+        let effects = sm.handle(UiEvent::CopyFailed("Clipboard is busy.".into()));
+
+        assert_eq!(*sm.state(), OverlayState::Result("done".into()));
+        assert_eq!(sm.copy_error(), Some("Clipboard is busy."));
+        assert!(effects.is_empty(), "{effects:?}");
+    }
+
+    /// The banner lasts until the next copy attempt.
+    #[test]
+    fn copy_failure_banner_clears_on_the_next_copy() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        complete(&mut sm, &effects, "done");
+        sm.handle(UiEvent::CopyFailed("Clipboard is busy.".into()));
+
+        let effects = sm.handle(UiEvent::UserCopy);
+
+        assert!(effects.contains(&UiEffect::WriteClipboard("done".into())));
+        assert_eq!(sm.copy_error(), None);
+    }
+
+    /// With no result left on screen (paste closes the overlay before the
+    /// write), a failed write is shown as an Error.
+    #[test]
+    fn copy_failure_without_a_result_is_an_error() {
+        let mut sm = new_sm();
+        let effects = start_processing(&mut sm, "hello");
+        complete(&mut sm, &effects, "done");
+        sm.handle(UiEvent::UserPaste);
+
+        let effects = sm.handle(UiEvent::CopyFailed("Clipboard is busy.".into()));
+
+        assert_eq!(*sm.state(), OverlayState::Error(Failure::clipboard("Clipboard is busy.")));
         assert!(effects.contains(&UiEffect::ShowWindow), "{effects:?}");
     }
 

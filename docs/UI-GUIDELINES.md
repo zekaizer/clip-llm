@@ -112,7 +112,9 @@ styles itself at the call site.
 - **Escape** closes (a dropdown first, in Settings; the revise input first,
   in Result; a revision in flight is cancelled and its reply kept). **Enter**
   runs the primary action in Result. **Cmd/Ctrl+C** copies the whole answer
-  unless a selection exists. **Cmd/Ctrl+S** saves in Settings.
+  unless a selection exists. **Cmd/Ctrl+S** saves in Settings. A result
+  that could not be written to the clipboard stays, with a `WARNING` banner
+  until the next copy attempt.
 - **Revision rounds** (Result): **Tab** or a click focuses the revise input;
   there **Enter** submits a non-empty draft (an empty one does nothing) and
   every other Result shortcut is off while typing. **Cmd/Ctrl+Z** / `↶`
