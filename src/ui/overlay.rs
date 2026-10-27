@@ -407,6 +407,7 @@ fn view_error(
         let label = match failure.kind {
             FailureKind::Request => "\u{2715} Request failed",
             FailureKind::Clipboard => "\u{2715} Clipboard error",
+            FailureKind::Config => "\u{2715} Config error",
         };
         status_row(ui, false, theme::text(label, font::LABEL, color::danger()), None);
     });
@@ -1722,6 +1723,19 @@ mod tests {
         let failure = OverlayState::Error(Failure::request("Cannot reach the server."));
         let texts = settled_texts(&failure, "", Source::default);
         assert!(texts.iter().any(|t| t.contains("Request failed")), "{texts:?}");
+    }
+
+    /// A config file that failed to load is neither a clipboard error nor a
+    /// failed request.
+    #[test]
+    fn a_config_failure_is_named_as_one() {
+        let failure = OverlayState::Error(Failure::config("Config: reload failed (invalid TOML)"));
+        let texts = settled_texts(&failure, "", Source::default);
+        assert!(texts.iter().any(|t| t.contains("Config error")), "{texts:?}");
+        assert!(
+            !texts.iter().any(|t| t.contains("Clipboard error") || t.contains("Request failed")),
+            "{texts:?}"
+        );
     }
 
     /// The debug copy must not look like search: Translate's dictionary
