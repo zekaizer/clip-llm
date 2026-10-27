@@ -91,7 +91,7 @@ pub fn file_url_path(src: &str) -> Option<PathBuf> {
 
 /// Fetch by scheme. `None` for an unsupported scheme, an unreadable file,
 /// a failed or oversized response, or a timeout.
-pub fn fetch_source(src: &str) -> Option<Vec<u8>> {
+pub fn fetch_source(src: &str, _timeout: Duration) -> Option<Vec<u8>> {
     let s = src.trim();
     if has_scheme(s, "data:") {
         data_uri_bytes(s)
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn fetch_dispatches_data_and_file_and_refuses_the_rest() {
-        assert_eq!(fetch_source("data:image/jpeg;base64,/9g="), Some(vec![0xFF, 0xD8]));
+        assert_eq!(fetch_source("data:image/jpeg;base64,/9g=", Duration::from_secs(1)), Some(vec![0xFF, 0xD8]));
         let dir = std::env::temp_dir().join(format!("clip-llm-fetch-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("img one.bin");
@@ -171,10 +171,10 @@ mod tests {
         // file:///C:/dir/x on Windows, file:///dir/x elsewhere.
         let slashed = path.display().to_string().replace('\\', "/").replace(' ', "%20");
         let url = format!("file:///{}", slashed.trim_start_matches('/'));
-        assert_eq!(fetch_source(&url), Some(vec![1, 2, 3]));
-        assert_eq!(fetch_source("file:///definitely/missing/x.png"), None);
-        assert_eq!(fetch_source("ftp://h/a.png"), None);
-        assert_eq!(fetch_source("about:blank"), None);
-        assert_eq!(fetch_source(""), None);
+        assert_eq!(fetch_source(&url, Duration::from_secs(1)), Some(vec![1, 2, 3]));
+        assert_eq!(fetch_source("file:///definitely/missing/x.png", Duration::from_secs(1)), None);
+        assert_eq!(fetch_source("ftp://h/a.png", Duration::from_secs(1)), None);
+        assert_eq!(fetch_source("about:blank", Duration::from_secs(1)), None);
+        assert_eq!(fetch_source("", Duration::from_secs(1)), None);
     }
 }

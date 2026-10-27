@@ -377,9 +377,9 @@ impl ClipboardManager {
                     }
                     // Files first — see read_content.
                     if let Some(paths) = self.file_list() {
-                        return crate::files::ingest_files(&paths);
+                        return crate::files::ingest_files(&paths, cancel);
                     }
-                    let (text, images) = self.read_flavors()?;
+                    let (text, images) = self.read_flavors(cancel)?;
                     if text.is_some() || !images.is_empty() {
                         let content = ClipboardContent { text, images, files: vec![] };
                         info!(
@@ -407,13 +407,13 @@ impl ClipboardManager {
 
     /// Read current clipboard content (text + images).
     /// Returns error if clipboard is completely empty.
-    pub fn read_content(&mut self) -> Result<ClipboardContent, ClipboardError> {
+    pub fn read_content(&mut self, cancel: &AtomicBool) -> Result<ClipboardContent, ClipboardError> {
         // Files first: Finder/Explorer also publish a plain-text flavor holding
         // just the file names, which a text read would mistake for content.
         if let Some(paths) = self.file_list() {
-            return crate::files::ingest_files(&paths);
+            return crate::files::ingest_files(&paths, cancel);
         }
-        let (text, images) = self.read_flavors()?;
+        let (text, images) = self.read_flavors(cancel)?;
         let content = ClipboardContent { text, images, files: vec![] };
         if content.is_empty() {
             return Err(ClipboardError::NoTextInClipboard);
@@ -430,7 +430,7 @@ impl ClipboardManager {
     /// flavor references (a rich-text selection carries its pictures solely
     /// as markup references). An image flavor that fails beside text is
     /// dropped (see [`image_flavor_beside_text`]).
-    fn read_flavors(&mut self) -> Result<(Option<String>, Vec<ImageAttachment>), ClipboardError> {
+    fn read_flavors(&mut self, cancel: &AtomicBool) -> Result<(Option<String>, Vec<ImageAttachment>), ClipboardError> {
         let text = self.board.get_text().ok().filter(|s| !s.trim().is_empty());
         let Some(mut images) = image_flavor_beside_text(&text, read_image_from_board(&mut self.board))? else {
             return Ok((text, vec![]));
@@ -439,7 +439,7 @@ impl ClipboardManager {
             && let Ok(html) = self.board.get().html()
             && !html.trim().is_empty()
         {
-            images = images_from_html(&html, &fetch_source);
+            images = images_from_html(&html, &fetch_source, cancel);
             if !images.is_empty() {
                 info!("html flavor: {} image(s) attached", images.len());
             }
@@ -599,13 +599,13 @@ mod tests {
 
         let mut mgr = ClipboardManager::new().unwrap();
         mgr.board.set().file_list(std::slice::from_ref(&path)).unwrap();
-        let content = mgr.read_content().unwrap();
+        let content = mgr.read_content(&AtomicBool::new(false)).unwrap();
         assert_eq!(content.text.as_deref(), Some("file body\n"));
         assert_eq!(content.files, vec!["from-finder.txt".to_string()]);
 
         // Plain text afterwards must not be mistaken for a stale file list.
         mgr.write_text("plain").unwrap();
-        let content = mgr.read_content().unwrap();
+        let content = mgr.read_content(&AtomicBool::new(false)).unwrap();
         assert_eq!(content.text.as_deref(), Some("plain"));
         assert!(content.files.is_empty());
     }
@@ -628,7 +628,7 @@ mod tests {
 
         let mut mgr = ClipboardManager::new().unwrap();
         mgr.board.set().html(html.as_str(), Some("caption")).unwrap();
-        let content = mgr.read_content().unwrap();
+        let content = mgr.read_content(&AtomicBool::new(false)).unwrap();
         assert_eq!(content.text.as_deref(), Some("caption"));
         assert_eq!(content.images.len(), 1, "{:?}", content.images.iter().map(|i| (i.width, i.height)).collect::<Vec<_>>());
         assert_eq!((content.images[0].width, content.images[0].height), (600, 400));
@@ -742,7 +742,7 @@ mod tests {
         let mut mgr = ClipboardManager::new().unwrap();
         mgr.write_text("   ").unwrap();
         // No image in clipboard either → empty content → error.
-        let result = mgr.read_content();
+        let result = mgr.read_content(&AtomicBool::new(false));
         assert!(matches!(result, Err(ClipboardError::NoTextInClipboard)));
     }
 

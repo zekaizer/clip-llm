@@ -1683,7 +1683,7 @@ impl OverlayApp {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let result = crate::clipboard::guard_capture(|| match ClipboardManager::new() {
-                Ok(mut cm) => cm.read_content(),
+                Ok(mut cm) => cm.read_content(&AtomicBool::new(false)),
                 Err(e) => Err(e),
             });
             let _ = tx.send((seq, result));
