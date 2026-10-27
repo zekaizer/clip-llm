@@ -1339,15 +1339,15 @@ impl OverlayApp {
             // so the copy-debug button would never appear.
             let mut fresh_debug: Option<crate::DebugCapture> = None;
             // A request cancelled just before it completed can still deliver its
-            // Complete/Error here after a newer request has already started (the
-            // state machine gates the *state* transition on this same check, but
-            // the tally and debug snapshot live outside it, in the adapter). Skip
-            // them so a stale request's outcome/debug data never overwrites the
-            // one for the request currently on screen.
+            // Complete/Error here, after a newer request started or a cached
+            // result took over (which keeps the abandoned id current). The tally
+            // and debug snapshot live in the adapter, so they apply the state
+            // machine's own acceptance rule: Processing and the current id.
             let current_request_id = self.sm.current_request_id();
+            let waiting = matches!(self.sm.state(), OverlayState::Processing);
             let event = match response {
                 WorkerResponse::Complete { result, think_content, request_id, incomplete, debug } => {
-                    if request_id == current_request_id {
+                    if waiting && request_id == current_request_id {
                         self.record_request_outcome(true, if incomplete.is_some() { "partial" } else { "ok" });
                         fresh_debug = Some(debug);
                     }
@@ -1359,7 +1359,7 @@ impl OverlayApp {
                     }
                 }
                 WorkerResponse::Error { message, request_id, debug } => {
-                    if request_id == current_request_id {
+                    if waiting && request_id == current_request_id {
                         self.record_request_outcome(false, &tray_last_label(&message));
                         fresh_debug = Some(debug);
                     }
@@ -1904,12 +1904,21 @@ impl OverlayApp {
     }
 
     /// Send a debounced request once its window expires (called every frame).
+    /// The task is dropped unless the state machine is still waiting for it:
+    /// a cached result served meanwhile keeps its id current but leaves
+    /// Processing.
     fn flush_pending_process(&mut self, ctx: &egui::Context) {
         let Some(&(_, deadline)) = self.pending_process.as_ref() else { return };
         let now = std::time::Instant::now();
         if now >= deadline {
             let (task, _) = self.pending_process.take().expect("checked above");
-            self.dispatch_process(task);
+            if task.request_id == self.sm.current_request_id()
+                && matches!(self.sm.state(), OverlayState::Processing)
+            {
+                self.dispatch_process(task);
+            } else {
+                debug!(request_id = task.request_id, "ui: dropping superseded debounced request");
+            }
         } else {
             ctx.request_repaint_after(deadline - now);
         }
