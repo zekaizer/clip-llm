@@ -3,7 +3,7 @@
 //! Fetching is injected, so the pipeline runs in tests without a clipboard
 //! or a network.
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use tracing::{debug, warn};
@@ -41,8 +41,8 @@ pub fn images_from_html(
 fn images_within(
     html: &str,
     fetch: &dyn Fn(&str, Duration) -> Option<Vec<u8>>,
-    _cancel: &AtomicBool,
-    _remaining: &dyn Fn() -> Duration,
+    cancel: &AtomicBool,
+    remaining: &dyn Fn() -> Duration,
 ) -> Vec<ImageAttachment> {
     let refs = img_refs(fragment(html));
     let mut images = Vec::new();
@@ -57,8 +57,17 @@ fn images_within(
             debug!("markup: skip {src}: {why:?}");
             continue;
         }
+        if cancel.load(Ordering::SeqCst) {
+            debug!("markup: capture cancelled; fetching stopped");
+            break;
+        }
+        let left = remaining();
+        if left.is_zero() {
+            debug!("markup: time budget spent; fetching stopped");
+            break;
+        }
         fetched += 1;
-        let Some(bytes) = fetch(&r.src, FETCH_BUDGET) else {
+        let Some(bytes) = fetch(&r.src, left) else {
             debug!("markup: {src}: unavailable");
             continue;
         };
@@ -122,7 +131,6 @@ mod tests {
 
     #[test]
     fn fetching_stops_once_cancelled() {
-        use std::sync::atomic::Ordering;
         let html: String = (0..6).map(|i| format!("<img src=\"i{i}.png\">")).collect();
         let cancel = AtomicBool::new(false);
         let fetched = std::cell::RefCell::new(Vec::new());

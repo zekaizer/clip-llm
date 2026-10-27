@@ -2,7 +2,7 @@
 //! [`ClipboardContent`] the pipeline already understands (text and images).
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracing::{info, warn};
 
@@ -24,7 +24,7 @@ pub const MAX_IMAGE_FILE_BYTES: u64 = 32 * 1024 * 1024;
 /// (PNG, JPEG, GIF, WebP, BMP) become images; any unsupported file fails the whole ingest with
 /// [`ClipboardError::UnsupportedFiles`] so nothing is dropped silently.
 /// `cancel` is checked before each file: [`ClipboardError::Cancelled`].
-pub fn ingest_files(paths: &[PathBuf], _cancel: &AtomicBool) -> Result<ClipboardContent, ClipboardError> {
+pub fn ingest_files(paths: &[PathBuf], cancel: &AtomicBool) -> Result<ClipboardContent, ClipboardError> {
     if paths.is_empty() {
         return Err(ClipboardError::NoTextInClipboard);
     }
@@ -35,6 +35,9 @@ pub fn ingest_files(paths: &[PathBuf], _cancel: &AtomicBool) -> Result<Clipboard
     let mut total_text: u64 = 0;
 
     for path in paths {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(ClipboardError::Cancelled);
+        }
         let name = display_name(path);
         let meta = std::fs::metadata(path).map_err(|e| ClipboardError::FileReadFailed {
             name: name.clone(),
