@@ -1005,6 +1005,14 @@ impl StateMachine {
 
     fn on_clipboard_error(&mut self, msg: String) -> Vec<UiEffect> {
         // Must NOT emit WriteClipboard to avoid infinite recursion.
+        // The error replaces the session's view, so whatever is in flight is
+        // aborted: the request, the capture, or the revision round.
+        let mut effects = match self.state {
+            OverlayState::Processing => vec![UiEffect::SendCancel],
+            OverlayState::Capturing => vec![UiEffect::CancelCapture],
+            _ => vec![],
+        };
+        self.pending_revision = None;
         self.state = OverlayState::Error(Failure::clipboard(msg));
         // Unified auto-hide rule (#62): track focus at entry. The ShowWindow
         // below activates the overlay (capture used ShowWindowNoActivate, so
@@ -1012,7 +1020,8 @@ impl StateMachine {
         // has_been_focused — so the user sees the error, then a FocusLost
         // dismisses it.
         self.has_been_focused = self.is_focused;
-        vec![UiEffect::ResetAreas, UiEffect::ShowWindow]
+        effects.extend([UiEffect::ResetAreas, UiEffect::ShowWindow]);
+        effects
     }
 
     /// Cache key identifying the request that would be sent for the current state.
@@ -1712,6 +1721,54 @@ mod tests {
         assert!(effects.contains(&UiEffect::ResetAreas));
         // Must NOT contain WriteClipboard (avoid recursion).
         assert!(!effects.iter().any(|e| matches!(e, UiEffect::WriteClipboard(_))));
+    }
+
+    /// An error that takes over during Processing ends the session's request:
+    /// left running, it would complete for nothing.
+    #[test]
+    fn clipboard_error_while_processing_cancels_the_request() {
+        let mut sm = new_sm();
+        start_processing(&mut sm, "hello");
+
+        let effects = sm.handle(UiEvent::ClipboardError("reload failed".into()));
+
+        assert!(effects.contains(&UiEffect::SendCancel), "{effects:?}");
+    }
+
+    /// An error that takes over during Capturing aborts the capture before it
+    /// clears the clipboard and simulates the copy.
+    #[test]
+    fn clipboard_error_while_capturing_cancels_the_capture() {
+        let mut sm = new_sm();
+        sm.handle(UiEvent::CaptureStarted { source: CaptureSource::Selection });
+
+        let effects = sm.handle(UiEvent::ClipboardError("reload failed".into()));
+
+        assert!(effects.contains(&UiEffect::CancelCapture), "{effects:?}");
+    }
+
+    /// Nothing is in flight outside Processing/Capturing, so nothing is cancelled.
+    #[test]
+    fn clipboard_error_with_nothing_in_flight_cancels_nothing() {
+        let mut sm = new_sm();
+        let effects = sm.handle(UiEvent::ClipboardError("read failed".into()));
+        assert!(!effects.contains(&UiEffect::SendCancel), "{effects:?}");
+        assert!(!effects.contains(&UiEffect::CancelCapture), "{effects:?}");
+    }
+
+    /// An error during a revision drops the round in flight: a retry from
+    /// the error re-sends the request without it.
+    #[test]
+    fn clipboard_error_during_a_revision_drops_the_round_in_flight() {
+        let mut sm = new_sm();
+        with_pending_revision(&mut sm);
+
+        let effects = sm.handle(UiEvent::ClipboardError("reload failed".into()));
+        assert!(effects.contains(&UiEffect::SendCancel), "{effects:?}");
+        assert!(!sm.revising());
+
+        let effects = sm.handle(UiEvent::UserRetry);
+        assert_eq!(sent_revision(&effects).expect("retry re-sends").len(), 0);
     }
 
     #[test]
