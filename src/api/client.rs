@@ -986,6 +986,13 @@ fn is_transient_error(e: &ApiError) -> bool {
     }
 }
 
+/// Turn a total-timeout failure of a non-streaming completion into
+/// [`ApiError::GenerationTimeout`]; other errors pass through.
+#[allow(dead_code)] // RED stub: wired into `complete` by the fix.
+fn classify_generation_timeout(e: ApiError, _timeout_secs: u64) -> ApiError {
+    e
+}
+
 /// Whether a request failure is an HTTP 429 (rate limited) on the main
 /// completion request. Handled separately from `is_transient_error`: its
 /// retry delay honors the server's `Retry-After` header instead of the fixed
@@ -2183,6 +2190,46 @@ mod tests {
         assert!(!is_transient_error(&ApiError::EmptyResponse));
         assert!(!is_transient_error(&ApiError::NoUsableContent));
         assert!(!is_transient_error(&ApiError::Cancelled));
+    }
+
+    /// A total-timeout error: the kernel completes the handshake into the
+    /// listener's backlog, so the connection succeeds and no reply ever comes.
+    fn total_timeout_error() -> reqwest::Error {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        client.get(url).send().unwrap_err()
+    }
+
+    /// A connect error: nothing listens on the port.
+    fn connect_error() -> reqwest::Error {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        reqwest::blocking::get(format!("http://127.0.0.1:{port}/")).unwrap_err()
+    }
+
+    #[test]
+    fn total_timeout_is_not_retried_but_connect_failure_is() {
+        let timeout = total_timeout_error();
+        assert!(timeout.is_timeout() && !timeout.is_connect(), "{timeout:?}");
+        assert!(!is_transient_error(&ApiError::Http(timeout)));
+        let connect = connect_error();
+        assert!(connect.is_connect(), "{connect:?}");
+        assert!(is_transient_error(&ApiError::Http(connect)));
+    }
+
+    #[test]
+    fn total_timeout_becomes_generation_timeout() {
+        assert!(matches!(
+            classify_generation_timeout(ApiError::Http(total_timeout_error()), 30),
+            ApiError::GenerationTimeout(30)
+        ));
+        assert!(matches!(
+            classify_generation_timeout(ApiError::Http(connect_error()), 30),
+            ApiError::Http(_)
+        ));
     }
 
     #[test]

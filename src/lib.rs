@@ -526,6 +526,9 @@ pub enum ApiError {
     #[error("no response headers within {0}s")]
     InitialResponseTimeout(u64),
 
+    #[error("no complete reply within {0}s")]
+    GenerationTimeout(u64),
+
     #[error("empty response from model")]
     EmptyResponse,
 

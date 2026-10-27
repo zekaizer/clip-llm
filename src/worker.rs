@@ -181,6 +181,7 @@ pub fn friendly_api_error(e: &ApiError) -> String {
         ApiError::InitialResponseTimeout(_) => {
             "The server is slow to respond. Try again in a moment.".to_string()
         }
+        ApiError::GenerationTimeout(_) => String::new(),
         ApiError::EmptyResponse => {
             "The model returned no visible output. Try switching mode or disabling thinking."
                 .to_string()
@@ -1146,6 +1147,15 @@ mod tests {
         assert!(!done);
         assert_eq!(state.usage, Some(usage));
         assert!(rx.try_recv().is_err(), "usage event must not emit a WorkerResponse");
+    }
+
+    #[test]
+    fn generation_timeout_message_names_the_limit_and_remedies() {
+        let msg = friendly_api_error(&ApiError::GenerationTimeout(45));
+        assert!(msg.contains("45"), "{msg}");
+        assert!(msg.contains("request_timeout_secs"), "{msg}");
+        assert!(msg.contains("streaming"), "{msg}");
+        assert!(!msg.contains("Cannot reach"), "{msg}");
     }
 
     // -- friendly_status_message tests --
