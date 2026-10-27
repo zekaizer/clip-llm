@@ -188,28 +188,34 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (resp_tx, resp_rx) = mpsc::channel::<WorkerResponse>();
     // The required api.endpoint/model/api_key have no defaults. When unset, the
     // app cannot run and — since it exits before the tray exists — the user can't
-    // reach Open Config. So write the starter template here, point at it, and
-    // exit so the next launch finds a file to fill in.
+    // reach Open Config. So write the starter template here, point at it in an
+    // alert, and exit so the next launch finds a file to fill in.
     // Model profiles: [api] first, then each [[models]] entry. The first
     // (default) profile must build or the app cannot run; a later one that
     // fails is listed in the tray as unavailable with the reason instead of
     // taking the whole app down.
-    let specs = clip_llm::config::get()
+    let built = clip_llm::config::get()
         .model_specs()
-        .map_err(clip_llm::ApiError::InvalidConfig)?;
-    let profiles = match build_profiles(&specs) {
+        .map_err(clip_llm::ApiError::InvalidConfig)
+        .and_then(|specs| build_profiles(&specs));
+    let profiles = match built {
         Ok(set) => set,
-        Err(e @ clip_llm::ApiError::MissingConfig(_)) => {
-            match clip_llm::config::ensure_config_file() {
-                Some(path) => error!(
-                    "{e}. Wrote a starter config to {} — set the required keys there and relaunch.",
-                    path.display()
-                ),
-                None => error!("{e}"),
+        Err(e) => {
+            let mut message = e.to_string();
+            if matches!(e, clip_llm::ApiError::MissingConfig(_))
+                && let Some(path) = clip_llm::config::ensure_config_file()
+            {
+                message.push_str(&format!("\n\nSet the required keys in {} and relaunch.", path.display()));
             }
+            // An ignored config file is usually why the default profile is
+            // incomplete, so it leads.
+            if let Some(notice) = &startup_notice {
+                message = format!("{notice}\n\n{message}");
+            }
+            error!("{message}");
+            clip_llm::platform::show_startup_alert("clip-llm: no usable model profile", &message);
             return Err(e.into());
         }
-        Err(e) => return Err(e.into()),
     };
     let model_names = profiles.labels();
     let initial_model = profiles.index_of(clip_llm::config::get().ui_default_model());
