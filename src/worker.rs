@@ -1043,6 +1043,70 @@ mod tests {
         ));
     }
 
+    /// Feed `events` through the streaming state machine and finalize it the
+    /// way `run_streaming`'s `[DONE]` arm does; returns the completion sent.
+    fn finish_stream(events: Vec<SseEvent>) -> WorkerResponse {
+        let (tx, rx) = mpsc::channel();
+        let mut state = StreamState::default();
+        for event in events {
+            handle_stream_event(event, &mut state, &tx, 1);
+        }
+        finalize_stream(
+            &mut state, ProcessMode::Translate, 1, "stream complete", None, None,
+            DebugCapture::default(), Instant::now(), &mut Vec::new(), &tx,
+        );
+        rx.try_iter()
+            .find(|r| matches!(r, WorkerResponse::Complete { .. } | WorkerResponse::Error { .. }))
+            .expect("finalize must send a completion")
+    }
+
+    #[test]
+    fn literal_think_tags_in_answer_survive_structured_reasoning() {
+        let answer = "Wrap the plan in <think>…</think> before answering.";
+        let r = finish_stream(vec![
+            SseEvent::Reasoning("the user wants a prompt".into()),
+            SseEvent::Content(answer.into()),
+        ]);
+        assert_eq!(assert_complete(&r, 1), answer);
+        match r {
+            WorkerResponse::Complete { think_content, .. } => {
+                assert_eq!(think_content.as_deref(), Some("the user wants a prompt"));
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn close_think_tag_inside_structured_reasoning_stays_out_of_the_answer() {
+        let r = finish_stream(vec![
+            SseEvent::Reasoning("the </think> tag ends a block".into()),
+            SseEvent::Content("answer".into()),
+        ]);
+        assert_eq!(assert_complete(&r, 1), "answer");
+    }
+
+    #[test]
+    fn leading_inline_think_block_is_stripped_into_the_think_pane() {
+        let r = finish_stream(vec![
+            SseEvent::Content("<think>inline why</think>".into()),
+            SseEvent::Content("\nanswer".into()),
+        ]);
+        match r {
+            WorkerResponse::Complete { result, think_content, .. } => {
+                assert_eq!(result, "answer");
+                assert_eq!(think_content.as_deref(), Some("inline why"));
+            }
+            other => panic!("expected Complete, got {:?}", variant_name(&other)),
+        }
+    }
+
+    #[test]
+    fn make_complete_response_keeps_mid_text_think_tags() {
+        let raw = "Use <thinking>…</thinking> for the scratchpad.";
+        let r = make_complete_response(raw, ProcessMode::Translate, 9, "complete", None, DebugCapture::default());
+        assert_eq!(assert_complete(&r, 9), raw);
+    }
+
     #[test]
     fn handle_stream_event_fatal_terminates_with_reason() {
         let (tx, rx) = mpsc::channel();

@@ -218,8 +218,16 @@ mod tests {
 
     #[test]
     fn multiple_think_blocks() {
+        // Only the leading block is reasoning; a later one is answer text.
         let input = "<think>a</think>hello <think>b</think>world";
-        assert_eq!(strip_think_blocks(input), "hello world");
+        assert_eq!(strip_think_blocks(input), "hello <think>b</think>world");
+    }
+
+    #[test]
+    fn mid_text_think_block_is_content() {
+        let input = "Wrap it as <think>x</think> in the prompt.";
+        assert_eq!(strip_think_blocks(input), input);
+        assert_eq!(extract_first_think_content(input), None);
     }
 
     #[test]
