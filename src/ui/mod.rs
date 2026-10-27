@@ -1339,15 +1339,15 @@ impl OverlayApp {
             // so the copy-debug button would never appear.
             let mut fresh_debug: Option<crate::DebugCapture> = None;
             // A request cancelled just before it completed can still deliver its
-            // Complete/Error here after a newer request has already started (the
-            // state machine gates the *state* transition on this same check, but
-            // the tally and debug snapshot live outside it, in the adapter). Skip
-            // them so a stale request's outcome/debug data never overwrites the
-            // one for the request currently on screen.
+            // Complete/Error here, after a newer request started or a cached
+            // result took over (which keeps the abandoned id current). The tally
+            // and debug snapshot live in the adapter, so they apply the state
+            // machine's own acceptance rule: Processing and the current id.
             let current_request_id = self.sm.current_request_id();
+            let waiting = matches!(self.sm.state(), OverlayState::Processing);
             let event = match response {
                 WorkerResponse::Complete { result, think_content, request_id, incomplete, debug } => {
-                    if request_id == current_request_id {
+                    if waiting && request_id == current_request_id {
                         self.record_request_outcome(true, if incomplete.is_some() { "partial" } else { "ok" });
                         fresh_debug = Some(debug);
                     }
@@ -1359,7 +1359,7 @@ impl OverlayApp {
                     }
                 }
                 WorkerResponse::Error { message, request_id, debug } => {
-                    if request_id == current_request_id {
+                    if waiting && request_id == current_request_id {
                         self.record_request_outcome(false, &tray_last_label(&message));
                         fresh_debug = Some(debug);
                     }
@@ -1904,12 +1904,21 @@ impl OverlayApp {
     }
 
     /// Send a debounced request once its window expires (called every frame).
+    /// The task is dropped unless the state machine is still waiting for it:
+    /// a cached result served meanwhile keeps its id current but leaves
+    /// Processing.
     fn flush_pending_process(&mut self, ctx: &egui::Context) {
         let Some(&(_, deadline)) = self.pending_process.as_ref() else { return };
         let now = std::time::Instant::now();
         if now >= deadline {
             let (task, _) = self.pending_process.take().expect("checked above");
-            self.dispatch_process(task);
+            if task.request_id == self.sm.current_request_id()
+                && matches!(self.sm.state(), OverlayState::Processing)
+            {
+                self.dispatch_process(task);
+            } else {
+                debug!(request_id = task.request_id, "ui: dropping superseded debounced request");
+            }
         } else {
             ctx.request_repaint_after(deadline - now);
         }
@@ -2676,16 +2685,17 @@ mod tests {
 
     // --- poll_responses: stale worker responses must not pollute adapter state ---
 
-    /// Build a minimal `OverlayApp` for adapter-level tests, returning the app
-    /// plus the sender counterpart of its worker-response channel so tests can
-    /// inject `WorkerResponse`s as if the worker thread had sent them.
+    /// Build a minimal `OverlayApp` for adapter-level tests, returning the app,
+    /// the sender counterpart of its worker-response channel so tests can
+    /// inject `WorkerResponse`s as if the worker thread had sent them, and the
+    /// receiver of the commands it sends the worker.
     ///
     /// Constructing a real `ClipboardManager` opens a handle onto the actual
     /// system clipboard, shared process-wide with `clipboard::tests` — callers
     /// must hold `crate::clipboard::test_support::lock_clipboard()` for the
     /// duration of the test to avoid racing those.
-    fn new_test_app() -> (OverlayApp, mpsc::Sender<WorkerResponse>) {
-        let (cmd_tx, _cmd_rx) = tokio_mpsc::unbounded_channel();
+    fn new_test_app() -> (OverlayApp, mpsc::Sender<WorkerResponse>, tokio_mpsc::UnboundedReceiver<WorkerCommand>) {
+        let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel();
         let (resp_tx, resp_rx) = mpsc::channel();
         let (_tap_tx, tap_rx) = mpsc::channel();
         let clipboard = ClipboardManager::new().expect("clipboard manager");
@@ -2708,7 +2718,7 @@ mod tests {
         };
         #[cfg(not(feature = "diagnostics"))]
         let app = OverlayApp::new(cmd_tx, resp_rx, clipboard, tap_rx, modifier_state);
-        (app, resp_tx)
+        (app, resp_tx, cmd_rx)
     }
 
     /// A request cancelled just before its (late) `Complete` arrives must not
@@ -2718,7 +2728,7 @@ mod tests {
     #[test]
     fn poll_responses_ignores_stale_completion_tally_and_debug() {
         let _lock = crate::clipboard::test_support::lock_clipboard();
-        let (mut app, resp_tx) = new_test_app();
+        let (mut app, resp_tx, _cmd_rx) = new_test_app();
         let ctx = egui::Context::default();
 
         // Start request 1 (Processing), then cancel it (state machine keeps
@@ -2762,7 +2772,7 @@ mod tests {
     #[test]
     fn poll_responses_ignores_stale_error_tally_and_debug() {
         let _lock = crate::clipboard::test_support::lock_clipboard();
-        let (mut app, resp_tx) = new_test_app();
+        let (mut app, resp_tx, _cmd_rx) = new_test_app();
         let ctx = egui::Context::default();
 
         app.sm.handle(UiEvent::ContentReady {
@@ -2801,7 +2811,7 @@ mod tests {
     #[test]
     fn poll_responses_records_current_completion_tally_and_debug() {
         let _lock = crate::clipboard::test_support::lock_clipboard();
-        let (mut app, resp_tx) = new_test_app();
+        let (mut app, resp_tx, _cmd_rx) = new_test_app();
         let ctx = egui::Context::default();
 
         app.sm.handle(UiEvent::ContentReady {
@@ -2827,6 +2837,95 @@ mod tests {
         assert_eq!(app.req_ok, 1);
         assert_eq!(app.req_err, 0);
         assert!(app.last_debug.is_some(), "current completion's debug snapshot must surface");
+    }
+
+    /// A tab switch to a cached result keeps the abandoned request's id
+    /// current. That request's completion can still arrive; it must not be
+    /// tallied or have its debug snapshot shown under the cached result.
+    #[test]
+    fn poll_responses_ignores_completion_after_a_cached_result_took_over() {
+        let _lock = crate::clipboard::test_support::lock_clipboard();
+        let (mut app, resp_tx, _cmd_rx) = new_test_app();
+        let ctx = egui::Context::default();
+
+        app.sm_handle(UiEvent::UserSwitchMode(crate::ProcessMode::Translate));
+        app.sm_handle(UiEvent::ContentReady {
+            content: crate::ClipboardContent::text_only("text".into()),
+            auto_copy: false,
+        });
+        let first_id = app.sm.current_request_id();
+        app.sm_handle(UiEvent::WorkerResult {
+            text: "cached".into(),
+            think_content: None,
+            request_id: first_id,
+            incomplete: None,
+        });
+        app.sm_handle(UiEvent::UserSwitchMode(crate::ProcessMode::Summarize));
+        let abandoned_id = app.sm.current_request_id();
+        app.sm_handle(UiEvent::UserSwitchMode(crate::ProcessMode::Translate));
+        assert_eq!(*app.sm.state(), OverlayState::Result("cached".into()));
+
+        resp_tx
+            .send(WorkerResponse::Complete {
+                result: "abandoned answer".into(),
+                think_content: None,
+                request_id: abandoned_id,
+                incomplete: None,
+                debug: crate::DebugCapture {
+                    endpoint: Some("http://abandoned".into()),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        app.poll_responses(&ctx);
+
+        assert_eq!(app.req_ok, 0, "an abandoned request must not be tallied");
+        assert!(app.last_debug.is_none(), "an abandoned request's debug snapshot must not surface");
+    }
+
+    /// Sweeping the Rephrase pills back to a cached style before the debounce
+    /// expires must not send the parked request: the cached result is already
+    /// shown, so it would be a wasted round-trip (#22).
+    #[test]
+    fn parked_request_is_dropped_when_a_cached_result_replaces_it() {
+        let _lock = crate::clipboard::test_support::lock_clipboard();
+        let (mut app, _resp_tx, mut cmd_rx) = new_test_app();
+        let ctx = egui::Context::default();
+
+        app.sm_handle(UiEvent::UserSwitchMode(crate::ProcessMode::Rephrase));
+        app.sm_handle(UiEvent::ContentReady {
+            content: crate::ClipboardContent::text_only("text".into()),
+            auto_copy: false,
+        });
+        let cached_style = app.sm.rephrase_params().style;
+        let first_id = app.sm.current_request_id();
+        app.sm_handle(UiEvent::WorkerResult {
+            text: "cached".into(),
+            think_content: None,
+            request_id: first_id,
+            incomplete: None,
+        });
+        let other_style = if cached_style == crate::RephraseStyle::Casual {
+            crate::RephraseStyle::Formal
+        } else {
+            crate::RephraseStyle::Casual
+        };
+
+        app.handle_overlay_action(&ctx, overlay::OverlayAction::ChangeRephraseStyle(other_style));
+        assert!(app.pending_process.is_some(), "a cache miss parks its request");
+        app.handle_overlay_action(&ctx, overlay::OverlayAction::ChangeRephraseStyle(cached_style));
+        assert_eq!(*app.sm.state(), OverlayState::Result("cached".into()));
+
+        if let Some((_, deadline)) = app.pending_process.as_mut() {
+            *deadline = std::time::Instant::now();
+        }
+        app.flush_pending_process(&ctx);
+
+        let mut dispatched = false;
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            dispatched |= matches!(cmd, WorkerCommand::Process(_));
+        }
+        assert!(!dispatched, "the parked request must not reach the worker");
     }
 
     #[test]
@@ -3008,7 +3107,7 @@ mod tests {
     #[test]
     fn resize_action_sets_the_size_and_anchors_the_top_left() {
         let _lock = crate::clipboard::test_support::lock_clipboard();
-        let (mut app, _resp_tx) = new_test_app();
+        let (mut app, _resp_tx, _cmd_rx) = new_test_app();
         let ctx = egui::Context::default();
 
         app.sm_handle(UiEvent::ContentReady {
@@ -3039,7 +3138,7 @@ mod tests {
     #[test]
     fn a_settled_frame_drops_the_resize_anchor() {
         let _lock = crate::clipboard::test_support::lock_clipboard();
-        let (mut app, _resp_tx) = new_test_app();
+        let (mut app, _resp_tx, _cmd_rx) = new_test_app();
         let ctx = egui::Context::default();
 
         app.sm_handle(UiEvent::ContentReady {
@@ -3062,7 +3161,7 @@ mod tests {
     #[test]
     fn reset_size_restores_the_default_panel() {
         let _lock = crate::clipboard::test_support::lock_clipboard();
-        let (mut app, _resp_tx) = new_test_app();
+        let (mut app, _resp_tx, _cmd_rx) = new_test_app();
         let ctx = egui::Context::default();
         app.sm_handle(UiEvent::ContentReady {
             content: crate::ClipboardContent::text_only("only".into()),
@@ -3084,7 +3183,7 @@ mod tests {
     #[test]
     fn open_settings_over_a_result_keeps_the_window_visible() {
         let _lock = crate::clipboard::test_support::lock_clipboard();
-        let (mut app, resp_tx) = new_test_app();
+        let (mut app, resp_tx, _cmd_rx) = new_test_app();
         let ctx = egui::Context::default();
         app.sm_handle(UiEvent::ContentReady {
             content: crate::ClipboardContent::text_only("only".into()),
@@ -3121,7 +3220,7 @@ mod tests {
     #[test]
     fn reopening_settings_is_not_a_no_op() {
         let _lock = crate::clipboard::test_support::lock_clipboard();
-        let (mut app, _resp_tx) = new_test_app();
+        let (mut app, _resp_tx, _cmd_rx) = new_test_app();
         let ctx = egui::Context::default();
         app.open_settings(&ctx);
         assert!(app.settings.is_some());
@@ -3139,7 +3238,7 @@ mod tests {
     #[test]
     fn remembered_placement_anchors_the_stored_position() {
         let _lock = crate::clipboard::test_support::lock_clipboard();
-        let (mut app, _resp_tx) = new_test_app();
+        let (mut app, _resp_tx, _cmd_rx) = new_test_app();
         app.spawn_position = Some(egui::pos2(900.0, 900.0));
         let win = egui::vec2(552.0, 420.0);
 
@@ -3181,7 +3280,7 @@ mod tests {
     #[test]
     fn closing_settings_notes_the_window_position() {
         let _lock = crate::clipboard::test_support::lock_clipboard();
-        let (mut app, _resp_tx) = new_test_app();
+        let (mut app, _resp_tx, _cmd_rx) = new_test_app();
         let ctx = egui::Context::default();
         app.settings_pos = None;
         let mut raw = egui::RawInput::default();
@@ -3202,7 +3301,7 @@ mod tests {
     #[test]
     fn zoom_change_resends_the_window_size() {
         let _lock = crate::clipboard::test_support::lock_clipboard();
-        let (mut app, _resp_tx) = new_test_app();
+        let (mut app, _resp_tx, _cmd_rx) = new_test_app();
         let ctx = egui::Context::default();
         let win = app.window_size();
         let inner_sizes = |full: &egui::FullOutput| {
